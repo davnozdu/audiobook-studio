@@ -1,0 +1,2 @@
+silero-stress==1.5
+torch>=2.2,<3

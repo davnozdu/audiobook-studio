@@ -1,0 +1,57 @@
+name: macOS ARM app
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: macos-15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Ensure Apple Silicon runner
+        run: test "$(uname -m)" = arm64
+      - name: Unit tests
+        run: python3 -m unittest discover -s tests -v
+      - name: Build dependencies
+        run: brew install ffmpeg
+      - name: Version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          else
+            echo "VERSION=0.1.0" >> "$GITHUB_ENV"
+          fi
+          echo "BUILD_NUMBER=$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
+      - name: Build standalone app
+        run: bash scripts/package.sh
+      - name: Sign update archive and feed
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          test -n "$SPARKLE_PRIVATE_KEY"
+          KEY_FILE="$RUNNER_TEMP/sparkle.key"
+          umask 077
+          printf '%s' "$SPARKLE_PRIVATE_KEY" > "$KEY_FILE"
+          SPARKLE_KEY_FILE="$KEY_FILE" python3 scripts/appcast.py
+          rm "$KEY_FILE"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AudiobookStudio-arm64
+          path: |
+            dist/*.zip
+            dist/appcast.xml
+          compression-level: 0
+          retention-days: 14
+      - name: Publish tagged release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/*.zip dist/appcast.xml --title "Audiobook Studio $VERSION" --generate-notes

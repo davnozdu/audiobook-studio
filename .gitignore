@@ -1,0 +1,13 @@
+.build-tools/
+dist/
+.private/
+__pycache__/
+*.pyc
+.DS_Store
+.venv*/
+results/
+models/
+*.epub
+*.m4b
+.env*
+!backend/engine/resources/*
