@@ -153,5 +153,18 @@ class RoleEditorTests(unittest.TestCase):
             worker.apply_role_edits(manifest, source, {manifest['segments'][0]['id']: 'invented'})
 
 
+class BundledMusicTests(unittest.TestCase):
+    def test_complete_catalog_and_audio_integrity(self):
+        resources = ROOT / 'backend/engine/resources'
+        tracks = json.loads((resources / 'music_catalog.json').read_text())
+        self.assertEqual(len(tracks), 7)
+        self.assertEqual(len({track['filename'] for track in tracks}), 7)
+        for track in tracks:
+            with self.subTest(track=track['filename']):
+                audio = (resources / track['filename']).read_bytes()
+                self.assertEqual(len(audio), track['size'])
+                self.assertEqual(hashlib.sha256(audio).hexdigest(), track['sha256'])
+
+
 if __name__ == '__main__':
     unittest.main()

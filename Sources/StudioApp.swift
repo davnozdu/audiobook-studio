@@ -4,11 +4,82 @@ import Foundation
 import Sparkle
 import UniformTypeIdentifiers
 import AVFoundation
+import Darwin
+
+@MainActor final class AppLifecycle: NSObject, NSApplicationDelegate {
+    static weak var studio: Studio?
+    private var lockFD: Int32 = -1
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        let identifier = Bundle.main.bundleIdentifier ?? "com.davnozdu.audiobook-studio"
+        let folder = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Audiobook Studio")
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        lockFD = Darwin.open(folder.appendingPathComponent(identifier + ".lock").path, O_CREAT | O_RDWR, 0o600)
+        if lockFD >= 0 && flock(lockFD, LOCK_EX | LOCK_NB) != 0 {
+            NSRunningApplication.runningApplications(withBundleIdentifier: identifier)
+                .first(where: { $0.processIdentifier != getpid() })?.activate(options: [.activateAllWindows])
+            NSApplication.shared.terminate(nil)
+        }
+    }
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let studio = Self.studio else { return .terminateNow }
+        return studio.shutdown() ? .terminateLater : .terminateNow
+    }
+    func applicationWillTerminate(_ notification: Notification) {
+        Self.studio?.removeMenuBar()
+        if lockFD >= 0 { Darwin.close(lockFD); lockFD = -1 }
+    }
+}
+
+struct MusicTrack: Codable, Identifiable {
+    var filename: String
+    var title: String
+    var id: String { filename }
+}
+
+@MainActor final class QuietUpdateDriver: SPUStandardUserDriver {
+    var report: ((String) -> Void)?
+    override func showUpdaterError(_ error: Error, acknowledgement: @escaping () -> Void) {
+        report?("Не удалось проверить обновления: " + error.localizedDescription)
+        acknowledgement()
+    }
+    override func showUpdateNotFoundWithError(_ error: Error, acknowledgement: @escaping () -> Void) {
+        report?("Установлена актуальная версия")
+        acknowledgement()
+    }
+    override func showUserInitiatedUpdateCheck(cancellation: @escaping () -> Void) {
+        report?("Проверяем обновления…")
+    }
+}
+
+@MainActor final class UpdateController: NSObject, SPUUpdaterDelegate {
+    private let driver = QuietUpdateDriver(hostBundle: .main, delegate: nil)
+    lazy var updater = SPUUpdater(hostBundle: .main, applicationBundle: .main, userDriver: driver, delegate: self)
+    var report: ((String) -> Void)? { didSet { driver.report = report } }
+    private var started = false
+    func start() {
+        guard !started else { return }
+        do { try updater.start(); started = true }
+        catch { report?("Проверка обновлений недоступна: " + error.localizedDescription) }
+    }
+    func checkForUpdates(_ sender: Any?) {
+        start()
+        if started && updater.canCheckForUpdates { updater.checkForUpdates() }
+    }
+    func updater(_ updater: SPUUpdater, didAbortWithError error: Error) {
+        report?("Проверка обновлений: " + error.localizedDescription)
+    }
+    func updaterDidNotFindUpdate(_ updater: SPUUpdater) { report?("Установлена актуальная версия") }
+    func updaterShouldPromptForPermissionToCheck(forUpdates updater: SPUUpdater) -> Bool { false }
+}
 
 final class MenuBarController: NSObject {
     var item: NSStatusItem?
     var open: (() -> Void)?
     var cancel: (() -> Void)?
+    func remove() {
+        if let item { NSStatusBar.system.removeStatusItem(item) }
+        item = nil
+    }
     func update(visible: Bool, status: String, busy: Bool) {
         if !visible {
             if let item { NSStatusBar.system.removeStatusItem(item) }
@@ -28,10 +99,14 @@ final class MenuBarController: NSObject {
             let stop = NSMenuItem(title: "Остановить сборку", action: #selector(stopJob), keyEquivalent: "")
             stop.target = self; menu.addItem(stop)
         }
+        menu.addItem(.separator())
+        let quit = NSMenuItem(title: "Завершить Audiobook Studio", action: #selector(quitApp), keyEquivalent: "q")
+        quit.target = self; menu.addItem(quit)
         item?.menu = menu
     }
     @objc func openWindow() { open?() }
     @objc func stopJob() { cancel?() }
+    @objc func quitApp() { NSApplication.shared.terminate(nil) }
 }
 
 struct RoleSegment: Identifiable {
@@ -87,10 +162,17 @@ struct Character: Identifiable {
     @Published var cloudStress = false
     @Published var musicEnabled = true
     @Published var music = ""
+    @Published var bundledMusic = "Lamplight_and_Paper.mp3"
+    let musicTracks: [MusicTrack] = {
+        guard let url = Bundle.main.resourceURL?.appendingPathComponent("backend/engine/resources/music_catalog.json"),
+              let data = try? Data(contentsOf: url), let tracks = try? JSONDecoder().decode([MusicTrack].self, from: data) else { return [] }
+        return tracks
+    }()
     @Published var musicVolume = 5.0
     @Published var settings = false
     @Published var dirty = false
     @Published var showLog = false
+    @Published var updateStatus = ""
     @Published var segments: [RoleSegment] = []
     @Published var roleSearch = ""
     @Published var reviewOnly = true
@@ -119,18 +201,25 @@ struct Character: Identifiable {
     private var process: Process?
     private var pending: (() -> Void)?
     private var cancelling = false
+    private var shuttingDown = false
     private var receivedError = false
     private var buffer = Data()
-    let updater = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+    let updater = UpdateController()
 
     init() {
+        AppLifecycle.studio = self
         menuBar.open = { [weak self] in self?.showWindow() }
         menuBar.cancel = { [weak self] in self?.cancel() }
+        updater.report = { [weak self] message in
+            self?.updateStatus = message
+            self?.appendLog(message)
+        }
         DispatchQueue.main.async {
             if let path = Bundle.main.path(forResource: "AppIcon", ofType: "icns"), let image = NSImage(contentsOfFile: path) {
                 NSApplication.shared.applicationIconImage = image
             }
             self.updatePresence()
+            self.updater.start()
         }
     }
 
@@ -140,7 +229,7 @@ struct Character: Identifiable {
         updateMenuBar()
     }
 
-    func updateMenuBar() { menuBar.update(visible: showMenuBar, status: status, busy: busy) }
+    func updateMenuBar() { menuBar.update(visible: showMenuBar && !shuttingDown, status: status, busy: busy) }
 
     func showWindow() {
         NSApplication.shared.activate(ignoringOtherApps: true)
@@ -216,7 +305,8 @@ struct Character: Identifiable {
         ["action": action, "book": book, "project": project, "output": output,
          "runtime": runtime.path, "python": python, "key": key, "model": model,
          "web_search": webSearch, "cloud_stress": cloudStress,
-         "music": music, "music_enabled": musicEnabled, "music_volume": musicVolume]
+         "music": music.isEmpty ? resources.appendingPathComponent("backend/engine/resources/" + bundledMusic).path : music,
+         "music_enabled": musicEnabled, "music_volume": musicVolume]
     }
 
     func prepare() { launch(request("prepare")) }
@@ -366,6 +456,7 @@ struct Character: Identifiable {
                 self.consume(rest)
                 self.busy = false; self.process = nil; self.childPID = 0; self.updateMenuBar()
                 let next = self.pending; self.pending = nil
+                if self.shuttingDown { return }
                 if self.cancelling { self.status = "Операция остановлена"; return }
                 if process.terminationStatus != 0 {
                     if !self.receivedError { self.error = "Движок завершился с ошибкой. См. журнал." }
@@ -417,7 +508,29 @@ struct Character: Identifiable {
     func appendLog(_ text: String) { log = String((log + text + "\n").suffix(24000)) }
     func cancel() {
         cancelling = true; pending = nil
-        if let p = process { kill(-p.processIdentifier, SIGTERM); p.terminate() }
+        stopProcessGroup()
+    }
+    func stopProcessGroup() {
+        guard let p = process, p.isRunning else { return }
+        let pid = p.processIdentifier
+        kill(-pid, SIGTERM); p.terminate()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            // The worker owns a dedicated process group including model and FFmpeg children.
+            if kill(-pid, 0) == 0 { kill(-pid, SIGKILL) }
+            if p.isRunning { p.interrupt(); kill(pid, SIGKILL) }
+        }
+    }
+    func removeMenuBar() { menuBar.remove() }
+    func shutdown() -> Bool {
+        shuttingDown = true; cancelling = true; pending = nil
+        audioPlayer?.stop(); audioPlayer = nil
+        removeMenuBar()
+        guard process?.isRunning == true else { return false }
+        stopProcessGroup()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) {
+            NSApplication.shared.reply(toApplicationShouldTerminate: true)
+        }
+        return true
     }
 }
 
@@ -644,7 +757,11 @@ struct ContentView: View {
                                 }
                                 HStack {
                                     VStack(alignment: .leading, spacing: 3) {
-                                        Text(studio.music.isEmpty ? "Свет лампы и страницы" : URL(fileURLWithPath: studio.music).lastPathComponent).font(.subheadline.weight(.semibold))
+                                        Picker("Композиция", selection: $studio.bundledMusic) {
+                                            ForEach(studio.musicTracks) { track in Text(track.title).tag(track.filename) }
+                                        }.labelsHidden().frame(minWidth: 240)
+                                            .onChange(of: studio.bundledMusic) { studio.music = "" }
+                                        if !studio.music.isEmpty { Text(URL(fileURLWithPath: studio.music).lastPathComponent).font(.subheadline.weight(.semibold)) }
                                         Text("Зацикливается до конца книги").font(.caption).foregroundStyle(.secondary)
                                     }
                                     Spacer()
@@ -679,11 +796,11 @@ struct ContentView: View {
                         if studio.busy { Button("Остановить") { studio.cancel() } }
                     }
                     HStack {
-                        Text("Приоритет").font(.caption).foregroundStyle(.secondary)
+                        Text("Приоритет").font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: true, vertical: false)
                         Picker("Приоритет", selection: $studio.backgroundPriority) {
                             Text("Обычный").tag(false)
                             Text("Фоновый").tag(true)
-                        }.pickerStyle(.segmented).frame(width: 220)
+                        }.pickerStyle(.segmented).labelsHidden().frame(width: 220)
                         Spacer()
                     }
                     if studio.busy {
@@ -692,6 +809,9 @@ struct ContentView: View {
                     }
                     HStack {
                         Button(studio.showLog ? "Скрыть журнал" : "Журнал") { studio.showLog.toggle() }
+                        if !studio.updateStatus.isEmpty {
+                            Text(studio.updateStatus).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail).help(studio.updateStatus)
+                        }
                         Spacer()
                         if !studio.project.isEmpty {
                             Button("Папка проекта", systemImage: "folder") { NSWorkspace.shared.open(URL(fileURLWithPath: studio.project)) }
@@ -777,6 +897,7 @@ struct SettingsView: View {
             Text("Снижает приоритет CPU и ввода-вывода. GPU и память продолжают использоваться моделью.").font(.caption).foregroundStyle(.secondary)
             Divider()
             Text("Обновления").font(.headline)
+            if !studio.updateStatus.isEmpty { Text(studio.updateStatus).font(.caption).foregroundStyle(.secondary) }
             Toggle("Автоматически проверять обновления", isOn: Binding(get: { studio.updater.updater.automaticallyChecksForUpdates }, set: { studio.updater.updater.automaticallyChecksForUpdates = $0 }))
             Button("Проверить обновления…") { studio.updater.checkForUpdates(nil) }
             HStack { Spacer(); Button("Готово") { studio.settings = false }.buttonStyle(.borderedProminent) }
@@ -786,6 +907,7 @@ struct SettingsView: View {
 }
 
 @main struct StudioApp: App {
+    @NSApplicationDelegateAdaptor(AppLifecycle.self) private var lifecycle
     @StateObject private var studio = Studio()
     var body: some Scene {
         WindowGroup { ContentView(studio: studio).tint(.indigo) }
