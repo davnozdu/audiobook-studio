@@ -217,7 +217,7 @@ struct Character: Identifiable {
         didSet { UserDefaults.standard.set(bundledMusic, forKey: "bundledMusic") }
     }
     let musicTracks: [MusicTrack] = {
-        guard let url = Bundle.main.resourceURL?.appendingPathComponent("backend/engine/resources/music_catalog.json"),
+        guard let url = Bundle.main.resourceURL?.appendingPathComponent("engine/resources/music_catalog.json"),
               let data = try? Data(contentsOf: url), let tracks = try? JSONDecoder().decode([MusicTrack].self, from: data) else { return [] }
         return tracks
     }()
@@ -332,7 +332,7 @@ struct Character: Identifiable {
     }
 
     var resources: URL { Bundle.main.resourceURL! }
-    var python: String { resources.appendingPathComponent("runtime/python/bin/python3").path }
+    var engine: URL { Bundle.main.executableURL!.deletingLastPathComponent().appendingPathComponent("StudioEngine") }
     var runtime: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Audiobook Studio/Engine")
@@ -410,9 +410,10 @@ struct Character: Identifiable {
 
     func request(_ action: String) -> [String: Any] {
         ["action": action, "book": book, "project": project, "output": output,
-         "runtime": runtime.path, "python": python, "key": key, "model": model,
+         "runtime": runtime.path, "resources": resources.appendingPathComponent("engine").path,
+         "ffmpeg": resources.appendingPathComponent("runtime/bin/ffmpeg").path, "ffprobe": resources.appendingPathComponent("runtime/bin/ffprobe").path, "key": key, "model": model,
          "web_search": webSearch, "cloud_stress": cloudStress,
-         "music": music.isEmpty ? resources.appendingPathComponent("backend/engine/resources/" + bundledMusic).path : music,
+         "music": music.isEmpty ? resources.appendingPathComponent("engine/resources/" + bundledMusic).path : music,
          "music_enabled": musicEnabled, "music_volume": musicVolume]
     }
 
@@ -458,7 +459,7 @@ struct Character: Identifiable {
     func chooseBuildDestination() -> String? {
         let panel = NSSavePanel()
         panel.title = "Куда сохранить аудиокнигу?"
-        panel.message = "Будет создана папка с двумя файлами: book.m4b и book-read-along.epub. Укажите имя папки и место сохранения."
+        panel.message = "Будет создана папка с двумя файлами: audiobook.m4b и audiobook.epub. Укажите имя папки и место сохранения."
         panel.prompt = "Создать папку и собрать"
         panel.canCreateDirectories = true
         panel.directoryURL = URL(fileURLWithPath: UserDefaults.standard.string(forKey: "buildOutputFolder") ?? output)
@@ -578,16 +579,13 @@ struct Character: Identifiable {
         fraction = 0; speed = nil; eta = nil; completed = ""; buffer = Data()
         status = "Подготовка…"
         let p = Process(), input = Pipe(), output = Pipe(), errors = Pipe()
-        p.executableURL = URL(fileURLWithPath: python)
+        p.executableURL = engine
         p.qualityOfService = .userInitiated
-        p.arguments = ["-s", "-B", "-u", resources.appendingPathComponent("backend/worker.py").path]
+        p.arguments = []
         var env = ProcessInfo.processInfo.environment
         env.removeValue(forKey: "OLLAMA_API_KEY")
-        for name in ["PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE"] { env.removeValue(forKey: name) }
-        env["PYTHONNOUSERSITE"] = "1"
         env["AUDIOBOOK_FFMPEG"] = resources.appendingPathComponent("runtime/bin/ffmpeg").path
         env["AUDIOBOOK_FFPROBE"] = resources.appendingPathComponent("runtime/bin/ffprobe").path
-        env["PYTHONDONTWRITEBYTECODE"] = "1"
         p.environment = env; p.standardInput = input; p.standardOutput = output; p.standardError = errors
         output.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData

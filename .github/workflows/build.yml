@@ -18,8 +18,14 @@ jobs:
       - uses: actions/checkout@v4
       - name: Ensure Apple Silicon runner
         run: test "$(uname -m)" = arm64
+      - name: Select Swift 6.2 or newer
+        run: |
+          XCODE_PATH=$(find /Applications -maxdepth 1 -name "Xcode_*.app" | sort -V | tail -1)
+          echo "DEVELOPER_DIR=$XCODE_PATH/Contents/Developer" >> "$GITHUB_ENV"
       - name: Unit tests
-        run: python3 -m unittest discover -s tests -v
+        run: |
+          python3 -m unittest discover -s tests -v
+          STUDIO_CORE_ONLY=1 swift test --package-path native
       - name: Build dependencies
         run: brew install ffmpeg
       - name: Version

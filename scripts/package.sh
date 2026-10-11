@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
-VERSION="${VERSION:-0.1.0}"
+VERSION="${VERSION:-0.5.0}"
 BUILD_NUMBER="${BUILD_NUMBER:-1}"
 APP="dist/Audiobook Studio.app"
 SPARKLE_VERSION=2.9.6
@@ -11,30 +11,44 @@ if [ ! -f .build-tools/Sparkle.framework/Sparkle ]; then
   echo '52bf9e88cdd972fc0c81501377a880e90d47031bd8ca5462488f843e2609e192  .build-tools/sparkle.tar.xz' | shasum -a 256 -c -
   tar -xf .build-tools/sparkle.tar.xz -C .build-tools
 fi
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks" "$APP/Contents/Resources"
+# Always create a clean app: no interpreter or stale Python resources from earlier versions.
+rm -rf "$APP"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks" "$APP/Contents/Resources/engine/resources" "$APP/Contents/Resources/licenses"
 bash scripts/icon.sh
 cp assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 swiftc -O -swift-version 5 -target arm64-apple-macosx14.0 -parse-as-library Sources/StudioApp.swift -F .build-tools -framework Sparkle -Xlinker -rpath -Xlinker @executable_path/../Frameworks -o "$APP/Contents/MacOS/AudiobookStudio"
 ditto .build-tools/Sparkle.framework "$APP/Contents/Frameworks/Sparkle.framework"
-ditto backend "$APP/Contents/Resources/backend"
-mkdir -p "$APP/Contents/Resources/runtime"
-if [ ! -x "$APP/Contents/Resources/runtime/python/bin/python3" ]; then
-  curl -fL --retry 3 'https://github.com/astral-sh/python-build-standalone/releases/download/20261009/cpython-3.11.17%2B20261009-aarch64-apple-darwin-install_only.tar.gz' -o .build-tools/python.tar.gz
-  tar -xf .build-tools/python.tar.gz -C "$APP/Contents/Resources/runtime"
-fi
-# Resolve and install all dependencies on the build runner, including when reusing a build directory.
-"$APP/Contents/Resources/runtime/python/bin/python3" -m pip install -r backend/engine/requirements.txt -r backend/engine/requirements-stress.txt
-if [ ! -x "$APP/Contents/Resources/runtime/bin/ffmpeg" ]; then
-  python3 scripts/vendor_ffmpeg.py "$APP/Contents/Resources/runtime/bin"
-fi
-DICTIONARY="$APP/Contents/Resources/backend/engine/resources/russian_accents_full.sacc"
-if [ ! -f "$DICTIONARY" ]; then
-  curl -fL --retry 3 https://github.com/davnozdu/supertonic-dictionaries/releases/download/russian-v1.1/russian_accents_full.sacc -o "$DICTIONARY"
-fi
+xcodebuild -downloadComponent MetalToolchain
+(cd native && xcodebuild build -scheme StudioEngine -configuration Release -destination "platform=macOS,arch=arm64" -derivedDataPath ../.build-tools/native-build MACOSX_DEPLOYMENT_TARGET=14.0 CODE_SIGNING_ALLOWED=NO) > .build-tools/native-build.log 2>&1 || { tail -100 .build-tools/native-build.log; exit 1; }
+NATIVE_BIN=".build-tools/native-build/Build/Products/Release"
+cp "$NATIVE_BIN/StudioEngine" "$APP/Contents/MacOS/StudioEngine"
+# SwiftPM resource bundles contain MLX Metal kernels; loaders locate them beside the executable.
+for bundle in "$NATIVE_BIN"/*.bundle; do
+  [ ! -d "$bundle" ] || ditto "$bundle" "$APP/Contents/MacOS/$(basename "$bundle")"
+done
+cp backend/engine/{design_model_files.json,stress_model_files.json,supertonic_rules.json} "$APP/Contents/Resources/engine/"
+cp backend/engine/resources/*.{json,mp3} "$APP/Contents/Resources/engine/resources/"
+python3 scripts/vendor_ffmpeg.py "$APP/Contents/Resources/runtime/bin"
+# Python is exclusively a build tool. Export offline Silero weights and link a C++ executable to libtorch.
+if [ ! -x .build-tools/stress-export/bin/python3 ]; then python3 -m venv .build-tools/stress-export; fi
+BUILD_PY=.build-tools/stress-export/bin/python3
+"$BUILD_PY" -m pip install 'torch==2.14.1' 'silero-stress==1.5'
+"$BUILD_PY" scripts/export_native_stress.py "$APP/Contents/Resources/engine/silero"
+TORCH_ROOT="$("$BUILD_PY" -c 'import pathlib,torch;print(pathlib.Path(torch.__file__).parent)')"
+clang++ -O2 -std=c++20 -mmacosx-version-min=14.0 -arch arm64 native/stress/StudioStress.mm -I "$TORCH_ROOT/include" -I "$TORCH_ROOT/include/torch/csrc/api/include" -L "$TORCH_ROOT/lib" -ltorch -ltorch_cpu -lc10 -framework Foundation -Wl,-rpath,@executable_path/../Frameworks/torch -o "$APP/Contents/MacOS/StudioStress"
+python3 scripts/vendor_torch.py "$TORCH_ROOT/lib" "$APP/Contents/Frameworks/torch"
+cp "$TORCH_ROOT/../torch-"*.dist-info/licenses/LICENSE "$APP/Contents/Resources/licenses/PyTorch.txt"
+cp backend/engine/THIRD_PARTY.md "$APP/Contents/Resources/licenses/THIRD_PARTY.md"
+for dependency in .build-tools/native-build/SourcePackages/checkouts/*; do
+  for license in "$dependency"/LICENSE "$dependency"/LICENSE.md "$dependency"/LICENSE.txt; do
+    if [ -f "$license" ]; then cp "$license" "$APP/Contents/Resources/licenses/$(basename "$dependency").txt"; break; fi
+  done
+done
+DICTIONARY="$APP/Contents/Resources/engine/resources/russian_accents_full.sacc"
+curl -fL --retry 3 https://github.com/davnozdu/supertonic-dictionaries/releases/download/russian-v1.1/russian_accents_full.sacc -o "$DICTIONARY"
 echo "a1ac32606e99f6d8ab8e8ce796b0005b0693908555460656976c54e171658b27  $DICTIONARY" | shasum -a 256 -c -
 export VERSION BUILD_NUMBER APP
 python3 scripts/plist.py
-# Sign Mach-O dependencies first, then the app; no Apple account needed for test builds.
 python3 scripts/sign_bundle.py "$APP"
 codesign --verify --deep --strict "$APP"
 python3 scripts/check_bundle.py "$APP"

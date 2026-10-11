@@ -11,3 +11,6 @@ models/
 *.m4b
 .env*
 !backend/engine/resources/*
+
+native/.build/
+native/.swiftpm/
