@@ -3,6 +3,38 @@ import XCTest
 @testable import StudioCore
 
 final class CoreTests: XCTestCase {
+  func testEveryVoiceDetailInvalidatesDirection() throws {
+    let profile: Object = [
+      "age": "Пожилой, 70 лет", "personality": "Сдержанный",
+      "habits": "Длинные паузы", "speaking_style": "Медленно, тихо",
+      "voice_description": "Low resonant baritone",
+    ]
+    var voice: Object = ["voice_gender": "male", "character_profile": profile]
+    voice["tts_instruction"] =
+      "Elderly male, low resonant baritone, slow restrained delivery and thoughtful pauses."
+    voice["tts_profile_sha256"] = try VoiceDirection.signature(voice)
+    XCTAssertNotNil(try VoiceDirection.cached(voice))
+    for field in VoiceDirection.fields {
+      XCTAssertEqual(
+        NativeIO.string(VoiceDirection.input(voice)[field]), NativeIO.string(profile[field]))
+      var edited = voice
+      var changed = profile
+      changed[field] = NativeIO.string(profile[field]) + " Новое уточнение"
+      edited["character_profile"] = changed
+      XCTAssertNil(try VoiceDirection.cached(edited), field)
+    }
+    voice["voice_gender"] = "female"
+    XCTAssertNil(try VoiceDirection.cached(voice))
+  }
+
+  func testSpeechDirectionRequiresEnglish() throws {
+    XCTAssertTrue(
+      VoiceDirection.validEnglish("Soft mature female contralto, gentle unhurried delivery."))
+    XCTAssertFalse(VoiceDirection.validEnglish("Тихий взрослый женский голос, неторопливая речь."))
+    XCTAssertFalse(VoiceDirection.validEnglish("Soft female voice, неторопливая речь."))
+    XCTAssertFalse(VoiceDirection.validEnglish(""))
+  }
+
   let fm = FileManager.default
   var rules: URL {
     URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()

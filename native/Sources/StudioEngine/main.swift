@@ -220,19 +220,14 @@ final class Engine {
     return (url, text)
   }
   func instruction(_ voice: Object) -> String {
-    let age = NativeIO.string(voice["age"]).lowercased()
-    let child = ["child", "boy", "girl", "реб", "мальчик", "девочка"].contains { age.contains($0) }
-    let female = NativeIO.string(voice["voice_gender"]) == "female"
-    return
-      (child
-      ? (female ? "Young girl, feminine child voice. " : "Young boy, masculine child voice. ")
-      : (female ? "Clearly female feminine voice. " : "Clearly male masculine voice. "))
-      + NativeIO.string(voice["voice_description"])
-      + " Speak natural Russian with clear intelligible diction. Single consistent speaker. Read every word exactly. No singing, laughter, whispers or sound effects."
+    NativeIO.string(voice["tts_instruction"])
   }
   func generate(
     _ model: Qwen3TTSModel, text: String, description: String?, reference: (URL, String)?, seed: Int
   ) async throws -> [Float] {
+    if reference == nil, !VoiceDirection.validEnglish(description ?? "") {
+      throw StudioError("Не подготовлена английская инструкция голоса")
+    }
     MLXRandom.seed(UInt64(max(0, seed)))
     let ref: MLXArray?
     if let reference {
@@ -257,7 +252,7 @@ final class Engine {
     var reference: (URL, String)?
     let character = NativeIO.string(request["character"])
     if !character.isEmpty {
-      let (manifest, _) = try NativeProject.verify(project)
+      var (manifest, _) = try NativeProject.verify(project)
       text = try NativeProject.excerpt(manifest, character: character)
       guard
         let voice = NativeIO.objects(manifest["voices"]).first(where: {
@@ -265,9 +260,20 @@ final class Engine {
         })
       else { throw StudioError("Неизвестный персонаж") }
       reference = try custom(voice)
-      description = instruction(voice)
+      if reference == nil {
+        let directed = try await NativeDirector(request).directVoice(voice)
+        manifest["voices"] = NativeIO.objects(manifest["voices"]).map {
+          NativeIO.string($0["id"]) == character ? directed : $0
+        }
+        try writeManifest(manifest, at: project)
+        description = instruction(directed)
+      }
     } else if !NativeIO.object(request["casting"]).isEmpty {
-      description = instruction(NativeIO.object(request["casting"]))
+      description = instruction(
+        try await NativeDirector(request).directVoice(NativeIO.object(request["casting"])))
+    } else {
+      description = instruction(
+        try await NativeDirector(request).directVoice(["voice_description": description]))
     }
     guard (20...1000).contains(text.count), (10...4000).contains(description.count) else {
       throw StudioError("Задайте текст 20–1000 знаков и описание голоса")
@@ -307,9 +313,16 @@ final class Engine {
       try writeManifest(manifest, at: project)
     }
     let basePath = try models.ensure(design: false)
-    let voices = NativeIO.objects(manifest["voices"])
+    var voices = NativeIO.objects(manifest["voices"])
     let segments = NativeIO.objects(manifest["segments"])
     let used = Set(segments.map { NativeIO.string($0["speaker"]) })
+    for i in voices.indices where used.contains(NativeIO.string(voices[i]["id"])) {
+      if try custom(voices[i]) == nil {
+        voices[i] = try await director.directVoice(voices[i])
+      }
+    }
+    manifest["voices"] = voices
+    try writeManifest(manifest, at: project)
     let designNeeded = try voices.contains { voice in
       guard used.contains(NativeIO.string(voice["id"])) else { return false }
       return try custom(voice) == nil

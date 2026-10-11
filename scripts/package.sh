@@ -20,7 +20,8 @@ swiftc -O -swift-version 5 -target arm64-apple-macosx14.0 -parse-as-library Sour
 ditto .build-tools/Sparkle.framework "$APP/Contents/Frameworks/Sparkle.framework"
 xcodebuild -downloadComponent MetalToolchain
 (cd native && xcodebuild -list -json) > .build-tools/native-schemes.json
-NATIVE_SCHEME="$(python3 -c 'import json; d=json.load(open(".build-tools/native-schemes.json")); s=(d.get("workspace") or d.get("project"))["schemes"]; print("StudioEngine" if "StudioEngine" in s else next(x for x in s if x.endswith("-Package")))')"
+cat .build-tools/native-schemes.json
+NATIVE_SCHEME="$(python3 -c 'import json; d=json.load(open(".build-tools/native-schemes.json")); s=(d.get("workspace") or d.get("project"))["schemes"]; print(next(x for x in ["StudioEngine", "StudioNative", "native", "StudioNative-Package", "native-Package"] if x in s))')"
 (cd native && xcodebuild build -scheme "$NATIVE_SCHEME" -configuration Release -destination "platform=macOS,arch=arm64" -derivedDataPath ../.build-tools/native-build MACOSX_DEPLOYMENT_TARGET=14.0 CODE_SIGNING_ALLOWED=NO) > .build-tools/native-build.log 2>&1 || { tail -100 .build-tools/native-build.log; exit 1; }
 NATIVE_BIN=".build-tools/native-build/Build/Products/Release"
 cp "$NATIVE_BIN/StudioEngine" "$APP/Contents/MacOS/StudioEngine"
