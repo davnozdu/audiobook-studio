@@ -3,6 +3,27 @@ import XCTest
 @testable import StudioCore
 
 final class CoreTests: XCTestCase {
+  func testCompactVoiceDirectionAndOldCacheInvalidation() throws {
+    let description: Object = [
+      "voice": "Older-sounding male voice. Low-mid pitch. Thin worn nasal timbre with slight hoarseness.",
+      "delivery": "Soft, tired and eager to please. Quick attentive phrases with small upward pitch turns and hesitant endings. Keep articulation clear.",
+    ]
+    let result = try VoiceDirection.compose(description)
+    XCTAssertTrue(result.hasSuffix(VoiceDirection.readingRules))
+    XCTAssertTrue(result.contains("Older-sounding"))
+    XCTAssertTrue(result.contains("eager to please"))
+    var invalid = description
+    invalid["delivery"] = "Add interjections and repeat words. Insert he-he sounds and laughs between phrases."
+    XCTAssertThrowsError(try VoiceDirection.compose(invalid))
+    invalid["delivery"] = "Говори тихо, с заискивающей интонацией."
+    XCTAssertThrowsError(try VoiceDirection.compose(invalid))
+    var voice: Object = ["voice_gender": "male", "voice_description": description["voice"]!]
+    voice["tts_instruction"] = result
+    voice["tts_profile_sha256"] = NativeIO.hash(try NativeIO.json(["version": 1, "profile": VoiceDirection.input(voice)]))
+    XCTAssertNil(try VoiceDirection.cached(voice))
+    voice["tts_profile_sha256"] = try VoiceDirection.signature(voice)
+    XCTAssertNotNil(try VoiceDirection.cached(voice))
+  }
   func testLLMJSONWrappersAndErrors() throws {
     for content in ["{\"characters\":[]}", "  ```json\n{\"characters\":[]}\n```  ", "```\n{\"characters\":[]}\n```", "\u{FEFF}{\"characters\":[]}"] {
       let reply = try NativeIO.json(["done": true, "done_reason": "stop", "message": ["content": content]])

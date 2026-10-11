@@ -497,6 +497,10 @@ final class Engine {
   {
     var base: Qwen3TTSModel?
     var conditioning: [String: Qwen3TTSModel.Qwen3TTSReferenceConditioning] = [:]
+    // Upstream caches by ObjectIdentifier(refAudio), without retaining refAudio.
+    // Retain each input so another character cannot reuse its object address.
+    var referenceArrays: [String: MLXArray] = [:]
+    defer { withExtendedLifetime(referenceArrays) {} }
     var referenceHashes: [String: String] = [:]
     for (id, ref) in references {
       referenceHashes[id] = try NativeIO.hashFile(ref.0)
@@ -539,8 +543,10 @@ final class Engine {
         if conditioning[speaker] == nil {
           NativeIO.stage("Подготовка голоса для озвучки · " + speaker)
           let (_, array) = try loadAudioArray(from: reference.0, sampleRate: 24000)
+          referenceArrays[speaker] = array
           conditioning[speaker] = try base.prepareReferenceConditioning(
             refAudio: array, refText: reference.1, language: "Russian")
+          NativeIO.emit("log", ["message": "Образец для озвучки [\(speaker)] · SHA256 " + (referenceHashes[speaker] ?? "")])
         }
         guard let ref = conditioning[speaker] else { throw StudioError("Не подготовлен голос " + speaker) }
         NativeIO.stage("Озвучивание · \(i+1)/\(rows.count) · " + speaker)
