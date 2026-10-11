@@ -59,6 +59,7 @@ curl -fL --retry 3 https://github.com/davnozdu/supertonic-dictionaries/releases/
 echo "a1ac32606e99f6d8ab8e8ce796b0005b0693908555460656976c54e171658b27  $DICTIONARY" | shasum -a 256 -c -
 export VERSION BUILD_NUMBER APP
 python3 scripts/plist.py
+xattr -cr "$APP"
 python3 scripts/sign_bundle.py "$APP"
 codesign --verify --deep --strict "$APP"
 python3 scripts/check_bundle.py "$APP"

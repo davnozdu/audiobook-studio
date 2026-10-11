@@ -3,6 +3,24 @@ import XCTest
 @testable import StudioCore
 
 final class CoreTests: XCTestCase {
+  func testNarratorEditsSurviveReanalysis() async throws {
+    let voice: Object = [
+      "id": "narrator", "name": "Рассказчик", "voice_gender": "female",
+      "voice_description": "Calm mature female contralto",
+      "character_profile": [
+        "id": "narrator", "age": "75 лет", "habits": "Длинные паузы",
+        "speaking_style": "", "voice_description": "Quiet female contralto",
+      ],
+    ]
+    let updated = try await NativeDirector([:]).characterize(
+      ["voices": [voice], "segments": []], source: ["paragraphs": []])
+    let profile = NativeIO.object(NativeIO.objects(updated["voices"])[0]["character_profile"])
+    XCTAssertEqual(NativeIO.string(profile["age"]), "75 лет")
+    XCTAssertEqual(NativeIO.string(profile["habits"]), "Длинные паузы")
+    XCTAssertEqual(NativeIO.string(profile["voice_description"]), "Quiet female contralto")
+    XCTAssertFalse(NativeIO.string(profile["speaking_style"]).isEmpty)
+  }
+
   func testEveryVoiceDetailInvalidatesDirection() throws {
     let profile: Object = [
       "age": "Пожилой, 70 лет", "personality": "Сдержанный",

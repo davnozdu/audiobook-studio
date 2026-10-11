@@ -426,9 +426,11 @@ struct Character: Identifiable {
         if project.isEmpty {
             var r = request("prepare"); r["automatic"] = true
             launch(r, after: { self.build(destination: destination) })
-        } else if segments.contains(where: { $0.speaker.isEmpty }) || characters.contains(where: { $0.personality.isEmpty || $0.habits.isEmpty || $0.speakingStyle.isEmpty }) {
-            var r = request("characters"); r["automatic"] = true
-            launch(r, after: { self.build(destination: destination) })
+        } else if segments.contains(where: { $0.speaker.isEmpty }) || characters.contains(where: { $0.age.isEmpty || $0.voice.isEmpty || $0.personality.isEmpty || $0.habits.isEmpty || $0.speakingStyle.isEmpty }) {
+            saveThen {
+                var r = self.request("characters"); r["automatic"] = true
+                self.launch(r, after: { self.build(destination: destination) })
+            }
         } else { build(destination: destination) }
     }
     func analyze() { saveThen { self.launch(self.request("characters")) } }

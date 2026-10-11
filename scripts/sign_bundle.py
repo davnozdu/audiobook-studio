@@ -10,5 +10,5 @@ for path in app.rglob('*'):
     with path.open('rb') as handle:
         if handle.read(4) not in magic:
             continue
-    subprocess.run(['codesign', '--force', '--sign', '-', str(path)], check=True, capture_output=True)
+    subprocess.run(['codesign', '--force', '--sign', '-', str(path)], check=True)
 subprocess.run(['codesign', '--force', '--deep', '--sign', '-', str(app)], check=True)

@@ -109,9 +109,7 @@ final class Engine {
         })
       else { throw StudioError("Нет карточки персонажа") }
       for field in ["age", "personality", "habits", "speaking_style", "voice_description"] {
-        guard
-          !NativeIO.string(profile[field]).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        else { throw StudioError("Заполните поле " + field) }
+        guard profile[field] is String else { throw StudioError("Некорректное поле " + field) }
       }
       voices[i]["character_profile"] = profile
       voices[i]["age"] = profile["age"]

@@ -283,10 +283,23 @@ public final class NativeDirector {
         Double(index) / Double(voices.count))
       var profile: Object
       if id == "narrator" || id == "other_voices" {
+        let previous = NativeIO.object(voices[index]["character_profile"])
         profile = Self.narrator(voices[index])
+        for (field, value) in previous where field != "id" {
+          if let text = value as? String,
+            text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+          {
+            continue
+          }
+          profile[field] = value
+        }
         if id == "other_voices" {
           profile["certainty"] = "low"
-          profile["voice_description"] = voices[index]["voice_description"]
+          if NativeIO.string(previous["voice_description"]).isEmpty,
+            !NativeIO.string(voices[index]["voice_description"]).isEmpty
+          {
+            profile["voice_description"] = voices[index]["voice_description"]
+          }
         }
       } else {
         let own = Set(
