@@ -23,6 +23,18 @@ final class CoreTests: XCTestCase {
     try Data(repeating: 0, count: payload.count).write(to: target)
     _ = try model.ensure(design: false)
     XCTAssertEqual(try Data(contentsOf: target), payload)
+    let validation = root.appendingPathComponent("model-validation.json")
+    let before = try Data(contentsOf: validation)
+    _ = try model.ensure(design: false)
+    XCTAssertEqual(try Data(contentsOf: validation), before)
+    // Same-length edits must invalidate verification, even if mtime is restored.
+    let attributes = try fm.attributesOfItem(atPath: target.path)
+    let identity = try model.fileIdentity(target, size: payload.count, sha: NativeIO.hash(payload))
+    try Data(repeating: 0, count: payload.count).write(to: target)
+    try fm.setAttributes([.modificationDate: attributes[.modificationDate]!], ofItemAtPath: target.path)
+    XCTAssertNotEqual(try model.fileIdentity(target, size: payload.count, sha: NativeIO.hash(payload)), identity)
+    _ = try model.ensure(design: false)
+    XCTAssertEqual(try Data(contentsOf: target), payload)
     // A valid cache is accepted without downloading or reading the legacy location.
     try fm.removeItem(at: old)
     _ = try model.ensure(design: false)

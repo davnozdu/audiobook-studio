@@ -39,6 +39,13 @@ enum CredentialStore {
     }
 }
 
+final class PlaybackCompletion: NSObject, AVAudioPlayerDelegate {
+    var finished: (() -> Void)?
+    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        DispatchQueue.main.async { self.finished?() }
+    }
+}
+
 @MainActor final class AppLifecycle: NSObject, NSApplicationDelegate {
     static weak var studio: Studio?
     private var lockFD: Int32 = -1
@@ -314,6 +321,7 @@ struct Character: Identifiable {
     private let menuBar = MenuBarController()
     private var childPID: Int32 = 0
     private var audioPlayer: AVAudioPlayer?
+    private var playbackCompletion: PlaybackCompletion?
     private var playingAudio = ""
     private var process: Process?
     private var pending: (() -> Void)?
@@ -431,7 +439,7 @@ struct Character: Identifiable {
         }
     }
     private func clearProject() {
-        audioPlayer?.stop(); audioPlayer = nil; playingAudio = ""
+        audioPlayer?.stop(); audioPlayer = nil; playbackCompletion = nil; playingAudio = ""
         book = ""; project = ""; characters = []; segments = []; selected = nil
         dirty = false; rolesDirty = false; roleSearch = ""
         previewByCharacter = [:]; generatedSample = ""; generatedText = ""; generatedDescription = ""
@@ -657,7 +665,10 @@ struct Character: Identifiable {
     }
 
     func playAudio(_ path: String) {
-        if playingAudio == path, audioPlayer?.isPlaying == true { audioPlayer?.stop(); return }
+        if playingAudio == path, audioPlayer?.isPlaying == true {
+            audioPlayer?.stop(); audioPlayer = nil; playbackCompletion = nil; playingAudio = ""
+            status = "Воспроизведение остановлено"; return
+        }
         do {
             audioPlayer?.stop()
             audioPlayer = try AVAudioPlayer(contentsOf: URL(fileURLWithPath: path))
@@ -665,6 +676,13 @@ struct Character: Identifiable {
             guard let player = audioPlayer, player.prepareToPlay(), player.play() else {
                 throw NSError(domain: "AudiobookStudio.Audio", code: 1, userInfo: [NSLocalizedDescriptionKey: "Аудиоустройство не начало воспроизведение"])
             }
+            let completion = PlaybackCompletion()
+            completion.finished = { [weak self, weak player] in
+                guard let self, let player, self.audioPlayer === player else { return }
+                self.audioPlayer = nil; self.playbackCompletion = nil; self.playingAudio = ""
+                if !self.busy { self.status = "Образец прослушан · аудиобуфер освобождён" }
+            }
+            playbackCompletion = completion; player.delegate = completion
             status = "Воспроизведение образца · \(Int(ceil(player.duration))) секунд"
             appendLog("Воспроизведение образца: " + URL(fileURLWithPath: path).lastPathComponent)
         } catch { self.error = "Не удалось воспроизвести образец: \(error.localizedDescription)"; status = self.error!; appendLog(status) }
@@ -730,6 +748,7 @@ struct Character: Identifiable {
             DispatchQueue.main.async {
                 self.consume(rest)
                 self.busy = false; self.process = nil; self.childPID = 0; self.updateMenuBar()
+                self.appendLog("Движок завершён · память моделей и GPU освобождена")
                 let next = self.pending; self.pending = nil
                 if self.shuttingDown { return }
                 if let continuation = self.afterStop {
@@ -826,7 +845,7 @@ struct Character: Identifiable {
     func shutdown() -> Bool {
         credentialSave?.cancel(); saveCredential()
         shuttingDown = true; cancelling = true; pending = nil
-        audioPlayer?.stop(); audioPlayer = nil
+        audioPlayer?.stop(); audioPlayer = nil; playbackCompletion = nil
         removeMenuBar()
         guard process?.isRunning == true else { return false }
         stopProcessGroup()
@@ -983,7 +1002,7 @@ struct ContentView: View {
                                     Image(systemName: "books.vertical.fill").font(.system(size: 34)).foregroundStyle(.indigo)
                                     VStack(alignment: .leading, spacing: 4) {
                                         Text(studio.book.isEmpty ? "Выберите вашу историю" : URL(fileURLWithPath: studio.book).deletingPathExtension().lastPathComponent).font(.title2.bold())
-                                        Text("EPUB · оригинальный текст и структура книги сохраняются").foregroundStyle(.secondary)
+                                        Text("EPUB · многоголосная озвучка и синхронное чтение").foregroundStyle(.secondary)
                                     }
                                     Spacer()
                                     Button("Выбрать книгу…") { studio.chooseBook() }

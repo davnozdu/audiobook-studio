@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 public struct NativeModels {
   public let root: URL, resources: URL
@@ -15,16 +16,33 @@ public struct NativeModels {
     let files = NativeIO.objects(spec["files"])
     let target = root.appendingPathComponent("models/" + name)
     let total = files.reduce(0) { $0 + ($1["size"] as? Int ?? 0) }
+    let validationURL = root.appendingPathComponent("model-validation.json")
+    var validations = (try? NativeIO.load(validationURL)) ?? [:]
+    func record(_ path: URL, key: String, size: Int, sha: String) {
+      guard let identity = try? fileIdentity(path, size: size, sha: sha) else { return }
+      validations[key] = identity
+      try? NativeIO.write(validationURL, validations)
+    }
+    func valid(_ path: URL, key: String, size: Int, sha: String) -> Bool {
+      guard let before = try? fileIdentity(path, size: size, sha: sha) else { return false }
+      if NativeIO.string(validations[key]) == before { return true }
+      guard (try? validate(path, size: size, sha: sha)) != nil,
+        let after = try? fileIdentity(path, size: size, sha: sha), before == after
+      else { return false }
+      record(path, key: key, size: size, sha: sha)
+      return true
+    }
     var done = 0
     for item in files {
       let relative = NativeIO.string(item["path"])
       let size = item["size"] as? Int ?? 0
       let sha = NativeIO.string(item["sha256"])
+      let key = name + "/" + relative
       let path = target.appendingPathComponent(relative)
       NativeIO.stage(
         "Проверка модели · " + name + " · " + relative, Double(done) / Double(max(1, total)))
       if FileManager.default.fileExists(atPath: path.path) {
-        if (try? validate(path, size: size, sha: sha)) != nil {
+        if valid(path, key: key, size: size, sha: sha) {
           done += size
           continue
         }
@@ -36,9 +54,10 @@ public struct NativeModels {
       try FileManager.default.createDirectory(
         at: path.deletingLastPathComponent(), withIntermediateDirectories: true)
       if FileManager.default.fileExists(atPath: old.path),
-        (try? validate(old, size: size, sha: sha)) != nil
+        valid(old, key: "legacy/" + key, size: size, sha: sha)
       {
         try FileManager.default.copyItem(at: old, to: path)
+        record(path, key: key, size: size, sha: sha)
         done += size
         continue
       }
@@ -49,9 +68,21 @@ public struct NativeModels {
       try download(remote, to: partial, size: size, sha: sha, done: done, total: total,
         design: design, relative: relative)
       try FileManager.default.moveItem(at: partial, to: path)
+      record(path, key: key, size: size, sha: sha)
       done += size
     }
     return target
+  }
+  func fileIdentity(_ path: URL, size: Int, sha: String) throws -> String {
+    var info = stat()
+    guard fstatat(AT_FDCWD, path.path, &info, 0) == 0, info.st_size == size else {
+      throw StudioError("Файл модели отсутствует или изменён")
+    }
+    // ctime detects replacement or edits even when mtime was preserved.
+    let identity = "v1|\(info.st_dev)|\(info.st_ino)|\(info.st_size)|"
+      + "\(info.st_mtimespec.tv_sec):\(info.st_mtimespec.tv_nsec)|"
+      + "\(info.st_ctimespec.tv_sec):\(info.st_ctimespec.tv_nsec)|\(sha)"
+    return NativeIO.hash(Data(identity.utf8))
   }
   private func download(_ remote: String, to partial: URL, size: Int, sha: String,
     done: Int, total: Int, design: Bool, relative: String) throws

@@ -23,6 +23,9 @@ import StudioCore
         throw StudioError("В приложении отсутствуют нативные Metal-ядра")
       }
       GPU.metallib = library
+      // Keep reusable buffers during synthesis, with a bounded idle buffer pool.
+      Memory.cacheLimit = Int(min(UInt64(1024 * 1024 * 1024),
+        max(UInt64(256 * 1024 * 1024), ProcessInfo.processInfo.physicalMemory / 32)))
       if CommandLine.arguments.contains("--self-check") {
         let resources = URL(fileURLWithPath: CommandLine.arguments.last!)
         let helper = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
@@ -264,6 +267,7 @@ final class Engine {
     var text = NativeIO.string(request["text"])
     var description = NativeIO.string(request["description"])
     var reference: (URL, String)?
+    var profileSignature = "", referenceHash = ""
     let character = NativeIO.string(request["character"])
     if !character.isEmpty {
       var (manifest, _) = try NativeProject.verify(project)
@@ -281,6 +285,9 @@ final class Engine {
         }
         try writeManifest(manifest, at: project)
         description = instruction(directed)
+        profileSignature = try VoiceDirection.signature(directed)
+      } else {
+        referenceHash = NativeIO.string(NativeIO.object(voice["custom_reference"])["sha256"])
       }
     } else if !NativeIO.object(request["casting"]).isEmpty {
       description = instruction(
@@ -294,22 +301,37 @@ final class Engine {
     else {
       throw StudioError("Задайте текст 20–1000 знаков и описание голоса")
     }
+    let seed = request["seed"] as? Int ?? 17001
+    let signature = NativeIO.hash(try NativeIO.json([
+      "version": 1, "text": text, "profile": profileSignature,
+      "instruction": reference == nil ? description : "", "reference": referenceHash, "seed": seed,
+    ]))
+    let file = character.isEmpty
+      ? root.deletingLastPathComponent().appendingPathComponent("VoiceLab/" + UUID().uuidString + "/sample.wav")
+      : project.appendingPathComponent("preview-samples/" + character + ".wav")
+    let meta = file.deletingPathExtension().appendingPathExtension("json")
+    if !character.isEmpty, let old = try? NativeIO.load(meta),
+      NativeIO.string(old["signature"]) == signature,
+      let hash = try? NativeIO.hashFile(file), hash == NativeIO.string(old["sha256"])
+    {
+      NativeIO.emit("sample", ["path": file.path, "text": text, "description": description, "character": character])
+      done("Сохранённая проба готова · без загрузки модели и повторной генерации")
+      return
+    }
     NativeIO.stage("Проверка модели · проба выбранного голоса")
     let path = try models.ensure(design: reference == nil)
     NativeIO.stage("Загрузка модели в память · нативный MLX")
-    let model = try await Qwen3TTSModel.fromModelDirectory(path)
-    NativeIO.stage("Генерация пробы · \(text.count) знаков собственных реплик · примерно 10 секунд")
     NativeIO.emit(
       "log", ["message": "Текст пробы [\(character.isEmpty ? "генератор":character)]: " + text])
-    let samples = try await generate(
-      model, text: text, description: reference == nil ? description : nil, reference: reference,
-      seed: request["seed"] as? Int ?? 17001)
-    let file = root.deletingLastPathComponent().appendingPathComponent(
-      "VoiceLab/" + UUID().uuidString + "/sample.wav")
+    let samples = try await previewSamples(at: path, text: text,
+      description: reference == nil ? description : nil, reference: reference,
+      seed: seed)
+    Memory.clearCache()
+    memoryLog("Модель пробы выгружена")
     try NativeWAV.write(file, samples)
     try NativeIO.write(
-      file.deletingPathExtension().appendingPathExtension("json"),
-      ["text": text, "description": description, "character": character])
+      meta, ["text": text, "description": description, "character": character,
+        "signature": signature, "sha256": try NativeIO.hashFile(file)])
     NativeIO.emit(
       "sample",
       ["path": file.path, "text": text, "description": description, "character": character])
@@ -433,6 +455,57 @@ final class Engine {
     }
     design = nil
     Memory.clearCache()
+    memoryLog("VoiceDesign выгружен")
+    let (timeline, frames) = try await synthesize(rows: rows, voices: voices,
+      references: references, basePath: basePath)
+    Memory.clearCache()
+    memoryLog("Модель чтения выгружена перед нормализацией и упаковкой")
+    let raw = project.appendingPathComponent("audio")
+    try NativeIO.write(raw.appendingPathComponent("timeline.json"), ["segments": timeline])
+    NativeIO.stage("Нормализация громкости по ролям")
+    var final = try audio.normalize(project: project, segments: rows, timeline: timeline)
+    if request["music_enabled"] as? Bool ?? true {
+      let selected = URL(fileURLWithPath: NativeIO.string(request["music"]))
+      guard fm.fileExists(atPath: selected.path) else {
+        throw StudioError("Не найден музыкальный файл")
+      }
+      let music = project.appendingPathComponent("music/" + selected.lastPathComponent)
+      try fm.createDirectory(
+        at: music.deletingLastPathComponent(), withIntermediateDirectories: true)
+      if selected.standardizedFileURL != music.standardizedFileURL {
+        if fm.fileExists(atPath: music.path) { try fm.removeItem(at: music) }
+        try fm.copyItem(at: selected, to: music)
+      }
+      NativeIO.stage("Зацикливание и наложение фоновой музыки")
+      final = try audio.mix(
+        final, music: music, percent: request["music_volume"] as? Double ?? 5, project: project,
+        total: Double(frames) / 24000)
+    }
+    NativeIO.stage("Сборка отдельного M4B и EPUB с синхронным аудио")
+    let result = try audio.package(
+      project: project, manifest: prepared, source: source, timeline: timeline, audio: final)
+    let external = URL(fileURLWithPath: destination)
+    NativeIO.stage("Сохранение аудиокниги и EPUB · " + destination)
+    try fm.copyItem(at: result, to: external)
+    NativeIO.emit("result", ["path": destination])
+    done("Аудиокнига и EPUB сохранены: " + destination, path: project)
+  }
+  func previewSamples(at path: URL, text: String, description: String?,
+    reference: (URL, String)?, seed: Int) async throws -> [Float]
+  {
+    let model = try await Qwen3TTSModel.fromModelDirectory(path)
+    NativeIO.stage("Генерация пробы · \(text.count) знаков · примерно 10 секунд")
+    return try await generate(model, text: text, description: description, reference: reference, seed: seed)
+  }
+  func memoryLog(_ message: String) {
+    let snapshot = Memory.snapshot()
+    NativeIO.emit("log", ["message": message + String(format:
+      " · MLX: активно %.0f МБ, кеш %.0f МБ", Double(snapshot.activeMemory) / 1_048_576,
+      Double(snapshot.cacheMemory) / 1_048_576)])
+  }
+  func synthesize(rows: [Object], voices: [Object], references: [String: (URL, String)],
+    basePath: URL) async throws -> ([Object], Int)
+  {
     NativeIO.stage("Загрузка модели озвучки · оценка времени появится после первых фрагментов")
     let base = try await Qwen3TTSModel.fromModelDirectory(basePath)
     var conditioning: [String: Qwen3TTSModel.Qwen3TTSReferenceConditioning] = [:]
@@ -485,6 +558,7 @@ final class Engine {
       let elapsed = max(0.001, Date().timeIntervalSince(start))
       let weight = max(1, NativeIO.string(row["text"]).count)
       measurements.append((Double(samples.count) / 24000, elapsed, weight))
+      if measurements.count > 12 { measurements.removeFirst() }
       completed += weight
       let recent = measurements.suffix(12)
       let seconds = recent.reduce(0) { $0 + $1.1 }
@@ -498,36 +572,9 @@ final class Engine {
           "seconds_per_character": seconds / Double(chars),
           "fraction": Double(completed) / Double(total), "completed": i + 1, "total": rows.count,
         ])
-      Memory.clearCache()
     }
     try montage.finish()
-    try NativeIO.write(raw.appendingPathComponent("timeline.json"), ["segments": timeline])
-    NativeIO.stage("Нормализация громкости по ролям")
-    var final = try audio.normalize(project: project, segments: rows, timeline: timeline)
-    if request["music_enabled"] as? Bool ?? true {
-      let selected = URL(fileURLWithPath: NativeIO.string(request["music"]))
-      guard fm.fileExists(atPath: selected.path) else {
-        throw StudioError("Не найден музыкальный файл")
-      }
-      let music = project.appendingPathComponent("music/" + selected.lastPathComponent)
-      try fm.createDirectory(
-        at: music.deletingLastPathComponent(), withIntermediateDirectories: true)
-      if selected.standardizedFileURL != music.standardizedFileURL {
-        if fm.fileExists(atPath: music.path) { try fm.removeItem(at: music) }
-        try fm.copyItem(at: selected, to: music)
-      }
-      NativeIO.stage("Зацикливание и наложение фоновой музыки")
-      final = try audio.mix(
-        final, music: music, percent: request["music_volume"] as? Double ?? 5, project: project,
-        total: Double(montage.frames) / 24000)
-    }
-    NativeIO.stage("Сборка отдельного M4B и EPUB с синхронным аудио")
-    let result = try audio.package(
-      project: project, manifest: prepared, source: source, timeline: timeline, audio: final)
-    let external = URL(fileURLWithPath: destination)
-    NativeIO.stage("Сохранение аудиокниги и EPUB · " + destination)
-    try fm.copyItem(at: result, to: external)
-    NativeIO.emit("result", ["path": destination])
-    done("Аудиокнига и EPUB сохранены: " + destination, path: project)
+    return (timeline, montage.frames)
   }
+
 }
