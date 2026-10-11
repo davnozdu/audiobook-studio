@@ -5,6 +5,39 @@ import Sparkle
 import UniformTypeIdentifiers
 import AVFoundation
 import Darwin
+import Security
+
+enum CredentialStore {
+    static let identity: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+        kSecAttrService as String: "com.davnozdu.audiobook-studio.credentials",
+        kSecAttrAccount as String: "ollama-api-key"]
+    static func read() throws -> String {
+        var query = identity
+        query[kSecReturnData as String] = true; query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound { return "" }
+        guard status == errSecSuccess, let data = result as? Data, let value = String(data: data, encoding: .utf8) else {
+            throw NSError(domain: NSOSStatusErrorDomain, code: Int(status))
+        }
+        return value
+    }
+    static func write(_ value: String) throws {
+        if value.isEmpty {
+            let status = SecItemDelete(identity as CFDictionary)
+            guard status == errSecSuccess || status == errSecItemNotFound else { throw NSError(domain: NSOSStatusErrorDomain, code: Int(status)) }
+            return
+        }
+        let attributes = [kSecValueData as String: Data(value.utf8)]
+        var status = SecItemUpdate(identity as CFDictionary, attributes as CFDictionary)
+        if status == errSecItemNotFound {
+            var item = identity; item[kSecValueData as String] = Data(value.utf8)
+            item[kSecAttrLabel as String] = "Audiobook Studio — Ollama"
+            status = SecItemAdd(item as CFDictionary, nil)
+        }
+        guard status == errSecSuccess else { throw NSError(domain: NSOSStatusErrorDomain, code: Int(status)) }
+    }
+}
 
 @MainActor final class AppLifecycle: NSObject, NSApplicationDelegate {
     static weak var studio: Studio?
@@ -149,7 +182,9 @@ struct Character: Identifiable {
 @MainActor final class Studio: ObservableObject {
     @Published var book = ""
     @Published var project = ""
-    @Published var output = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Documents/Audiobook Studio").path
+    @Published var output = UserDefaults.standard.string(forKey: "outputFolder") ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Documents/Audiobook Studio").path {
+        didSet { UserDefaults.standard.set(output, forKey: "outputFolder") }
+    }
     @Published var characters: [Character] = []
     @Published var selected: String?
     @Published var busy = false
@@ -160,19 +195,34 @@ struct Character: Identifiable {
     @Published var completed = ""
     @Published var log = ""
     @Published var error: String?
-    @Published var key = ""
-    @Published var model = "deepseek-v4.1-flash"
-    @Published var webSearch = false
-    @Published var cloudStress = false
-    @Published var musicEnabled = true
-    @Published var music = ""
-    @Published var bundledMusic = "Lamplight_and_Paper.mp3"
+    @Published var key = "" { didSet { scheduleCredentialSave() } }
+    @Published var keyStorageStatus = "Ключ сохраняется в Связке ключей macOS и используется после обновлений."
+    @Published var model = UserDefaults.standard.string(forKey: "llmModel") ?? "deepseek-v4.1-flash" {
+        didSet { UserDefaults.standard.set(model, forKey: "llmModel") }
+    }
+    @Published var webSearch = UserDefaults.standard.bool(forKey: "webSearch") {
+        didSet { UserDefaults.standard.set(webSearch, forKey: "webSearch") }
+    }
+    @Published var cloudStress = UserDefaults.standard.bool(forKey: "cloudStress") {
+        didSet { UserDefaults.standard.set(cloudStress, forKey: "cloudStress") }
+    }
+    @Published var musicEnabled = UserDefaults.standard.object(forKey: "musicEnabled") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(musicEnabled, forKey: "musicEnabled") }
+    }
+    @Published var music = UserDefaults.standard.string(forKey: "customMusic") ?? "" {
+        didSet { UserDefaults.standard.set(music, forKey: "customMusic") }
+    }
+    @Published var bundledMusic = UserDefaults.standard.string(forKey: "bundledMusic") ?? "Lamplight_and_Paper.mp3" {
+        didSet { UserDefaults.standard.set(bundledMusic, forKey: "bundledMusic") }
+    }
     let musicTracks: [MusicTrack] = {
         guard let url = Bundle.main.resourceURL?.appendingPathComponent("backend/engine/resources/music_catalog.json"),
               let data = try? Data(contentsOf: url), let tracks = try? JSONDecoder().decode([MusicTrack].self, from: data) else { return [] }
         return tracks
     }()
-    @Published var musicVolume = 5.0
+    @Published var musicVolume = UserDefaults.standard.object(forKey: "musicVolume") as? Double ?? 5.0 {
+        didSet { UserDefaults.standard.set(musicVolume, forKey: "musicVolume") }
+    }
     @Published var settings = false
     @Published var dirty = false
     @Published var showLog = false
@@ -182,12 +232,18 @@ struct Character: Identifiable {
     @Published var reviewOnly = true
     @Published var rolesDirty = false
     @Published var voiceLabOpen = false
-    @Published var voiceDescription = "Warm mature Russian narrator, mid-low resonant baritone, clear diction, calm natural delivery."
-    @Published var voiceTestText = "Сегодня тихое утро. Я открываю новую книгу и приглашаю вас послушать эту историю."
+    @Published var voiceDescription = UserDefaults.standard.string(forKey: "voiceDescription") ?? "Warm mature Russian narrator, mid-low resonant baritone, clear diction, calm natural delivery." {
+        didSet { UserDefaults.standard.set(voiceDescription, forKey: "voiceDescription") }
+    }
+    @Published var voiceTestText = UserDefaults.standard.string(forKey: "voiceTestText") ?? "Сегодня тихое утро. Я открываю новую книгу и приглашаю вас послушать эту историю." {
+        didSet { UserDefaults.standard.set(voiceTestText, forKey: "voiceTestText") }
+    }
     @Published var generatedSample = ""
     @Published var generatedText = ""
     @Published var generatedDescription = ""
-    @Published var voiceSeed = 17001
+    @Published var voiceSeed = UserDefaults.standard.object(forKey: "voiceSeed") as? Int ?? 17001 {
+        didSet { UserDefaults.standard.set(voiceSeed, forKey: "voiceSeed") }
+    }
     @Published var previewByCharacter: [String: String] = [:]
     @Published var showDock = UserDefaults.standard.object(forKey: "showDock") as? Bool ?? true {
         didSet { UserDefaults.standard.set(showDock, forKey: "showDock"); updatePresence() }
@@ -207,10 +263,16 @@ struct Character: Identifiable {
     private var cancelling = false
     private var shuttingDown = false
     private var receivedError = false
+    private var restoringCredential = true
+    private var credentialDirty = false
+    private var credentialSave: DispatchWorkItem?
     private var buffer = Data()
     let updater = UpdateController()
 
     init() {
+        do { key = try CredentialStore.read() }
+        catch { keyStorageStatus = "Не удалось прочитать ключ из Связки ключей macOS. Сохранённый ключ не удалён." }
+        restoringCredential = false
         AppLifecycle.studio = self
         menuBar.open = { [weak self] in self?.showWindow() }
         menuBar.cancel = { [weak self] in self?.cancel() }
@@ -224,6 +286,25 @@ struct Character: Identifiable {
             }
             self.updatePresence()
             self.updater.start()
+        }
+    }
+
+    func scheduleCredentialSave() {
+        guard !restoringCredential else { return }
+        credentialDirty = true; credentialSave?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.saveCredential() }
+        credentialSave = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
+    }
+    func saveCredential() {
+        guard credentialDirty else { return }
+        do {
+            try CredentialStore.write(key.trimmingCharacters(in: .whitespacesAndNewlines))
+            credentialDirty = false
+            keyStorageStatus = key.isEmpty ? "Ключ удалён из Связки ключей macOS." : "Ключ сохранён в Связке ключей macOS."
+        } catch {
+            keyStorageStatus = "Не удалось сохранить ключ в Связке ключей macOS."
+            appendLog(keyStorageStatus)
         }
     }
 
@@ -541,6 +622,7 @@ struct Character: Identifiable {
     }
     func removeMenuBar() { menuBar.remove() }
     func shutdown() -> Bool {
+        credentialSave?.cancel(); saveCredential()
         shuttingDown = true; cancelling = true; pending = nil
         audioPlayer?.stop(); audioPlayer = nil
         removeMenuBar()
@@ -913,7 +995,7 @@ struct SettingsView: View {
             Text("Режиссёр вашей аудиокниги").font(.title2.bold())
             Text("DeepSeek через Ollama Cloud. Запросы выполняются последовательно.").foregroundStyle(.secondary)
             SecureField("Ollama API key", text: $studio.key).textFieldStyle(.roundedBorder)
-            Text("Ключ используется только в текущем сеансе и не сохраняется на диск.").font(.caption).foregroundStyle(.secondary)
+            Text(studio.keyStorageStatus).font(.caption).foregroundStyle(.secondary)
             TextField("Модель", text: $studio.model).textFieldStyle(.roundedBorder)
             Toggle("Разрешить веб-поиск при анализе характеров", isOn: $studio.webSearch)
             Toggle("LLM проверяет спорные ударения", isOn: $studio.cloudStress)
