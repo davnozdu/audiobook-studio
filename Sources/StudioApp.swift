@@ -211,7 +211,7 @@ struct Character: Identifiable {
         menuBar.open = { [weak self] in self?.showWindow() }
         menuBar.cancel = { [weak self] in self?.cancel() }
         updater.report = { [weak self] message in
-            self?.updateStatus = message
+            self?.updateStatus = message.contains("актуальная") || message.contains("Проверяем") ? message : "Обновления временно недоступны"
             self?.appendLog(message)
         }
         DispatchQueue.main.async {

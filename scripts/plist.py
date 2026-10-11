@@ -8,6 +8,7 @@ data = dict(CFBundleIdentifier='com.davnozdu.audiobook-studio', CFBundleName='Au
     CFBundleShortVersionString=os.environ['VERSION'], CFBundleVersion=os.environ['BUILD_NUMBER'],
     LSMinimumSystemVersion='14.0', NSHighResolutionCapable=True,
     SUFeedURL='https://github.com/davnozdu/audiobook-studio/releases/latest/download/appcast.xml',
-    SUPublicEDKey=public_key, SURequireSignedFeed=True, SUEnableAutomaticChecks=True)
+    SUPublicEDKey=public_key, SURequireSignedFeed=True, SUVerifyUpdateBeforeExtraction=True,
+    SUEnableAutomaticChecks=True)
 with (Path(os.environ['APP']) / 'Contents/Info.plist').open('wb') as handle:
     plistlib.dump(data, handle)
