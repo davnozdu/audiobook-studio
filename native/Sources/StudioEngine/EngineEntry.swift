@@ -14,6 +14,15 @@ import StudioCore
     _ = NativeIO.eventOutput
     dup2(STDERR_FILENO, STDOUT_FILENO)
     do {
+      let bundleURL = URL(fileURLWithPath: CommandLine.arguments[0])
+        .deletingLastPathComponent().deletingLastPathComponent()
+        .appendingPathComponent("Resources/mlx-swift_Cmlx.bundle")
+      guard
+        let library = Bundle(url: bundleURL)?.url(forResource: "default", withExtension: "metallib")
+      else {
+        throw StudioError("В приложении отсутствуют нативные Metal-ядра")
+      }
+      GPU.metallib = library
       if CommandLine.arguments.contains("--self-check") {
         let resources = URL(fileURLWithPath: CommandLine.arguments.last!)
         let helper = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()

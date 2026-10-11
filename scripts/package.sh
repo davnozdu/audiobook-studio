@@ -25,9 +25,9 @@ NATIVE_SCHEME="$(python3 -c 'import json; d=json.load(open(".build-tools/native-
 (cd native && xcodebuild build -scheme "$NATIVE_SCHEME" -configuration Release -destination "platform=macOS,arch=arm64" -derivedDataPath ../.build-tools/native-build MACOSX_DEPLOYMENT_TARGET=14.0 CODE_SIGNING_ALLOWED=NO) > .build-tools/native-build.log 2>&1 || { tail -100 .build-tools/native-build.log; exit 1; }
 NATIVE_BIN=".build-tools/native-build/Build/Products/Release"
 cp "$NATIVE_BIN/StudioEngine" "$APP/Contents/MacOS/StudioEngine"
-# SwiftPM resource bundles contain MLX Metal kernels; loaders locate them beside the executable.
+# Keep data bundles in the standard Resources location, outside nested executable code.
 for bundle in "$NATIVE_BIN"/*.bundle; do
-  [ ! -d "$bundle" ] || ditto "$bundle" "$APP/Contents/MacOS/$(basename "$bundle")"
+  [ ! -d "$bundle" ] || ditto "$bundle" "$APP/Contents/Resources/$(basename "$bundle")"
 done
 cp backend/engine/{design_model_files.json,stress_model_files.json,supertonic_rules.json} "$APP/Contents/Resources/engine/"
 cp backend/engine/resources/*.{json,mp3} "$APP/Contents/Resources/engine/resources/"
