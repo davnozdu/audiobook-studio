@@ -4,7 +4,7 @@ public enum SpeechCache {
   public static func signature(text: String, referenceHash: String, referenceText: String,
     seed: Int) throws -> String {
     NativeIO.hash(try NativeIO.json([
-      "version": 1, "model": "Qwen3-TTS-12Hz-1.7B-Ru-Stress-CF-source",
+      "version": 2, "model": "Qwen3-TTS-12Hz-1.7B-Ru-Stress-CF-source",
       "text": text, "reference_hash": referenceHash, "reference_text": referenceText,
       "seed": seed, "language": "Russian", "max_tokens": 4096,
       "temperature": 0.9, "top_p": 1, "top_k": 50, "repetition_penalty": 1.05,

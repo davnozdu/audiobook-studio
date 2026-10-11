@@ -32,6 +32,25 @@ import StudioCore
           .appendingPathComponent("StudioStress")
         let values = (MLXArray([Float(1), Float(4)]) + 1).asArray(Float.self)
         guard values == [2, 5] else { throw StudioError("Нативные Metal-ядра не работают") }
+        let fixture = try NativeIO.load(resources.appendingPathComponent("qwen-speaker-mel-check.json"))
+        let signal = (0..<4096).map { i -> Float in
+          0.2 * Float(sin(2 * Double.pi * 437 * Double(i) / 24000))
+            + 0.07 * Float(cos(2 * Double.pi * 3100 * Double(i) / 24000))
+            + Float((i % 97) - 48) * 0.0001
+        }
+        let mel = Qwen3TTSModel.studioSpeakerMel(audio: MLXArray(signal))
+        guard mel.shape == (fixture["shape"] as? [Int] ?? []) else {
+          throw StudioError("Размер спектра личности голоса не совпадает с Qwen")
+        }
+        var maxError: Float = 0
+        for point in fixture["points"] as? [[Double]] ?? [] {
+          let actual = mel[Int(point[0]), Int(point[1])].item(Float.self)
+          maxError = max(maxError, abs(actual - Float(point[2])))
+        }
+        guard (fixture["points"] as? [[Double]])?.count == 28, maxError < 0.002 else {
+          throw StudioError("Расчёт личности голоса расходится с PyTorch/librosa · " + String(maxError))
+        }
+        NativeIO.emit("log", ["message": "Qwen speaker mel соответствует эталону · максимальная ошибка " + String(maxError)])
         let stress = try NativeStress(resources: resources, helper: helper)
         _ = try stress.request(["words": [], "homographs": []])
         _ = try RussianText(resources.appendingPathComponent("supertonic_rules.json"))
@@ -300,10 +319,8 @@ final class Engine {
       throw StudioError("Задайте текст 20–1000 знаков и описание голоса")
     }
     let seed = request["seed"] as? Int ?? 17001
-    let signature = NativeIO.hash(try NativeIO.json([
-      "version": 1, "text": text, "profile": profileSignature,
-      "instruction": reference == nil ? description : "", "reference": referenceHash, "seed": seed,
-    ]))
+    let signature = try VoiceSample.signature(text: text, instruction: description,
+      profile: profileSignature, reference: referenceHash, seed: seed)
     let file = character.isEmpty
       ? root.deletingLastPathComponent().appendingPathComponent("VoiceLab/" + UUID().uuidString + "/sample.wav")
       : project.appendingPathComponent("preview-samples/" + character + ".wav")
@@ -412,12 +429,11 @@ final class Engine {
       let directory = project.appendingPathComponent("voices")
       let file = directory.appendingPathComponent(id + ".wav")
       let meta = directory.appendingPathComponent(id + ".json")
-      let signature = NativeIO.hash(
-        try NativeIO.json([
-          "book": NativeIO.object(manifest["book"])["input_sha256"]!, "voice": instruction(voice),
-          "profile_sha256": try VoiceDirection.signature(voice),
-          "seed": voice["seed"] ?? 17001,
-        ]))
+      let text =
+        (try? NativeProject.excerpt(manifest, character: id))
+        ?? "Сегодня тихое утро. Я спокойно и ясно читаю эту книгу."
+      let signature = try VoiceSample.signature(text: text, instruction: instruction(voice),
+        profile: VoiceDirection.signature(voice), seed: voice["seed"] as? Int ?? 17001)
       if fm.fileExists(atPath: file.path), let old = try? NativeIO.load(meta),
         NativeIO.string(old["signature"]) == signature,
         (try NativeIO.hashFile(file)) == NativeIO.string(old["sha256"])
@@ -425,11 +441,17 @@ final class Engine {
         references[id] = (file, NativeIO.string(old["text"]))
         continue
       }
+      let preview = project.appendingPathComponent("preview-samples/" + id + ".wav")
+      if let samples = SpeechCache.load(preview, signature: signature) {
+        try NativeWAV.write(file, samples)
+        try NativeIO.write(meta, ["signature": signature, "text": text,
+          "description": instruction(voice), "sha256": try NativeIO.hashFile(file)])
+        references[id] = (file, text)
+        NativeIO.stage("Используется прослушанный образец · " + NativeIO.string(voice["name"]))
+        continue
+      }
       NativeIO.stage("Создание голоса · " + NativeIO.string(voice["name"]))
       if design == nil { design = try await Qwen3TTSModel.fromModelDirectory(designPath) }
-      let text =
-        (try? NativeProject.excerpt(manifest, character: id))
-        ?? "Сегодня тихое утро. Я спокойно и ясно читаю эту книгу."
       let samples = try await generate(
         design!, text: text, description: instruction(voice), reference: nil,
         seed: voice["seed"] as? Int ?? 17001)
@@ -546,6 +568,16 @@ final class Engine {
           referenceArrays[speaker] = array
           conditioning[speaker] = try base.prepareReferenceConditioning(
             refAudio: array, refText: reference.1, language: "Russian")
+          guard let identity = conditioning[speaker]?.speakerEmbedding else {
+            throw StudioError("Не извлечена личность голоса · " + speaker)
+          }
+          let identityValues = identity.asArray(Float.self)
+          guard !identityValues.isEmpty, identityValues.allSatisfy({ $0.isFinite }),
+            identityValues.contains(where: { abs($0) > 0.000001 }) else {
+            throw StudioError("Повреждено представление личности голоса · " + speaker)
+          }
+          let identityHash = identityValues.withUnsafeBytes { NativeIO.hash(Data($0)) }
+          NativeIO.emit("log", ["message": "Личность голоса [\(speaker)] · \(identityValues.count) признаков · SHA256 " + identityHash])
           NativeIO.emit("log", ["message": "Образец для озвучки [\(speaker)] · SHA256 " + (referenceHashes[speaker] ?? "")])
         }
         guard let ref = conditioning[speaker] else { throw StudioError("Не подготовлен голос " + speaker) }

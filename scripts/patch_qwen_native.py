@@ -1,0 +1,117 @@
+"""Apply the audited offline-input fix to the pinned Qwen Swift implementation.
+
+Build tool only; never shipped. Reject changed upstream source instead of silently
+patching a different model. See native/patches/README.md for the reference algorithm.
+"""
+import hashlib
+import sys
+from pathlib import Path
+
+UPSTREAM_SHA = "e0e4ac8efdfb5f63a9e0afc8339b7b2b2a3ac3afe6d749979342f178a70a5df4"
+MARKER = "// Audiobook Studio: official non_streaming_mode=True prefill."
+
+
+def patched(source):
+    def replace(old, new):
+        nonlocal source
+        if source.count(old) != 1:
+            raise ValueError("Pinned Qwen patch anchor changed")
+        source = source.replace(old, new)
+
+    replace("                speaker: speaker\n", "                speaker: speaker,\n                nonStreaming: onAudioChunk == nil\n")
+    replace("        speaker: String? = nil\n", "        speaker: String? = nil,\n        nonStreaming: Bool = false\n")
+    replace("        // Add first text token (index 3) + last codec embed\n", """        // Audiobook Studio: official non_streaming_mode=True prefill.
+        // Include every text token + EOS before codec BOS, preserving instruction
+        // embeddings and the role/language prefix. Streaming keeps its old layout.
+        if nonStreaming {
+            let allText = concatenated(
+                [textEmbed[0..., 3 ..< (textEmbed.dim(1) - 5), 0...], ttsEosEmbed],
+                axis: 1
+            )
+            let codecPad = talker.getInputEmbeddings()(
+                MLXArray([Int32(talkerConfig.codecPadId)]).reshaped(1, 1)
+            )
+            let textWithPad = allText + broadcast(codecPad, to: allText.shape)
+            let codecStart = ttsPadEmbed + codecEmbed[0..., (-1)..., 0...]
+            return (concatenated([inputEmbeds, textWithPad, codecStart], axis: 1),
+                ttsPadEmbed, ttsPadEmbed)
+        }
+
+        // Add first text token (index 3) + last codec embed
+""")
+    replace("""        // Cap max tokens based on text length
+        let targetTokenCount = tokenizer.encode(text: text).count
+        let effectiveMaxTokens = min(maxTokens, max(75, targetTokenCount * 6))
+""", """        // Honour the caller limit. Slow or expressive speech must not be clipped
+        // by a text-token heuristic absent from the official implementation.
+        let effectiveMaxTokens = maxTokens
+""")
+    replace("        var generatedCodebookTokens = [Int]()\n", "        var generatedCodebookTokens = [Int]()\n        var reachedEOS = false\n")
+    replace("            if isEOS.item(Bool.self) {\n                break\n", "            if isEOS.item(Bool.self) {\n                reachedEOS = true\n                break\n")
+    replace("        // Emit generation info\n", """        guard reachedEOS else {
+            throw AudioGenerationError.invalidInput("Qwen reached the audio token limit before finishing the utterance")
+        }
+
+        // Emit generation info
+""")
+    replace("        let refContext = referenceAudioContext(for: refAudio)\n", """        let refContext = referenceAudioContext(for: refAudio)
+        guard refContext.speakerEmbedding != nil else {
+            throw AudioGenerationError.modelNotInitialized("Voice cloning requires a loaded speaker encoder and speaker embedding")
+        }
+""")
+    replace("            if !speakerWeights.isEmpty {\n", """            guard !speakerWeights.isEmpty else {
+                throw AudioGenerationError.modelNotInitialized("Base checkpoint is missing speaker encoder weights")
+            }
+            if !speakerWeights.isEmpty {
+""")
+    replace("""            let mel = computeMelSpectrogram(
+                audio: waveform,
+                sampleRate: speakerEncoder.config.sampleRate,
+                nFft: 1024,
+                hopLength: 256,
+                nMels: 128
+            )
+""", """            let mel = Self.studioSpeakerMel(audio: waveform,
+                sampleRate: speakerEncoder.config.sampleRate)
+""")
+    replace("    func extractSpeakerEmbedding(_ refAudio: MLXArray) -> MLXArray? {\n", """    // Matches Qwen's mel_spectrogram, not Whisper's log-power normalization.
+    public static func studioSpeakerMel(audio: MLXArray, sampleRate: Int = 24000) -> MLXArray {
+        precondition(audio.ndim == 1 && audio.dim(0) > 384 && sampleRate == 24000)
+        let nFft = 1024, hop = 256, padding = 384
+        let count = audio.dim(0)
+        let left = audio[MLXArray((1...padding).reversed().map { Int32($0) })]
+        let right = audio[MLXArray((count-padding-1 ..< count-1).reversed().map { Int32($0) })]
+        let padded = concatenated([left, audio, right])
+        let frames = asStrided(padded, [1 + (padded.dim(0) - nFft) / hop, nFft],
+            strides: [hop, 1], offset: 0)
+        let fft = MLXFFT.rfft(frames * hanningWindow(size: nFft, periodic: true), axis: 1)
+        let magnitude = MLX.sqrt(MLX.abs(fft).square() + Float(1e-9))
+        let filters = melFilters(sampleRate: sampleRate, nFft: nFft, nMels: 128,
+            fMin: 0, fMax: 12000, norm: "slaney", melScale: .slaney)
+        return MLX.log(MLX.maximum(MLX.matmul(magnitude, filters), Float(1e-5)))
+    }
+
+    func extractSpeakerEmbedding(_ refAudio: MLXArray) -> MLXArray? {
+""")
+    return source
+
+
+def apply(path):
+    source = path.read_text()
+    receipt = path.with_suffix(".studio-original")
+    if MARKER in source:
+        original = receipt.read_text() if receipt.exists() else ""
+        if hashlib.sha256(original.encode()).hexdigest() != UPSTREAM_SHA or patched(original) != source:
+            raise ValueError("Previously patched Qwen source failed verification")
+        return
+    if hashlib.sha256(source.encode()).hexdigest() != UPSTREAM_SHA:
+        raise ValueError("Unexpected Qwen Swift source; audit the new revision before building")
+    result = patched(source)
+    path.chmod(path.stat().st_mode | 0o200)
+    receipt.write_text(source)
+    path.write_text(result)
+
+
+if __name__ == "__main__":
+    apply(Path(sys.argv[1]) / "Sources/MLXAudioTTS/Models/Qwen3TTS/Qwen3TTS.swift")
+    print("Qwen Swift: verified offline input, speaker identity and audio limit fixes")

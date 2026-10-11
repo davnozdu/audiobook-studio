@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
-VERSION="${VERSION:-0.5.8}"
+VERSION="${VERSION:-0.5.9}"
 BUILD_NUMBER="${BUILD_NUMBER:-1}"
 APP="dist/Audiobook Studio.app"
 SPARKLE_VERSION=2.9.6
@@ -22,7 +22,10 @@ xcodebuild -downloadComponent MetalToolchain
 (cd native && xcodebuild -list -json) > .build-tools/native-schemes.json
 cat .build-tools/native-schemes.json
 NATIVE_SCHEME="$(python3 -c 'import json; d=json.load(open(".build-tools/native-schemes.json")); s=(d.get("workspace") or d.get("project"))["schemes"]; print(next(x for x in ["StudioEngine", "StudioNative", "native", "StudioNative-Package", "native-Package"] if x in s))')"
-(cd native && xcodebuild build -scheme "$NATIVE_SCHEME" -configuration Release -destination "platform=macOS,arch=arm64" -derivedDataPath ../.build-tools/native-build MACOSX_DEPLOYMENT_TARGET=14.0 CODE_SIGNING_ALLOWED=NO) > .build-tools/native-build.log 2>&1 || { tail -100 .build-tools/native-build.log; exit 1; }
+(cd native && xcodebuild -resolvePackageDependencies -scheme "$NATIVE_SCHEME" -derivedDataPath ../.build-tools/native-build)
+python3 scripts/patch_qwen_native.py .build-tools/native-build/SourcePackages/checkouts/mlx-audio-swift
+(cd native && xcodebuild build -scheme "$NATIVE_SCHEME" -configuration Release -destination "platform=macOS,arch=arm64" -derivedDataPath ../.build-tools/native-build -disableAutomaticPackageResolution -skipPackageUpdates MACOSX_DEPLOYMENT_TARGET=14.0 CODE_SIGNING_ALLOWED=NO) > .build-tools/native-build.log 2>&1 || { tail -100 .build-tools/native-build.log; exit 1; }
+python3 scripts/patch_qwen_native.py .build-tools/native-build/SourcePackages/checkouts/mlx-audio-swift
 NATIVE_BIN=".build-tools/native-build/Build/Products/Release"
 cp "$NATIVE_BIN/StudioEngine" "$APP/Contents/MacOS/StudioEngine"
 # Keep data bundles in the standard Resources location, outside nested executable code.
@@ -43,8 +46,9 @@ python3 scripts/relocate_ffmpeg.py "$APP/Contents/Resources/runtime/bin"
 # Python is exclusively a build tool. Export offline Silero weights and link a C++ executable to libtorch.
 if [ ! -x .build-tools/stress-export/bin/python3 ]; then python3 -m venv .build-tools/stress-export; fi
 BUILD_PY=.build-tools/stress-export/bin/python3
-"$BUILD_PY" -m pip install 'torch==2.14.1' 'silero-stress==1.5'
+"$BUILD_PY" -m pip install 'torch==2.14.1' 'silero-stress==1.5' 'librosa==0.11.0'
 "$BUILD_PY" scripts/export_native_stress.py "$APP/Contents/Resources/engine/silero"
+"$BUILD_PY" scripts/export_qwen_fixture.py "$APP/Contents/Resources/engine/qwen-speaker-mel-check.json"
 TORCH_ROOT="$("$BUILD_PY" -c 'import pathlib,torch;print(pathlib.Path(torch.__file__).parent)')"
 clang++ -O2 -std=c++20 -mmacosx-version-min=14.0 -arch arm64 native/stress/StudioStress.mm -I "$TORCH_ROOT/include" -I "$TORCH_ROOT/include/torch/csrc/api/include" -L "$TORCH_ROOT/lib" -ltorch -ltorch_cpu -lc10 -framework Foundation -Wl,-rpath,@executable_path/../Frameworks/torch -o "$APP/Contents/MacOS/StudioStress"
 python3 scripts/vendor_torch.py "$TORCH_ROOT/lib" "$APP/Contents/Frameworks/torch"

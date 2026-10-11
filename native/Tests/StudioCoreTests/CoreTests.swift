@@ -3,6 +3,22 @@ import XCTest
 @testable import StudioCore
 
 final class CoreTests: XCTestCase {
+  func testListenedReferenceCanBeReusedButNotAfterEdits() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let file = root.appendingPathComponent("preview.wav")
+    let samples = (0..<2400).map { Float(sin(Double($0) * 0.1) * 0.2) }
+    let key = try VoiceSample.signature(text: "Реплика персонажа", instruction: "Older male, worn nasal voice",
+      profile: "profile1", seed: 17)
+    try SpeechCache.save(file, samples: samples, signature: key)
+    XCTAssertEqual(SpeechCache.load(file, signature: key), samples)
+    for changed in [
+      try VoiceSample.signature(text: "Другая реплика", instruction: "Older male, worn nasal voice", profile: "profile1", seed: 17),
+      try VoiceSample.signature(text: "Реплика персонажа", instruction: "Young male, soft light voice", profile: "profile1", seed: 17),
+      try VoiceSample.signature(text: "Реплика персонажа", instruction: "Older male, worn nasal voice", profile: "profile2", seed: 17),
+      try VoiceSample.signature(text: "Реплика персонажа", instruction: "Older male, worn nasal voice", profile: "profile1", seed: 18),
+    ] { XCTAssertNil(SpeechCache.load(file, signature: changed)) }
+  }
   func testCompactVoiceDirectionAndOldCacheInvalidation() throws {
     let description: Object = [
       "voice": "Older-sounding male voice. Low-mid pitch. Thin worn nasal timbre with slight hoarseness.",
