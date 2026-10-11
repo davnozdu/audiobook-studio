@@ -82,7 +82,7 @@ public enum NativeIO {
   }
   public static func capture(
     _ executable: URL, _ arguments: [String], cwd: URL? = nil, input: Data? = nil,
-    events: Bool = false
+    events: Bool = true
   ) throws -> (Data, Data) {
     let process = Process()
     let output = Pipe()
@@ -125,7 +125,7 @@ public enum NativeIO {
   }
   @discardableResult public static func run(
     _ executable: URL, _ arguments: [String], cwd: URL? = nil, input: Data? = nil,
-    events: Bool = false
+    events: Bool = true
   ) throws -> Data { try capture(executable, arguments, cwd: cwd, input: input, events: events).0 }
   public static func archiveMembers(_ url: URL) throws -> [String] {
     let text =

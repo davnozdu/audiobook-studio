@@ -675,9 +675,12 @@ struct Character: Identifiable {
     func stopProcessGroup() {
         guard let p = process, p.isRunning else { return }
         let pid = p.processIdentifier
+        let child = childPID
+        if child > 0 { kill(-child, SIGTERM); kill(child, SIGTERM) }
         kill(-pid, SIGTERM); p.terminate()
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-            // The worker owns a dedicated process group including model and FFmpeg children.
+            // NSTask creates separate process groups for the worker and its active child.
+            if child > 0, kill(-child, 0) == 0 { kill(-child, SIGKILL) }
             if kill(-pid, 0) == 0 { kill(-pid, SIGKILL) }
             if p.isRunning { p.interrupt(); kill(pid, SIGKILL) }
         }
