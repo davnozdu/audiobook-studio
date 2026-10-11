@@ -34,7 +34,7 @@ public final class NativeDirector {
     request.setValue("Bearer " + key, forHTTPHeaderField: "Authorization")
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.httpBody = try NativeIO.json([
-      "model": model, "stream": false, "think": false, "format": "json",
+      "model": model, "stream": false, "think": false,
       "options": ["temperature": 0, "num_predict": 12000], "messages": [["role": "user", "content": prompt]],
     ])
     let (data, response) = try await URLSession.shared.data(for: request)
