@@ -4,6 +4,35 @@ import Foundation
 import Sparkle
 import UniformTypeIdentifiers
 
+final class MenuBarController: NSObject {
+    var item: NSStatusItem?
+    var open: (() -> Void)?
+    var cancel: (() -> Void)?
+    func update(visible: Bool, status: String, busy: Bool) {
+        if !visible {
+            if let item { NSStatusBar.system.removeStatusItem(item) }
+            item = nil; return
+        }
+        if item == nil { item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength) }
+        if let path = Bundle.main.path(forResource: "AppIcon", ofType: "icns"), let image = NSImage(contentsOfFile: path) {
+            image.size = NSSize(width: 18, height: 18); item?.button?.image = image
+        } else { item?.button?.image = NSImage(systemSymbolName: "book.circle", accessibilityDescription: "Audiobook Studio") }
+        item?.button?.toolTip = "Audiobook Studio · " + status
+        let menu = NSMenu()
+        let statusItem = NSMenuItem(title: status, action: nil, keyEquivalent: ""); statusItem.isEnabled = false; menu.addItem(statusItem)
+        menu.addItem(.separator())
+        let openItem = NSMenuItem(title: "Открыть Audiobook Studio", action: #selector(openWindow), keyEquivalent: "")
+        openItem.target = self; menu.addItem(openItem)
+        if busy {
+            let stop = NSMenuItem(title: "Остановить сборку", action: #selector(stopJob), keyEquivalent: "")
+            stop.target = self; menu.addItem(stop)
+        }
+        item?.menu = menu
+    }
+    @objc func openWindow() { open?() }
+    @objc func stopJob() { cancel?() }
+}
+
 struct RoleSegment: Identifiable {
     var id: String
     var text: String
@@ -42,7 +71,7 @@ struct Character: Identifiable {
     @Published var characters: [Character] = []
     @Published var selected: String?
     @Published var busy = false
-    @Published var status = "Выберите книгу, чтобы начать"
+    @Published var status = "Выберите книгу, чтобы начать" { didSet { updateMenuBar() } }
     @Published var fraction = 0.0
     @Published var speed: Double?
     @Published var eta: Double?
@@ -63,12 +92,56 @@ struct Character: Identifiable {
     @Published var roleSearch = ""
     @Published var reviewOnly = true
     @Published var rolesDirty = false
+    @Published var showDock = UserDefaults.standard.object(forKey: "showDock") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(showDock, forKey: "showDock"); updatePresence() }
+    }
+    @Published var showMenuBar = UserDefaults.standard.object(forKey: "showMenuBar") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(showMenuBar, forKey: "showMenuBar"); updatePresence() }
+    }
+    @Published var backgroundPriority = UserDefaults.standard.bool(forKey: "backgroundPriority") {
+        didSet { UserDefaults.standard.set(backgroundPriority, forKey: "backgroundPriority"); applyPriority() }
+    }
+    private let menuBar = MenuBarController()
+    private var childPID: Int32 = 0
     private var process: Process?
     private var pending: (() -> Void)?
     private var cancelling = false
     private var receivedError = false
     private var buffer = Data()
     let updater = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+
+    init() {
+        menuBar.open = { [weak self] in self?.showWindow() }
+        menuBar.cancel = { [weak self] in self?.cancel() }
+        DispatchQueue.main.async {
+            if let path = Bundle.main.path(forResource: "AppIcon", ofType: "icns"), let image = NSImage(contentsOfFile: path) {
+                NSApplication.shared.applicationIconImage = image
+            }
+            self.updatePresence()
+        }
+    }
+
+    func updatePresence() {
+        if !showDock && !showMenuBar { showMenuBar = true }
+        NSApplication.shared.setActivationPolicy(showDock ? .regular : .accessory)
+        updateMenuBar()
+    }
+
+    func updateMenuBar() { menuBar.update(visible: showMenuBar, status: status, busy: busy) }
+
+    func showWindow() {
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        NSApplication.shared.windows.first(where: { $0.canBecomeMain })?.makeKeyAndOrderFront(nil)
+    }
+
+    func applyPriority() {
+        for pid in [process?.processIdentifier ?? 0, childPID] where pid > 0 {
+            let task = Process(); task.executableURL = URL(fileURLWithPath: "/usr/bin/taskpolicy")
+            task.arguments = [backgroundPriority ? "-b" : "-B", "-p", String(pid)]
+            task.standardOutput = FileHandle.nullDevice; task.standardError = FileHandle.nullDevice
+            try? task.run()
+        }
+    }
 
     var resources: URL { Bundle.main.resourceURL! }
     var python: String { resources.appendingPathComponent("runtime/python/bin/python3").path }
@@ -186,10 +259,12 @@ struct Character: Identifiable {
     func launch(_ request: [String: Any], after: (() -> Void)? = nil) {
         guard !busy else { return }
         busy = true; cancelling = false; receivedError = false; pending = after
+        childPID = 0; updateMenuBar()
         fraction = 0; speed = nil; eta = nil; completed = ""; buffer = Data()
         status = "Подготовка…"
         let p = Process(), input = Pipe(), output = Pipe(), errors = Pipe()
         p.executableURL = URL(fileURLWithPath: python)
+        p.qualityOfService = .userInitiated
         p.arguments = ["-u", resources.appendingPathComponent("backend/worker.py").path]
         var env = ProcessInfo.processInfo.environment
         env.removeValue(forKey: "OLLAMA_API_KEY")
@@ -213,7 +288,7 @@ struct Character: Identifiable {
             errors.fileHandleForReading.readabilityHandler = nil
             DispatchQueue.main.async {
                 self.consume(rest)
-                self.busy = false; self.process = nil
+                self.busy = false; self.process = nil; self.childPID = 0; self.updateMenuBar()
                 let next = self.pending; self.pending = nil
                 if self.cancelling { self.status = "Операция остановлена"; return }
                 if process.terminationStatus != 0 {
@@ -226,7 +301,7 @@ struct Character: Identifiable {
             }
         }
         do {
-            try p.run(); process = p
+            try p.run(); process = p; applyPriority()
             let data = try JSONSerialization.data(withJSONObject: request)
             try input.fileHandleForWriting.write(contentsOf: data + Data([10]))
             try input.fileHandleForWriting.close()
@@ -242,6 +317,7 @@ struct Character: Identifiable {
             let line = buffer.prefix(upTo: newline); buffer.removeSubrange(...newline)
             guard let event = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { continue }
             switch event["type"] as? String {
+            case "child": childPID = (event["pid"] as? NSNumber)?.int32Value ?? 0; applyPriority()
             case "project": project = event["path"] as? String ?? project
             case "progress": status = event["message"] as? String ?? status; fraction = event["fraction"] as? Double ?? 0; speed = nil; eta = nil
             case "metrics":
@@ -506,6 +582,14 @@ struct ContentView: View {
                         if let eta = studio.eta { Text("Осталось ≈ \(Int(ceil(eta / 60))) мин синтеза").foregroundStyle(.secondary).monospacedDigit() }
                         if studio.busy { Button("Остановить") { studio.cancel() } }
                     }
+                    HStack {
+                        Text("Приоритет").font(.caption).foregroundStyle(.secondary)
+                        Picker("Приоритет", selection: $studio.backgroundPriority) {
+                            Text("Обычный").tag(false)
+                            Text("Фоновый").tag(true)
+                        }.pickerStyle(.segmented).frame(width: 220)
+                        Spacer()
+                    }
                     if studio.busy {
                         ProgressView(value: studio.fraction).tint(.indigo)
                         Text(studio.completed.isEmpty ? "Один запрос к LLM за раз" : studio.completed + " · оценка по последним фрагментам").font(.caption).foregroundStyle(.secondary)
@@ -547,6 +631,13 @@ struct SettingsView: View {
             Toggle("Разрешить веб-поиск при анализе характеров", isOn: $studio.webSearch)
             Toggle("LLM проверяет спорные ударения", isOn: $studio.cloudStress)
             Text("Для ролей и характеров текст книги отправляется в Ollama. Озвучка выполняется локально на Mac.").font(.caption).foregroundStyle(.secondary)
+            Divider()
+            Text("Поведение приложения").font(.headline)
+            Toggle("Показывать значок в Dock", isOn: $studio.showDock)
+            Toggle("Показывать значок в верхней панели", isOn: $studio.showMenuBar)
+            Text("Один значок всегда остаётся доступным, чтобы вернуться к приложению.").font(.caption).foregroundStyle(.secondary)
+            Toggle("Фоновый приоритет сборки", isOn: $studio.backgroundPriority)
+            Text("Снижает приоритет CPU и ввода-вывода. GPU и память продолжают использоваться моделью.").font(.caption).foregroundStyle(.secondary)
             Divider()
             Text("Обновления").font(.headline)
             Toggle("Автоматически проверять обновления", isOn: Binding(get: { studio.updater.updater.automaticallyChecksForUpdates }, set: { studio.updater.updater.automaticallyChecksForUpdates = $0 }))

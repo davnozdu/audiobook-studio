@@ -12,6 +12,8 @@ if [ ! -f .build-tools/Sparkle.framework/Sparkle ]; then
   tar -xf .build-tools/sparkle.tar.xz -C .build-tools
 fi
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks" "$APP/Contents/Resources"
+bash scripts/icon.sh
+cp assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 swiftc -O -swift-version 5 -target arm64-apple-macosx14.0 -parse-as-library Sources/StudioApp.swift -F .build-tools -framework Sparkle -Xlinker -rpath -Xlinker @executable_path/../Frameworks -o "$APP/Contents/MacOS/AudiobookStudio"
 ditto .build-tools/Sparkle.framework "$APP/Contents/Frameworks/Sparkle.framework"
 ditto backend "$APP/Contents/Resources/backend"

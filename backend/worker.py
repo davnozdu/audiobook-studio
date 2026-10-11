@@ -129,6 +129,7 @@ def run_step(python, script, options, project, key=None, progress=None):
         env['OLLAMA_API_KEY'] = key
     child = subprocess.Popen([str(python), '-u', str(ENGINE / script), *map(str, options)],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
+    emit('child', pid=child.pid)
     with (project / 'run.log').open('a', encoding='utf-8') as log:
         for line in child.stdout:
             if key:
@@ -139,6 +140,7 @@ def run_step(python, script, options, project, key=None, progress=None):
                 progress(line)
     if child.wait():
         raise ValueError(f'Этап {script} завершился ошибкой. См. run.log')
+    emit('child', pid=0)
 
 
 class Speed:

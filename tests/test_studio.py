@@ -128,5 +128,22 @@ class SpeedTests(unittest.TestCase):
         self.assertAlmostEqual(result['speed'], 40/35)
 
 
+class RoleEditorTests(unittest.TestCase):
+    def test_edit_keeps_text_and_epub_anchors(self):
+        manifest, source = fixture()
+        before = copy.deepcopy(manifest['segments'][0])
+        updated = worker.apply_role_edits(manifest, source, {before['id']: 'narrator'})
+        after = updated['segments'][0]
+        self.assertEqual(after['speaker'], 'narrator')
+        self.assertEqual(after['voice_id'], updated['voices'][0]['voice_id'])
+        for field in ('text', 'source', 'order', 'chapter_id', 'paragraph_id', 'pause_after_ms'):
+            self.assertEqual(before[field], after[field])
+
+    def test_unknown_speaker_is_rejected(self):
+        manifest, source = fixture()
+        with self.assertRaises(ValueError):
+            worker.apply_role_edits(manifest, source, {manifest['segments'][0]['id']: 'invented'})
+
+
 if __name__ == '__main__':
     unittest.main()
