@@ -498,9 +498,11 @@ struct Character: Identifiable {
 
     func previewCharacter(_ index: Int) {
         let c = characters[index]
-        if !c.sample.isEmpty { playAudio(c.sample); return }
-        generateVoice(character: c.id, description: c.voice,
-            autoplay: true)
+        saveThen {
+            if let current = self.characters.first(where: { $0.id == c.id }) {
+                self.generateVoice(character: current.id, description: current.voice, autoplay: true)
+            }
+        }
     }
 
     func listenGenerated() {

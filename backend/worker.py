@@ -49,25 +49,25 @@ def verify(project, require_resolved=True):
     return manifest, source
 
 
-def character_excerpt(manifest, character):
-    sentences = []
+def character_excerpt(manifest, character, target=120, maximum=150):
+    # Roughly 10 seconds at the measured 9–11 characters/sec; never borrow another role.
+    pieces = []
     for segment in manifest['segments']:
         if segment.get('speaker') != character: continue
-        text = segment['text'].strip(' —–\n\t')
-        for sentence in re.split(r'(?<=[.!?…])\s+', text):
-            if not any(c.isalpha() for c in sentence): continue
-            if len(sentence) > 240:
-                sentence = sentence[:237].rsplit(' ', 1)[0] + '…'
-            candidate = ' '.join(sentences + [sentence])
-            if len(candidate) > 250:
-                if len(' '.join(sentences)) >= 20: return ' '.join(sentences)
-                continue
-            sentences.append(sentence)
-            if len(sentences) >= 2 and len(candidate) >= 20: return candidate
-    text = ' '.join(sentences)
+        text = re.sub(r'\s+', ' ', segment['text']).strip(' —–\n\t')
+        if len(text) < 4 or not any(c.isalpha() for c in text): continue
+        pieces.append(text)
+        if len(' '.join(pieces)) >= maximum: break
+    text = ' '.join(pieces)
     if len(text) < 20:
         raise ValueError('У персонажа слишком мало текста для пробы голоса. Задайте текст в генераторе голосов.')
-    return text
+    if len(text) <= target: return text
+    boundaries = [m.end() for m in re.finditer(r'[.!?…](?:[»”"])?(?=\s|$)', text[:maximum + 1])
+                  if target - 10 <= m.end() <= maximum]
+    if boundaries:
+        return text[:min(boundaries, key=lambda end: abs(end - target))]
+    cut = text[:target].rsplit(' ', 1)[0].rstrip(' ,;:—–')
+    return cut + '…'
 
 
 def apply_role_edits(manifest, source, edits):
@@ -406,22 +406,29 @@ def main():
     elif action == 'voice-preview':
         from setup_audiobook import ensure_model
         from voice_designer import validate_request
+        reference = None
         if request.get('character'):
             manifest, _ = verify(Path(request['project']), require_resolved=False)
             request['text'] = character_excerpt(manifest, request['character'])
+            voice = next(v for v in manifest['voices'] if v['id'] == request['character'])
+            if voice.get('custom_reference'):
+                from synthesize_qwen_mlx import read_custom_reference
+                reference = read_custom_reference(voice)
         text, description = validate_request(request)
         if request.get('casting'):
             from synthesize_qwen_mlx import reference_instruction
             description = reference_instruction(request['casting'])
         root = Path(request['runtime']).expanduser().resolve()
         root.mkdir(parents=True, exist_ok=True)
-        stage('Проверка модели VoiceDesign')
+        name, spec = ('Qwen3-TTS-12Hz-1.7B-Ru-Stress-CF-source', 'stress_model_files.json') if reference else ('Qwen3-TTS-12Hz-1.7B-VoiceDesign-8bit', 'design_model_files.json')
+        stage('Проверка модели · проба реплик выбранного персонажа')
         with contextlib.redirect_stdout(sys.stderr):
-            model = ensure_model(root, 'Qwen3-TTS-12Hz-1.7B-VoiceDesign-8bit', q.load(ENGINE / 'design_model_files.json'), progress=stage)
+            model = ensure_model(root, name, q.load(ENGINE / spec), progress=stage)
         output = root.parent / 'VoiceLab' / uuid.uuid4().hex
         output.mkdir(parents=True)
-        q.write(output / 'request.json', dict(text=text, description=description, seed=request.get('seed', 17001)))
-        stage('Генератор голосов · создание тестового образца')
+        q.write(output / 'request.json', dict(text=text, description=description, seed=request.get('seed', 17001), reference=reference, character=request.get('character', '')))
+        stage('Проба голоса · ' + str(len(text)) + ' знаков собственных реплик · примерно 10 секунд')
+        emit('log', message='Текст пробы [' + request.get('character', 'генератор') + ']: ' + text)
         run_step(request['python'], 'voice_designer.py', ['--request', output / 'request.json',
             '--model', model, '--out', output], output)
         emit('sample', path=str(output / 'sample.wav'), text=text, description=description,

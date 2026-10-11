@@ -241,5 +241,14 @@ class PortableProjectTests(unittest.TestCase):
     def test_long_excerpt_is_short_and_does_not_use_other_speakers(self):
         text = 'Длинная реплика персонажа ' * 30
         result = worker.character_excerpt({'segments': [{'speaker': 'misha', 'text': text}]}, 'misha')
-        self.assertLessEqual(len(result), 250)
+        self.assertLessEqual(len(result), 150)
         self.assertTrue(result.endswith('…'))
+
+    def test_excerpt_gathers_enough_text_past_short_opening_replies(self):
+        text = 'Я давно хотел рассказать вам об этой истории. Мне кажется, сегодня самое подходящее время для нашего разговора.'
+        manifest = {'segments': [{'speaker': 'misha', 'text': 'О, еще бы!'}, {'speaker': 'other', 'text': 'Чужая реплика.'}, {'speaker': 'misha', 'text': text}]}
+        result = worker.character_excerpt(manifest, 'misha')
+        self.assertGreaterEqual(len(result), 110)
+        self.assertLessEqual(len(result), 150)
+        self.assertNotIn('Чужая', result)
+        self.assertIn('рассказать', result)

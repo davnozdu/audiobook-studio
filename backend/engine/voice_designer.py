@@ -22,9 +22,10 @@ def validate_request(request):
 
 def generate(request, model_path, output):
     text, description = validate_request(request)
+    engine = 'Клонирование голоса' if request.get('reference') else 'VoiceDesign'
     def stage(message):
         print('STUDIO_PROGRESS ' + json.dumps(dict(message=message), ensure_ascii=False), flush=True)
-    stage('Запуск движка VoiceDesign · подготовка локального окружения')
+    stage('Запуск движка ' + engine + ' · подготовка локального окружения')
     os.environ['HF_HUB_OFFLINE'] = '1'
     os.environ['TRANSFORMERS_OFFLINE'] = '1'
     os.environ.pop('OLLAMA_API_KEY', None)
@@ -36,13 +37,13 @@ def generate(request, model_path, output):
         mx.set_default_device(mx.gpu)
         mx.set_cache_limit(512 * 1024 * 1024)
         mx.set_memory_limit(8 * 1024 ** 3)
-        stage('Загрузка VoiceDesign в память · подготовка GPU')
+        stage('Загрузка модели в память · подготовка GPU')
         model = load_model(str(model_path))
-        if model.config.tts_model_type != 'voice_design':
+        if not request.get('reference') and model.config.tts_model_type != 'voice_design':
             raise ValueError('Выберите модель VoiceDesign')
-        stage('Генерация тестового образца · VoiceDesign работает на GPU')
+        stage('Генерация реплик персонажа · ' + engine + ' работает на GPU')
         audio, rate, metrics = generate_audio(model, mx, text, description,
-            int(request.get('seed', 17001)), SimpleNamespace(temperature=.9, max_tokens=1024))
+            int(request.get('seed', 17001)), SimpleNamespace(temperature=.9, max_tokens=1024, rab_generation=True), reference=request.get('reference'))
         if not 3 <= len(audio) / rate <= 30:
             raise ValueError('Для переносимого образца нужна запись 3–30 секунд. Измените длину тестового текста')
         output = Path(output); output.mkdir(parents=True, exist_ok=True)
@@ -54,7 +55,7 @@ def generate(request, model_path, output):
                                          seed=int(request.get('seed', 17001))))
         print(f'Образец готов: {len(audio)/rate:.1f} секунд', flush=True)
     finally:
-        stage('Выгрузка VoiceDesign · освобождение памяти')
+        stage('Выгрузка модели · освобождение памяти')
         if model is not None:
             del model
         gc.collect(); mx.clear_cache()
