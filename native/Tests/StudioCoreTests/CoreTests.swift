@@ -3,7 +3,7 @@ import XCTest
 
 final class CoreTests: XCTestCase {
     let fm=FileManager.default
-    var rules:URL{URL(fileURLWithPath:#filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("backend/engine/supertonic_rules.json")}
+    var rules:URL{URL(fileURLWithPath:#filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("backend/engine/supertonic_rules.json")}
     func testScalarOffsets() throws {XCTAssertEqual(try NativeIO.scalarSlice("A😀Б",1,2),"😀");XCTAssertThrowsError(try NativeIO.scalarSlice("A",0,2))}
     func testRolesPreserveAllText()throws {
         let paragraph:Object=["id":"p00001","text":"— Да! 😀 — сказал он."],answer:Object=["paragraphs":[["id":"p00001","segments":[["text":"— Да! 😀","speaker":"hero"],["text":"— сказал он.","speaker":"narrator"]]]]]

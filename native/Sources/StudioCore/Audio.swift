@@ -6,13 +6,18 @@ public enum NativeWAV {
         guard frames>=0,frames<=(Int(UInt32.max)-36)/4 else{throw StudioError("Книга превышает предел WAV (около 12 часов); разделите на части")}
         var data=Data("RIFF".utf8);data += little(UInt32(frames*4+36));data += Data("WAVEfmt ".utf8);data += little(UInt32(16));data += little(UInt16(3));data += little(UInt16(1));data += little(UInt32(sampleRate));data += little(UInt32(sampleRate*4));data += little(UInt16(4));data += little(UInt16(32));data += Data("data".utf8);data += little(UInt32(frames*4));return data
     }
+    public static func header64(frames:Int,sampleRate:Int=24000)->Data {
+        var data=Data("RF64".utf8);data += little(UInt32.max);data += Data("WAVEds64".utf8);data += little(UInt32(28));data += little(UInt64(frames)*4+72);data += little(UInt64(frames)*4);data += little(UInt64(frames));data += little(UInt32(0));data += Data("fmt ".utf8);data += little(UInt32(16));data += little(UInt16(3));data += little(UInt16(1));data += little(UInt32(sampleRate));data += little(UInt32(sampleRate*4));data += little(UInt16(4));data += little(UInt16(32));data += Data("data".utf8);data += little(UInt32.max);return data
+    }
     public static func samples(_ data:Data)throws->[Float] {
         guard data.count%4 == 0 else{throw StudioError("Оборванные аудиоданные")}
         return data.withUnsafeBytes{bytes in stride(from:0,to:data.count,by:4).map{Float(bitPattern:UInt32(littleEndian:bytes.loadUnaligned(fromByteOffset:$0,as:UInt32.self)))}}
     }
     public static func bytes(_ samples:[Float])->Data{samples.withUnsafeBytes{Data($0)}}
     public static func read(_ file:URL)throws->[Float] {
-        let data=try Data(contentsOf:file);guard data.count>=44,String(data:data[0..<4],encoding:.utf8) == "RIFF",String(data:data[36..<40],encoding:.utf8) == "data" else{throw StudioError("Некорректный рабочий WAV")};return try samples(Data(data.dropFirst(44)))
+        let data=try Data(contentsOf:file);guard data.count>=44 else{throw StudioError("Некорректный рабочий WAV")}
+        let rf64=String(data:data[0..<4],encoding:.utf8) == "RF64",offset=rf64 ? 80:44
+        guard data.count>=offset,String(data:data[(offset-8)..<(offset-4)],encoding:.utf8) == "data" else{throw StudioError("Некорректные рабочие аудиоданные")};return try samples(Data(data.dropFirst(offset)))
     }
     public static func write(_ file:URL,_ samples:[Float],sampleRate:Int=24000)throws {
         guard !samples.isEmpty,samples.allSatisfy({$0.isFinite}),samples.contains(where:{abs($0)>0.00001}) else{throw StudioError("Модель вернула пустое аудио")}
@@ -27,11 +32,11 @@ public enum NativeWAV {
 public final class WAVMontage {
     let handle:FileHandle
     public private(set) var frames=0
-    public init(_ file:URL)throws{FileManager.default.createFile(atPath:file.path,contents:try NativeWAV.header(frames:0));handle=try FileHandle(forWritingTo:file);try handle.seekToEnd()}
+    public init(_ file:URL)throws{FileManager.default.createFile(atPath:file.path,contents:NativeWAV.header64(frames:0));handle=try FileHandle(forWritingTo:file);try handle.seekToEnd()}
     deinit{try? handle.close()}
     public func append(_ samples:[Float])throws{try handle.write(contentsOf:NativeWAV.bytes(samples));frames += samples.count}
     public func silence(_ count:Int)throws{try append([Float](repeating:0,count:count))}
-    public func finish()throws{try handle.seek(toOffset:0);try handle.write(contentsOf:NativeWAV.header(frames:frames));try handle.close()}
+    public func finish()throws{try handle.seek(toOffset:0);try handle.write(contentsOf:NativeWAV.header64(frames:frames));try handle.close()}
 }
 public struct NativeAudio {
     public let ffmpeg:URL,ffprobe:URL
