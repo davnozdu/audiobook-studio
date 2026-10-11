@@ -1,101 +1,176 @@
-import Foundation
 import CryptoKit
 import Darwin
+import Foundation
 
 public typealias Object = [String: Any]
 public struct StudioError: LocalizedError {
-    public let message: String
-    public init(_ message: String) { self.message = message }
-    public var errorDescription: String? { message }
+  public let message: String
+  public init(_ message: String) { self.message = message }
+  public var errorDescription: String? { message }
 }
 public enum NativeIO {
-    public static let eventOutput = FileHandle(fileDescriptor: dup(STDOUT_FILENO), closeOnDealloc: true)
-    public static func object(_ value: Any?) -> Object { value as? Object ?? [:] }
-    public static func objects(_ value: Any?) -> [Object] { value as? [Object] ?? [] }
-    public static func string(_ value: Any?) -> String { value as? String ?? "" }
-    public static func load(_ url: URL) throws -> Object { object(try JSONSerialization.jsonObject(with: Data(contentsOf: url))) }
-    public static func json(_ value: Any) throws -> Data { try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .prettyPrinted, .fragmentsAllowed]) }
-    public static func write(_ url: URL, _ value: Any) throws {
-        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try json(value).write(to: url, options: .atomic)
+  private static var logFile: FileHandle?
+  public static func beginLog(_ folder: URL) throws {
+    let file = folder.appendingPathComponent("run.log")
+    if !FileManager.default.fileExists(atPath: file.path) {
+      FileManager.default.createFile(atPath: file.path, contents: nil)
     }
-    public static func hash(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
-    public static func hashFile(_ url: URL) throws -> String {
-        let handle = try FileHandle(forReadingFrom: url); defer { try? handle.close() }
-        var hash = SHA256()
-        while let chunk = try handle.read(upToCount: 1024 * 1024), !chunk.isEmpty { hash.update(data: chunk) }
-        return hash.finalize().map { String(format: "%02x", $0) }.joined()
+    logFile = try FileHandle(forWritingTo: file)
+    try logFile?.seekToEnd()
+  }
+  public static let eventOutput = FileHandle(
+    fileDescriptor: dup(STDOUT_FILENO), closeOnDealloc: true)
+  public static func object(_ value: Any?) -> Object { value as? Object ?? [:] }
+  public static func objects(_ value: Any?) -> [Object] { value as? [Object] ?? [] }
+  public static func string(_ value: Any?) -> String { value as? String ?? "" }
+  public static func load(_ url: URL) throws -> Object {
+    object(try JSONSerialization.jsonObject(with: Data(contentsOf: url)))
+  }
+  public static func json(_ value: Any) throws -> Data {
+    try JSONSerialization.data(
+      withJSONObject: value, options: [.sortedKeys, .prettyPrinted, .fragmentsAllowed])
+  }
+  public static func write(_ url: URL, _ value: Any) throws {
+    try FileManager.default.createDirectory(
+      at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try json(value).write(to: url, options: .atomic)
+  }
+  public static func hash(_ data: Data) -> String {
+    SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+  }
+  public static func hashFile(_ url: URL) throws -> String {
+    let handle = try FileHandle(forReadingFrom: url)
+    defer { try? handle.close() }
+    var hash = SHA256()
+    while let chunk = try handle.read(upToCount: 1024 * 1024), !chunk.isEmpty {
+      hash.update(data: chunk)
     }
-    public static func emit(_ kind: String, _ data: Object = [:]) {
-        var event = data; event["type"] = kind
-        if let encoded = try? JSONSerialization.data(withJSONObject: event, options: [.sortedKeys]), var line = String(data: encoded, encoding: .utf8) {
-            line += "\n"; eventOutput.write(Data(line.utf8))
-        }
+    return hash.finalize().map { String(format: "%02x", $0) }.joined()
+  }
+  public static func emit(_ kind: String, _ data: Object = [:]) {
+    var event = data
+    event["type"] = kind
+    if let encoded = try? JSONSerialization.data(withJSONObject: event, options: [.sortedKeys]),
+      var line = String(data: encoded, encoding: .utf8)
+    {
+      line += "\n"
+      eventOutput.write(Data(line.utf8))
+      try? logFile?.write(contentsOf: Data(line.utf8))
     }
-    public static func stage(_ message: String, _ fraction: Double = 0) { emit("progress", ["message": message, "fraction": fraction]) }
-    public static func regex(_ pattern: String, _ text: String) -> [NSTextCheckingResult] {
-        (try? NSRegularExpression(pattern: pattern).matches(in: text, range: NSRange(text.startIndex..., in: text))) ?? []
+  }
+  public static func stage(_ message: String, _ fraction: Double = 0) {
+    emit("progress", ["message": message, "fraction": fraction])
+  }
+  public static func regex(_ pattern: String, _ text: String) -> [NSTextCheckingResult] {
+    (try? NSRegularExpression(pattern: pattern).matches(
+      in: text, range: NSRange(text.startIndex..., in: text))) ?? []
+  }
+  public static func replace(_ pattern: String, _ text: String, _ replacement: String) -> String {
+    (try? NSRegularExpression(pattern: pattern).stringByReplacingMatches(
+      in: text, range: NSRange(text.startIndex..., in: text), withTemplate: replacement)) ?? text
+  }
+  public static func scalarSlice(_ text: String, _ start: Int, _ end: Int) throws -> String {
+    let scalars = Array(text.unicodeScalars)
+    guard start >= 0, end >= start, end <= scalars.count else {
+      throw StudioError("Разметка роли выходит за границы текста")
     }
-    public static func replace(_ pattern: String, _ text: String, _ replacement: String) -> String {
-        (try? NSRegularExpression(pattern: pattern).stringByReplacingMatches(in: text, range: NSRange(text.startIndex..., in: text), withTemplate: replacement)) ?? text
+    return String(String.UnicodeScalarView(scalars[start..<end]))
+  }
+  public static func xml(_ text: String) -> String {
+    text.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;")
+      .replacingOccurrences(of: ">", with: "&gt;").replacingOccurrences(of: "\"", with: "&quot;")
+  }
+  public static func capture(
+    _ executable: URL, _ arguments: [String], cwd: URL? = nil, input: Data? = nil,
+    events: Bool = false
+  ) throws -> (Data, Data) {
+    let process = Process()
+    let output = Pipe()
+    let errors = Pipe()
+    let stdin = Pipe()
+    process.executableURL = executable
+    process.arguments = arguments
+    process.currentDirectoryURL = cwd
+    process.standardOutput = output
+    process.standardError = errors
+    if input != nil { process.standardInput = stdin }
+    let lock = NSLock()
+    var capturedError = Data()
+    errors.fileHandleForReading.readabilityHandler = { handle in
+      let data = handle.availableData
+      if !data.isEmpty {
+        lock.lock()
+        capturedError.append(data)
+        lock.unlock()
+      }
     }
-    public static func scalarSlice(_ text: String, _ start: Int, _ end: Int) throws -> String {
-        let scalars = Array(text.unicodeScalars)
-        guard start >= 0, end >= start, end <= scalars.count else { throw StudioError("Разметка роли выходит за границы текста") }
-        return String(String.UnicodeScalarView(scalars[start..<end]))
+    try process.run()
+    if events { emit("child", ["pid": process.processIdentifier]) }
+    if let input {
+      try stdin.fileHandleForWriting.write(contentsOf: input)
+      try stdin.fileHandleForWriting.close()
     }
-    public static func xml(_ text: String) -> String {
-        text.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;").replacingOccurrences(of: ">", with: "&gt;").replacingOccurrences(of: "\"", with: "&quot;")
+    let data = output.fileHandleForReading.readDataToEndOfFile()
+    process.waitUntilExit()
+    errors.fileHandleForReading.readabilityHandler = nil
+    lock.lock()
+    capturedError.append(errors.fileHandleForReading.readDataToEndOfFile())
+    lock.unlock()
+    if events { emit("child", ["pid": 0]) }
+    guard process.terminationStatus == 0 else {
+      let detail = String(data: capturedError, encoding: .utf8) ?? ""
+      throw StudioError(executable.lastPathComponent + ": " + String(detail.suffix(1500)))
     }
-    public static func capture(_ executable: URL, _ arguments: [String], cwd: URL? = nil, input: Data? = nil, events: Bool = false) throws -> (Data, Data) {
-        let process = Process(), output = Pipe(), errors = Pipe(), stdin = Pipe()
-        process.executableURL = executable; process.arguments = arguments; process.currentDirectoryURL = cwd
-        process.standardOutput = output; process.standardError = errors
-        if input != nil { process.standardInput = stdin }
-        let lock = NSLock(); var capturedError = Data()
-        errors.fileHandleForReading.readabilityHandler = { handle in
-            let data = handle.availableData
-            if !data.isEmpty { lock.lock(); capturedError.append(data); lock.unlock() }
-        }
-        try process.run()
-        if events { emit("child", ["pid": process.processIdentifier]) }
-        if let input { try stdin.fileHandleForWriting.write(contentsOf: input); try stdin.fileHandleForWriting.close() }
-        let data = output.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        errors.fileHandleForReading.readabilityHandler = nil
-        lock.lock(); capturedError.append(errors.fileHandleForReading.readDataToEndOfFile()); lock.unlock()
-        if events { emit("child", ["pid": 0]) }
-        guard process.terminationStatus == 0 else {
-            let detail = String(data: capturedError, encoding: .utf8) ?? ""
-            throw StudioError(executable.lastPathComponent + ": " + String(detail.suffix(1500)))
-        }
-        return (data, capturedError)
+    return (data, capturedError)
+  }
+  @discardableResult public static func run(
+    _ executable: URL, _ arguments: [String], cwd: URL? = nil, input: Data? = nil,
+    events: Bool = false
+  ) throws -> Data { try capture(executable, arguments, cwd: cwd, input: input, events: events).0 }
+  public static func archiveMembers(_ url: URL) throws -> [String] {
+    let text =
+      String(
+        data: try run(URL(fileURLWithPath: "/usr/bin/unzip"), ["-Z1", url.path]), encoding: .utf8)
+      ?? ""
+    let members = text.split(separator: "\n").map(String.init)
+    guard !members.isEmpty else { throw StudioError("Архив пуст") }
+    for name in members {
+      guard !name.hasPrefix("/"), !name.contains("\\"), !name.split(separator: "/").contains("..")
+      else { throw StudioError("Недопустимый путь в архиве") }
     }
-    @discardableResult public static func run(_ executable: URL, _ arguments: [String], cwd: URL? = nil, input: Data? = nil, events: Bool = false) throws -> Data { try capture(executable, arguments, cwd: cwd, input: input, events: events).0 }
-    public static func archiveMembers(_ url: URL) throws -> [String] {
-        let text = String(data: try run(URL(fileURLWithPath: "/usr/bin/unzip"), ["-Z1", url.path]), encoding: .utf8) ?? ""
-        let members = text.split(separator: "\n").map(String.init)
-        guard !members.isEmpty else { throw StudioError("Архив пуст") }
-        for name in members {
-            guard !name.hasPrefix("/"), !name.contains("\\"), !name.split(separator: "/").contains("..") else { throw StudioError("Недопустимый путь в архиве") }
-        }
-        let metadata = String(data: try run(URL(fileURLWithPath: "/usr/bin/zipinfo"), ["-l", url.path]), encoding: .utf8) ?? ""
-        guard !metadata.split(separator: "\n").contains(where: { $0.hasPrefix("l") }) else { throw StudioError("Символические ссылки в архиве не поддерживаются") }
-        return members
+    let metadata =
+      String(
+        data: try run(URL(fileURLWithPath: "/usr/bin/zipinfo"), ["-l", url.path]), encoding: .utf8)
+      ?? ""
+    guard !metadata.split(separator: "\n").contains(where: { $0.hasPrefix("l") }) else {
+      throw StudioError("Символические ссылки в архиве не поддерживаются")
     }
-    public static func unpack(_ url: URL, to folder: URL) throws {
-        _ = try archiveMembers(url)
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        try run(URL(fileURLWithPath: "/usr/bin/ditto"), ["-x", "-k", url.path, folder.path])
+    return members
+  }
+  public static func unpack(_ url: URL, to folder: URL) throws {
+    _ = try archiveMembers(url)
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    try run(URL(fileURLWithPath: "/usr/bin/ditto"), ["-x", "-k", url.path, folder.path])
+  }
+  public static func zip(_ folder: URL, to url: URL, epub: Bool = false) throws {
+    let temp = url.deletingLastPathComponent().appendingPathComponent(UUID().uuidString + ".zip")
+    defer { try? FileManager.default.removeItem(at: temp) }
+    if epub {
+      try run(
+        URL(fileURLWithPath: "/usr/bin/zip"), ["-q", "-X", "-0", temp.path, "mimetype"], cwd: folder
+      )
     }
-    public static func zip(_ folder: URL, to url: URL, epub: Bool = false) throws {
-        let temp = url.deletingLastPathComponent().appendingPathComponent(UUID().uuidString + ".zip")
-        defer { try? FileManager.default.removeItem(at: temp) }
-        if epub { try run(URL(fileURLWithPath: "/usr/bin/zip"), ["-q", "-X", "-0", temp.path, "mimetype"], cwd: folder) }
-        try run(URL(fileURLWithPath: "/usr/bin/zip"), ["-q", "-X", "-r", temp.path, ".", "-x", "mimetype"], cwd: folder)
-        if !epub, FileManager.default.fileExists(atPath: folder.appendingPathComponent("mimetype").path) {
-            try run(URL(fileURLWithPath: "/usr/bin/zip"), ["-q", temp.path, "mimetype"], cwd: folder)
-        }
-        if FileManager.default.fileExists(atPath: url.path) { _ = try FileManager.default.replaceItemAt(url, withItemAt: temp) } else { try FileManager.default.moveItem(at: temp, to: url) }
+    try run(
+      URL(fileURLWithPath: "/usr/bin/zip"), ["-q", "-X", "-r", temp.path, ".", "-x", "mimetype"],
+      cwd: folder)
+    if !epub, FileManager.default.fileExists(atPath: folder.appendingPathComponent("mimetype").path)
+    {
+      try run(URL(fileURLWithPath: "/usr/bin/zip"), ["-q", temp.path, "mimetype"], cwd: folder)
     }
+    if FileManager.default.fileExists(atPath: url.path) {
+      _ = try FileManager.default.replaceItemAt(url, withItemAt: temp)
+    } else {
+      try FileManager.default.moveItem(at: temp, to: url)
+    }
+  }
 }
