@@ -477,11 +477,8 @@ struct Character: Identifiable {
     func build(destination: String? = nil) {
         guard let destination = destination ?? chooseBuildDestination() else { return }
         saveThen {
-            // Setup checks all files and downloads only missing models. No pip/install on client.
-            self.launch(self.request("setup"), after: {
-                var r = self.request("build"); r["destination"] = destination
-                self.launch(r)
-            })
+            var r = self.request("build"); r["destination"] = destination
+            self.launch(r)
         }
     }
 

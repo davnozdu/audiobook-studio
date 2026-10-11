@@ -332,6 +332,9 @@ public final class NativeDirector {
               throw StudioError("Нет поля характера: \(field)")
             }
           }
+          guard ["high", "medium", "low"].contains(NativeIO.string(profile["certainty"])),
+            profile["assumptions"] is [String], !NativeIO.objects(profile["evidence"]).isEmpty
+          else { throw StudioError("LLM не указала уверенность и основания карточки") }
           for evidence in NativeIO.objects(profile["evidence"]) {
             let ref = NativeIO.string(evidence["reference"])
             let kind = NativeIO.string(evidence["kind"])
