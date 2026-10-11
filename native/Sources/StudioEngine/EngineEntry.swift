@@ -228,6 +228,9 @@ final class Engine {
     if reference == nil, !VoiceDirection.validEnglish(description ?? "") {
       throw StudioError("Не подготовлена английская инструкция голоса")
     }
+    if reference == nil {
+      NativeIO.emit("log", ["message": "Инструкция VoiceDesign: " + (description ?? "")])
+    }
     MLXRandom.seed(UInt64(max(0, seed)))
     let ref: MLXArray?
     if let reference {
@@ -387,6 +390,7 @@ final class Engine {
       let signature = NativeIO.hash(
         try NativeIO.json([
           "book": NativeIO.object(manifest["book"])["input_sha256"]!, "voice": instruction(voice),
+          "profile_sha256": try VoiceDirection.signature(voice),
           "seed": voice["seed"] ?? 17001,
         ]))
       if fm.fileExists(atPath: file.path), let old = try? NativeIO.load(meta),
@@ -406,7 +410,11 @@ final class Engine {
         seed: voice["seed"] as? Int ?? 17001)
       try NativeWAV.write(file, samples)
       try NativeIO.write(
-        meta, ["signature": signature, "text": text, "sha256": try NativeIO.hashFile(file)])
+        meta,
+        [
+          "signature": signature, "text": text, "description": instruction(voice),
+          "sha256": try NativeIO.hashFile(file),
+        ])
       references[id] = (file, text)
     }
     design = nil

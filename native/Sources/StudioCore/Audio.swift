@@ -203,7 +203,7 @@ public struct NativeAudio {
       music.path, "-filter_complex",
       "[1:a]aresample=24000,aformat=channel_layouts=mono,volume=\(percent/100)[music];[0:a][music]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.84:level=0:latency=1[out]",
       "-map", "[out]", "-t", String(total), "-ac", "1", "-ar", "24000", "-c:a", "pcm_f32le",
-      mixed.path,
+      "-rf64", "auto", mixed.path,
     ])
     guard abs(try duration(mixed) - total) < 0.002 else {
       throw StudioError("Наложение музыки изменило длительность")
