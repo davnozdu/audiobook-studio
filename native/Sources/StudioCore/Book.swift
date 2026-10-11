@@ -110,7 +110,7 @@ public enum NativeBook {
           && ($0 + 1 == scalars.count
             || CharacterSet.whitespacesAndNewlines.contains(scalars[$0 + 1]))
       }
-      if let cut = sentence.first {
+      if end < scalars.count, let cut = sentence.last {
         end = cut + 1
       } else if end < scalars.count,
         let cut = (start..<end).last(where: {

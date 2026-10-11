@@ -3,6 +3,30 @@ import XCTest
 @testable import StudioCore
 
 final class CoreTests: XCTestCase {
+  func testSilentSpeechRetriesAndStops() async throws {
+    var seeds: [Int] = []
+    let result = try await SpeechRecovery.generate(text: "— Да… как же это? —", seed: 10, label: "test") { text, seed in
+      XCTAssertEqual(text, "Да… как же это?")
+      seeds.append(seed)
+      return seeds.count == 1 ? [0, 0] : [0.1, -0.2]
+    }
+    XCTAssertEqual(result, [0.1, -0.2])
+    XCTAssertEqual(seeds, [10, 104739])
+    var attempts = 0
+    do {
+      _ = try await SpeechRecovery.generate(text: "Нет", seed: 1, label: "seg000034") { _, _ in
+        attempts += 1; return [0, 0]
+      }
+      XCTFail("Silent speech must fail after bounded retries")
+    } catch { XCTAssertTrue(error.localizedDescription.contains("seg000034")) }
+    XCTAssertEqual(attempts, 3)
+  }
+  func testShortSentencesShareOneSpeechBlock() throws {
+    let text = "Первое предложение. Второе предложение! Третье предложение?"
+    let chunks = NativeBook.split(text)
+    XCTAssertEqual(chunks.count, 1)
+    XCTAssertEqual(try NativeIO.scalarSlice(text, chunks[0].0, chunks[0].1), text)
+  }
   func testCleanupPreservesUsefulProjectFiles() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }

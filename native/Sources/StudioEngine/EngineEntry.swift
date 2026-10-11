@@ -245,7 +245,6 @@ final class Engine {
     if reference == nil {
       NativeIO.emit("log", ["message": "Инструкция VoiceDesign: " + (description ?? "")])
     }
-    MLXRandom.seed(UInt64(max(0, seed)))
     let ref: MLXArray?
     if let reference {
       let (_, array) = try loadAudioArray(from: reference.0, sampleRate: 24000)
@@ -253,15 +252,14 @@ final class Engine {
     } else {
       ref = nil
     }
-    let audio = try await model.generate(
-      text: text, voice: description, refAudio: ref, refText: reference?.1, language: "Russian",
-      generationParameters: GenerateParameters(
-        maxTokens: 4096, temperature: 0.9, topP: 1, topK: 50, repetitionPenalty: 1.05))
-    let result = NativeWAV.trim(audio.asArray(Float.self))
-    guard !result.isEmpty, result.allSatisfy({ $0.isFinite }) else {
-      throw StudioError("Модель вернула пустой образец")
+    return try await SpeechRecovery.generate(text: text, seed: seed, label: "образец голоса") { spoken, attemptSeed in
+      MLXRandom.seed(UInt64(attemptSeed))
+      let audio = try await model.generate(
+        text: spoken, voice: description, refAudio: ref, refText: reference?.1, language: "Russian",
+        generationParameters: GenerateParameters(
+          maxTokens: 4096, temperature: 0.9, topP: 1, topK: 50, repetitionPenalty: 1.05))
+      return audio.asArray(Float.self)
     }
-    return result
   }
   func preview() async throws {
     var text = NativeIO.string(request["text"])
@@ -514,7 +512,7 @@ final class Engine {
     for (i, row) in rows.enumerated() {
       let id = NativeIO.string(row["id"])
       let speaker = NativeIO.string(row["speaker"])
-      let text = NativeIO.string(row["tts_text"])
+      let text = SpeechRecovery.text(NativeIO.string(row["tts_text"]))
       let start = Date()
       guard let reference = references[speaker], let referenceHash = referenceHashes[speaker] else {
         throw StudioError("Не подготовлен голос " + speaker)
@@ -546,11 +544,13 @@ final class Engine {
         }
         guard let ref = conditioning[speaker] else { throw StudioError("Не подготовлен голос " + speaker) }
         NativeIO.stage("Озвучивание · \(i+1)/\(rows.count) · " + speaker)
-        MLXRandom.seed(UInt64(seed))
-        let wave = try await base.generate(text: text, conditioning: ref,
-          generationParameters: GenerateParameters(
-            maxTokens: 4096, temperature: 0.9, topP: 1, topK: 50, repetitionPenalty: 1.05))
-        samples = NativeWAV.trim(wave.asArray(Float.self))
+        samples = try await SpeechRecovery.generate(text: text, seed: seed, label: id + " · " + speaker) { spoken, attemptSeed in
+          MLXRandom.seed(UInt64(attemptSeed))
+          let wave = try await base.generate(text: spoken, conditioning: ref,
+            generationParameters: GenerateParameters(
+              maxTokens: 4096, temperature: 0.9, topP: 1, topK: 50, repetitionPenalty: 1.05))
+          return wave.asArray(Float.self)
+        }
         try SpeechCache.save(file, samples: samples, signature: signature)
       }
       let begin = Double(montage.frames) / 24000
