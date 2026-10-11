@@ -260,6 +260,7 @@ struct Character: Identifiable {
         let panel = NSOpenPanel(); panel.allowedContentTypes = [UTType(filenameExtension: "epub")!]
         guard panel.runModal() == .OK, let url = panel.url else { return }
         book = url.path; project = ""; characters = []; segments = []; selected = nil; dirty = false; rolesDirty = false
+        previewByCharacter = [:]; audioPlayer?.stop()
         status = "Книга выбрана · можно определить персонажей"
     }
 
@@ -273,6 +274,7 @@ struct Character: Identifiable {
         let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
         project = url.path; book = url.appendingPathComponent("book.epub").path
+        previewByCharacter = [:]; audioPlayer?.stop()
         do { try loadProject(); status = "Проект открыт" }
         catch { self.error = "В этой папке нет готового проекта книги"; project = "" }
     }
@@ -314,6 +316,18 @@ struct Character: Identifiable {
     }
 
     func prepare() { launch(request("prepare")) }
+    func automaticBuild() {
+        guard !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            settings = true; status = "Укажите ключ LLM для автоматической сборки"; return
+        }
+        if project.isEmpty {
+            var r = request("prepare"); r["automatic"] = true
+            launch(r, after: { self.build() })
+        } else if segments.contains(where: { $0.speaker.isEmpty }) || characters.contains(where: { $0.personality.isEmpty || $0.habits.isEmpty || $0.speakingStyle.isEmpty }) {
+            var r = request("characters"); r["automatic"] = true
+            launch(r, after: { self.build() })
+        } else { build() }
+    }
     func analyze() { saveThen { self.launch(self.request("characters")) } }
 
     func saveThen(_ continuation: @escaping () -> Void) {
@@ -468,6 +482,7 @@ struct Character: Identifiable {
                 }
                 self.fraction = 1
                 if !self.project.isEmpty && ["prepare", "characters", "save", "roles-save", "sample"].contains(request["action"] as? String ?? "") { try? self.loadProject() }
+                if request["action"] as? String == "voice-preview", request["character"] as? String != nil { self.listenGenerated() }
                 next?()
             }
         }
@@ -502,7 +517,7 @@ struct Character: Identifiable {
                 fraction = event["fraction"] as? Double ?? 0
                 completed = "\(event["completed"] ?? 0) / \(event["total"] ?? 0) фрагментов"
             case "log": appendLog(event["message"] as? String ?? "")
-            case "error": receivedError = true; error = event["message"] as? String; status = "Требуется внимание"
+            case "error": receivedError = true; error = event["message"] as? String; status = "Требуется внимание"; appendLog(error ?? "Ошибка движка")
             case "done": status = event["message"] as? String ?? "Готово"; project = event["path"] as? String ?? project
             default: break
             }
@@ -648,22 +663,10 @@ struct ContentView: View {
                     step("4", "Аудиокнига и EPUB", done: FileManager.default.fileExists(atPath: studio.project + "/result/book.m4b"))
                 }
                 Divider()
-                Text("ПЕРСОНАЖИ").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                ScrollView {
-                    VStack(spacing: 6) {
-                        ForEach(studio.characters) { c in
-                            Button { studio.selected = c.id } label: {
-                                HStack {
-                                    Image(systemName: c.id == "narrator" ? "book" : "person")
-                                    Text(c.name).lineLimit(1)
-                                    Spacer()
-                                    if !c.sample.isEmpty { Image(systemName: "waveform").font(.caption) }
-                                }.padding(11).frame(maxWidth: .infinity, alignment: .leading)
-                                    .background(studio.selected == c.id ? Color.indigo.opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: 10))
-                            }.buttonStyle(.plain)
-                        }
-                    }
-                }
+                Text(studio.characters.isEmpty ? "Персонажи появятся после анализа книги" : "\(studio.characters.count) персонажей · карточки в основном списке")
+                    .font(.subheadline).foregroundStyle(.secondary)
+                Text("Автоматическая сборка проходит все этапы. Для подробной настройки раскройте карточку нужного персонажа.")
+                    .font(.caption).foregroundStyle(.secondary)
                 Spacer(minLength: 0)
                 Button("Генератор голосов", systemImage: "waveform.badge.mic") { studio.voiceLabOpen = true }.disabled(studio.busy)
                 Button("Настройки LLM", systemImage: "slider.horizontal.3") { studio.settings = true }
@@ -692,6 +695,10 @@ struct ContentView: View {
                                     Spacer()
                                     Button("Выбрать книгу…") { studio.chooseBook() }
                                 }
+                                Button("Собрать автоматически", systemImage: "wand.and.stars") { studio.automaticBuild() }
+                                    .buttonStyle(.borderedProminent).tint(.indigo).controlSize(.large).disabled(studio.book.isEmpty)
+                                Text("Персонажи, характеры, голоса, M4B и EPUB — по очереди, без ручного заполнения карточек.")
+                                    .font(.caption).foregroundStyle(.secondary)
                                 HStack {
                                     Button("Определить персонажей и расставить роли", systemImage: "person.2") { studio.prepare() }
                                         .buttonStyle(.borderedProminent).tint(.indigo).disabled(studio.book.isEmpty || !studio.project.isEmpty)
@@ -735,8 +742,27 @@ struct ContentView: View {
                                 }
                             }
                         }
-                        if let index = studio.characters.firstIndex(where: { $0.id == studio.selected }) {
-                            Card { CharacterEditor(studio: studio, index: index) }
+                        if !studio.characters.isEmpty {
+                            Text("Персонажи и голоса · \(studio.characters.count)").font(.title2.bold())
+                            Text("Карточки заполняются автоматически. Раскройте персонажа, чтобы уточнить характер или изменить голос.").foregroundStyle(.secondary)
+                            ForEach(studio.characters.indices, id: \.self) { index in
+                                Card {
+                                    DisclosureGroup {
+                                        CharacterEditor(studio: studio, index: index).padding(.top, 16)
+                                    } label: {
+                                        HStack(spacing: 12) {
+                                            Image(systemName: studio.characters[index].id == "narrator" ? "book.closed.fill" : "person.fill").foregroundStyle(.indigo)
+                                            VStack(alignment: .leading, spacing: 4) {
+                                                Text(studio.characters[index].name).font(.headline)
+                                                Text(studio.characters[index].personality.isEmpty ? "Описание голоса готово · характер ещё не определён" : studio.characters[index].personality)
+                                                    .font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                                            }
+                                            Spacer()
+                                            Text(studio.characters[index].sample.isEmpty ? "Голос нейросети" : "Свой образец").font(.caption).foregroundStyle(.secondary)
+                                        }
+                                    }
+                                }
+                            }
                             HStack {
                                 Text(studio.dirty ? "Есть несохранённые изменения" : "Карточки сохранены в проекте книги").font(.caption).foregroundStyle(.secondary)
                                 Spacer()

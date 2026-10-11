@@ -8,6 +8,29 @@ import urllib.error
 FIELDS = ('age', 'personality', 'habits', 'speaking_style', 'voice_description')
 
 
+def narrator_profile(voice):
+    female = voice.get('voice_gender') == 'female'
+    return dict(id=voice['id'], age='Взрослый голос, примерно 35–50 лет (выбор озвучки)',
+        personality='Спокойный, внимательный, сдержанный; нейтральная подача повествования',
+        habits='Ровное дыхание, небольшие паузы между мыслями, без лишних вздохов и междометий',
+        speaking_style='Ясная дикция, умеренный темп, естественные смысловые акценты, без переигрывания',
+        voice_description=('Warm mature Russian female contralto' if female else 'Warm mature Russian male baritone') +
+            ', clear diction, steady moderate pace, natural expressive literary narration, calm delivery, no music or singing.',
+        certainty='high', assumptions=['Стандартная режиссура рассказчика; возраст и манера являются настройками голоса, а не биографией автора.'],
+        evidence=[dict(kind='template', reference='standard-narrator', note='Стандартный шаблон повествования аудиокниги')])
+
+
+def other_profile(voice):
+    result = narrator_profile(voice)
+    result.update(personality='Нейтральная роль для реплик неизвестного говорящего',
+        habits='Без индивидуальных привычек; чистая речь без добавленных звуков',
+        speaking_style='Естественный разговорный темп, сдержанные интонации',
+        voice_description=voice['voice_description'], certainty='low',
+        assumptions=['Общий голос назначен автоматически, потому что говорящий не установлен.'],
+        evidence=[dict(kind='template', reference='other-voices', note='Резервный голос для неопределённых реплик')])
+    return result
+
+
 def validate_profile(data, voice, paragraph_ids, sources):
     if not isinstance(data, dict) or data.get('id') != voice['id']:
         raise ValueError('LLM изменила ID персонажа')
@@ -30,6 +53,8 @@ def validate_profile(data, voice, paragraph_ids, sources):
         elif item.get('kind') == 'web':
             if item.get('reference') not in sources:
                 raise ValueError('Веб-ссылка не получена через поиск')
+        elif item.get('kind') == 'template' and voice['id'] == 'narrator' and item.get('reference') == 'standard-narrator':
+            pass
         else:
             raise ValueError('Неизвестный тип основания')
     return {k: copy.deepcopy(data[k]) for k in ('id', *FIELDS, 'certainty', 'assumptions', 'evidence')}
@@ -73,6 +98,13 @@ def analyze(manifest, source, key, model, use_web, q, progress):
                            max_tokens=6000, timeout=240)
     result = []
     for index, voice in enumerate(manifest['voices']):
+        if voice['id'] == 'narrator':
+            progress('Рассказчик · стандартный шаблон', index / len(manifest['voices']))
+            result.append(narrator_profile(voice))
+            continue
+        if voice['id'] == 'other_voices':
+            result.append(other_profile(voice))
+            continue
         # Full relevant paragraphs include author descriptions and dialogue context.
         own = {s['paragraph_id'] for s in manifest['segments'] if s['speaker'] == voice['id']}
         names = [voice['name'], *voice.get('aliases', [])]

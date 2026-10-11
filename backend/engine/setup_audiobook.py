@@ -8,6 +8,11 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import time
+
+
+def report_status(message):
+    print('STUDIO_PROGRESS ' + json.dumps(dict(message=message), ensure_ascii=False), flush=True)
 
 
 def checksum(path):
@@ -22,35 +27,56 @@ def valid_model(folder, spec):
                and (not item['sha256'] or checksum(folder / item['path']) == item['sha256']) for item in spec['files'])
 
 
-def ensure_model(root, name, spec, check_only=False):
+def ensure_model(root, name, spec, check_only=False, progress=None):
     target = root / 'models' / name
-    if valid_model(target, spec):
-        print(f'Модель проверена: {target}', flush=True)
-        return target
-    if check_only:
-        raise ValueError(f'Нет полной проверенной модели: {target}')
+    total = sum(item['size'] for item in spec['files'])
+    done = 0
+    def report(message, fraction=0):
+        if progress:
+            progress(message, fraction)
+        else:
+            print('STUDIO_PROGRESS ' + json.dumps(dict(message=message, fraction=fraction), ensure_ascii=False), flush=True)
+    label = 'VoiceDesign' if 'VoiceDesign' in name else 'модель озвучки'
     installed = root.parent / 'models' / name
-    if not target.exists() and valid_model(installed, spec):
-        target.parent.mkdir(parents=True, exist_ok=True)
-        # macOS APFS clone: independent files in this kit, not symlinks outside it.
-        subprocess.run(['cp', '-cR', str(installed), str(target)], check=True)
-        print(f'Использована уже установленная модель: {target}', flush=True)
-        return target
+    if not target.exists() and installed.exists():
+        report(f'Проверка ранее установленной модели · {label}')
+        if valid_model(installed, spec):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run(['cp', '-cR', str(installed), str(target)], check=True)
     for item in spec['files']:
         path = target / item['path']
+        report(f'Проверка файлов {label} · {item["path"]}', done / total)
         if path.is_file():
-            if path.stat().st_size == item['size'] and (not item['sha256'] or checksum(path) == item['sha256']):
-                continue
-            raise ValueError(f'Файл модели повреждён; не перезаписываю: {path}')
+            if path.stat().st_size != item['size'] or (item['sha256'] and checksum(path) != item['sha256']):
+                raise ValueError(f'Файл модели повреждён; не перезаписываю: {path}')
+            done += item['size']
+            continue
+        if check_only:
+            raise ValueError(f'Нет файла модели: {path}')
         path.parent.mkdir(parents=True, exist_ok=True)
         partial = path.with_name(path.name + '.partial')
         url = f"https://huggingface.co/{spec['repo']}/resolve/{spec['revision']}/{item['path']}"
-        print(f'Скачивается: {path}', flush=True)
-        subprocess.run(['curl','-fL','--retry','3','-C','-',url,'-o',str(partial)], check=True)
+        start_size = partial.stat().st_size if partial.exists() else 0
+        start = time.monotonic()
+        child = subprocess.Popen(['curl', '-fsSL', '--connect-timeout', '30', '--speed-limit', '1024', '--speed-time', '90', '--retry', '3', '-C', '-', url, '-o', str(partial)],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        while child.poll() is None:
+            size = partial.stat().st_size if partial.exists() else 0
+            seconds = max(time.monotonic() - start, .01)
+            rate = max(0, size - start_size) / seconds
+            timing = f' · {rate/1024**2:.1f} МБ/с' if rate else ' · соединение с сервером'
+            report(f'Скачивание {label} · {item["path"]} · {(done+size)/1024**2:.0f} / {total/1024**2:.0f} МБ' + timing,
+                   min(1, (done + size) / total))
+            time.sleep(1)
+        error = child.stderr.read(); child.stderr.close()
+        if child.returncode:
+            raise ValueError(f'Не удалось скачать {label}: ' + error[-500:])
+        report(f'Проверка контрольной суммы {label} · {item["path"]}', (done + item['size']) / total)
         if partial.stat().st_size != item['size'] or (item['sha256'] and checksum(partial) != item['sha256']):
             raise ValueError(f'Не совпадает размер/SHA256: {partial}')
         partial.rename(path)
-    if not valid_model(target, spec): raise ValueError('Не завершена загрузка модели')
+        done += item['size']
+    report(f'{label} установлена · файлы проверены', 1)
     return target
 
 
@@ -70,17 +96,21 @@ def runtime(root, name, requirements, modules, check_only):
 
 
 def setup(root, check_only=False):
+    report_status('Подготовка локального движка · проверка совместимости Mac')
     if sys.platform != 'darwin' or platform.machine() != 'arm64': raise ValueError('Комплект рассчитан на macOS Apple Silicon (Python arm64, не Rosetta)')
     if not Path(os.environ.get('AUDIOBOOK_FFMPEG', '/opt/homebrew/bin/ffmpeg')).exists():
         raise ValueError('Не найден встроенный FFmpeg')
     if not check_only:
         for name in ['books', 'results', 'models']:
             (root / name).mkdir(parents=True, exist_ok=True)
+    report_status('Проверка встроенного движка озвучки MLX')
     runtime(root,'.venv-mlx','requirements.txt',['mlx_audio','ebooklib','razdel','soundfile','bs4'],check_only)
+    report_status('Проверка движка ударений Silero')
     runtime(root,'.venv-stress','requirements-stress.txt',['torch','silero_stress'],check_only)
     for name, spec_file in [('Qwen3-TTS-12Hz-1.7B-Ru-Stress-CF-source','stress_model_files.json'),
                             ('Qwen3-TTS-12Hz-1.7B-VoiceDesign-8bit','design_model_files.json')]:
         ensure_model(root,name,json.loads((root / spec_file).read_text()),check_only)
+    report_status('Подготовка словарей ударений')
     dictionary = root / 'data/stress/dictionary.json'
     if not dictionary.exists():
         if check_only: raise ValueError('Не установлен словарь исключений')
@@ -106,6 +136,7 @@ def setup(root, check_only=False):
             partial.rename(binary)
     if binary.stat().st_size != 179200764 or checksum(binary) != expected:
         raise ValueError('Повреждён бинарный словарь; не перезаписываю')
+    report_status('Проверка встроенной музыки')
     music = root / 'resources/Lamplight_and_Paper.mp3'
     from mix_book_music import FIRST_TRACK
     if not music.is_file() or music.stat().st_size != FIRST_TRACK['size'] or checksum(music) != FIRST_TRACK['sha256']:

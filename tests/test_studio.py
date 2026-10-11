@@ -16,6 +16,7 @@ import worker
 import prepare_qwen as q
 import synthesize_qwen_mlx as synth
 import voice_designer
+import setup_audiobook
 
 
 def fixture():
@@ -85,9 +86,16 @@ class CharacterTests(unittest.TestCase):
             return dict(done_reason='stop', message=dict(content=json.dumps(profile(cid))))
         with patch.object(q, 'online_request', side_effect=fake), patch.object(characters, 'search', return_value=[] ) as search:
             result = characters.analyze(manifest, source, 'secret', 'test', True, q, lambda *_: None)
-        self.assertEqual(calls, ['narrator', 'misha'])
+        self.assertEqual(calls, ['misha'])
         self.assertEqual(len(result['characters']), 2)
         search.assert_called_once()
+
+    def test_narrator_template_fills_all_fields_without_cloud(self):
+        voice = dict(id='narrator', voice_gender='female')
+        profile = characters.narrator_profile(voice)
+        self.assertTrue(all(profile[field].strip() for field in characters.FIELDS))
+        self.assertIn('female', profile['voice_description'])
+        characters.validate_profile(profile, voice, set(), set())
 
     def test_custom_sample_survives_profile_update(self):
         manifest, source = fixture()
@@ -97,6 +105,18 @@ class CharacterTests(unittest.TestCase):
 
 
 class VoiceTests(unittest.TestCase):
+    def test_model_check_reports_files_and_rejects_corruption(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); target = root / 'models/test'; target.mkdir(parents=True)
+            (target / 'weights').write_bytes(b'model')
+            spec = dict(files=[dict(path='weights', size=5, sha256=hashlib.sha256(b'model').hexdigest())])
+            states = []
+            self.assertEqual(setup_audiobook.ensure_model(root, 'test', spec, progress=lambda *x: states.append(x)), target)
+            self.assertTrue(any('Проверка файлов' in x[0] for x in states))
+            self.assertEqual(states[-1][1], 1)
+            (target / 'weights').write_bytes(b'wrong')
+            with self.assertRaises(ValueError): setup_audiobook.ensure_model(root, 'test', spec)
+
     def test_designer_validates_text_before_loading_gpu(self):
         text, description = voice_designer.validate_request(dict(text='Сегодня мы открываем новую книгу.', description='Warm mature Russian baritone'))
         self.assertIn('книгу', text)
@@ -137,6 +157,20 @@ class SpeedTests(unittest.TestCase):
 
 
 class RoleEditorTests(unittest.TestCase):
+    def test_automatic_unknown_roles_use_other_voice_and_preserve_text(self):
+        manifest, source = fixture()
+        segment = manifest['segments'][0]
+        original = copy.deepcopy(segment)
+        segment.update(speaker=None, voice_id=None, needs_review=True)
+        with tempfile.TemporaryDirectory() as directory, patch.object(q, 'obtain', return_value={segment['id']: None}), patch.object(worker, 'emit'):
+            worker.resolve_automatic_roles(manifest, source, Path(directory), SimpleNamespace(), 'secret')
+        self.assertEqual(segment['speaker'], 'other_voices')
+        self.assertEqual(manifest['stats']['unresolved_segments'], 0)
+        self.assertTrue(segment['needs_review'])
+        for field in ('text', 'source', 'order', 'chapter_id', 'paragraph_id', 'pause_after_ms'):
+            self.assertEqual(segment[field], original[field])
+        q.check_manifest(manifest, source)
+
     def test_edit_keeps_text_and_epub_anchors(self):
         manifest, source = fixture()
         before = copy.deepcopy(manifest['segments'][0])
