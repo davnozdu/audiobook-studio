@@ -247,7 +247,8 @@ public struct NativeAudio {
       metadata +=
         "[CHAPTER]\nTIMEBASE=1/1000\nSTART=\(Int((chapter.1*1000).rounded()))\nEND=\(Int((end*1000).rounded()))\ntitle=\(escape(name))\n"
     }
-    let meta = out.appendingPathComponent("chapters.txt")
+    let meta = FileManager.default.temporaryDirectory.appendingPathComponent("chapters-" + UUID().uuidString + ".txt")
+    defer { try? fm.removeItem(at: meta) }
     try Data(metadata.utf8).write(to: meta)
     let m4b = out.appendingPathComponent("audiobook.m4b")
     try ff([

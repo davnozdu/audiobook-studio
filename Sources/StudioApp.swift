@@ -721,11 +721,15 @@ struct Character: Identifiable {
         status = "Подготовка…"
         let p = Process(), input = Pipe(), output = Pipe(), errors = Pipe()
         let eventReadLock = NSLock()
+        let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("AudiobookStudio-" + UUID().uuidString)
+        do { try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true) }
+        catch { busy = false; pending = nil; self.error = error.localizedDescription; return }
         p.executableURL = engine
         p.qualityOfService = .userInitiated
         p.arguments = []
         var env = ProcessInfo.processInfo.environment
         env.removeValue(forKey: "OLLAMA_API_KEY")
+        env["TMPDIR"] = temporary.path + "/"
         env["AUDIOBOOK_FFMPEG"] = resources.appendingPathComponent("runtime/bin/ffmpeg").path
         env["AUDIOBOOK_FFPROBE"] = resources.appendingPathComponent("runtime/bin/ffprobe").path
         p.environment = env; p.standardInput = input; p.standardOutput = output; p.standardError = errors
@@ -741,6 +745,15 @@ struct Character: Identifiable {
             }
         }
         p.terminationHandler = { process in
+            try? FileManager.default.removeItem(at: temporary)
+            DispatchQueue.global().asyncAfter(deadline: .now() + 2.1) {
+                try? FileManager.default.removeItem(at: temporary)
+            }
+            if request["action"] as? String == "build", let path = request["project"] as? String, !path.isEmpty {
+                for name in ["audio-normalized", "audio-music", "audio/sample.wav", "result/chapters.txt"] {
+                    try? FileManager.default.removeItem(at: URL(fileURLWithPath: path).appendingPathComponent(name))
+                }
+            }
             eventReadLock.lock(); defer { eventReadLock.unlock() }
             output.fileHandleForReading.readabilityHandler = nil
             let rest = output.fileHandleForReading.readDataToEndOfFile()
@@ -784,6 +797,7 @@ struct Character: Identifiable {
             try input.fileHandleForWriting.write(contentsOf: data + Data([10]))
             try input.fileHandleForWriting.close()
         } catch {
+            try? FileManager.default.removeItem(at: temporary)
             p.terminate(); busy = false; pending = nil
             self.error = "Не удалось запустить встроенный движок: \(error.localizedDescription)"
         }

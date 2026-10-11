@@ -1,6 +1,11 @@
 import Foundation
 
 public enum NativeProject {
+  public static func cleanupBuildIntermediates(_ project: URL) {
+    for name in ["audio-normalized", "audio-music", "audio/sample.wav", "result/chapters.txt"] {
+      try? FileManager.default.removeItem(at: project.appendingPathComponent(name))
+    }
+  }
   public static func verify(_ folder: URL) throws -> (Object, Object) {
     let manifest = try NativeIO.load(folder.appendingPathComponent("roles/manifest.json"))
     let source = try NativeIO.load(folder.appendingPathComponent("roles/source.json"))

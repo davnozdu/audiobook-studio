@@ -343,6 +343,8 @@ final class Engine {
       throw StudioError("Выберите новую папку для результата")
     }
     var (manifest, source) = try NativeProject.verify(project)
+    NativeProject.cleanupBuildIntermediates(project)
+    defer { NativeProject.cleanupBuildIntermediates(project) }
     NativeIO.emit("estimate", ["characters": NativeIO.objects(manifest["segments"]).reduce(0) { $0 + NativeIO.string($1["text"]).count }])
     let director = NativeDirector(request)
     if NativeIO.objects(manifest["segments"]).contains(where: {
@@ -367,17 +369,6 @@ final class Engine {
       return try custom(voice) == nil
     }
     let designPath = designNeeded ? try models.ensure(design: true) : basePath
-    if fm.fileExists(atPath: project.appendingPathComponent("audio").path) {
-      NativeIO.stage("Сохранение предыдущей сборки")
-      let revision = project.appendingPathComponent("revisions/" + UUID().uuidString)
-      try fm.createDirectory(at: revision, withIntermediateDirectories: true)
-      for name in ["source", "audio", "audio-normalized", "audio-music", "result"] {
-        let url = project.appendingPathComponent(name)
-        if fm.fileExists(atPath: url.path) {
-          try fm.moveItem(at: url, to: revision.appendingPathComponent(name))
-        }
-      }
-    }
     NativeIO.stage("Нормализация текста · словари и нативный Silero")
     var prepared = manifest
     var rows = segments

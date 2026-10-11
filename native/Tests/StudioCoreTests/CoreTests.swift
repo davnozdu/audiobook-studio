@@ -3,6 +3,20 @@ import XCTest
 @testable import StudioCore
 
 final class CoreTests: XCTestCase {
+  func testCleanupPreservesUsefulProjectFiles() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let retained = ["book.epub", "roles/manifest.json", "voices/narrator.wav", "audio/segments/s1.wav", "audio/segments/s1.json", "result/audiobook.m4b"]
+    let disposable = ["audio-normalized/sample.wav", "audio-music/sample.wav", "audio/sample.wav", "result/chapters.txt"]
+    for name in retained + disposable {
+      let file = root.appendingPathComponent(name)
+      try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+      try Data("test".utf8).write(to: file)
+    }
+    NativeProject.cleanupBuildIntermediates(root)
+    for name in retained { XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent(name).path)) }
+    for name in disposable { XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent(name).path)) }
+  }
   func testSpeechCacheInvalidationAndCorruption() throws {
     let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: dir) }
