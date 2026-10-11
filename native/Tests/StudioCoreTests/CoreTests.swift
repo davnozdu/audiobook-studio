@@ -3,6 +3,20 @@ import XCTest
 @testable import StudioCore
 
 final class CoreTests: XCTestCase {
+  func testLoudnessJSONWithFFmpegSummaryAfterIt() throws {
+    let report = """
+      [Parsed_loudnorm_0 @ 0x123]
+      {"input_i":"-21.75","input_tp":"-18.06","input_lra":"0.00"}
+      [out#0/null @ 0x456] video:0KiB audio:1125KiB
+      size=N/A time=00:00:03.00 bitrate=N/A speed=87.6x
+      """
+    let (lufs, peak) = try NativeAudio.parseLoudness(Data(report.utf8))
+    XCTAssertEqual(lufs, -21.75)
+    XCTAssertEqual(peak, -18.06)
+    for report in ["", "{broken}", "{\"input_i\":\"-inf\",\"input_tp\":\"-inf\"}"] {
+      XCTAssertThrowsError(try NativeAudio.parseLoudness(Data(report.utf8)))
+    }
+  }
   func testListenedReferenceCanBeReusedButNotAfterEdits() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }

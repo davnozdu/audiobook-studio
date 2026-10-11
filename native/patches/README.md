@@ -29,3 +29,9 @@ magnitude `sqrt(abs(STFT)^2 + 1e-9)`, natural log with floor `1e-5`, periodic Ha
 uses a dedicated Qwen frontend, leaving the shared Whisper helper unchanged.
 Packaging checks its numerical output against a synthetic signal fixture produced
 by PyTorch and librosa, without speech synthesis or loading voice model weights.
+
+Mel tensors are cast to the speaker encoder weight dtype, as in official Qwen.
+The resulting speaker vector is cast to the codec prefix dtype before insertion,
+as in the original Python MLX implementation. A Float32 frontend/vector must not
+promote an entire BF16 generation prefix to Float32. Cached outputs include the
+inference revision so these fixes cannot reuse outputs from the previous path.

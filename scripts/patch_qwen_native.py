@@ -9,6 +9,7 @@ from pathlib import Path
 
 UPSTREAM_SHA = "e0e4ac8efdfb5f63a9e0afc8339b7b2b2a3ac3afe6d749979342f178a70a5df4"
 MARKER = "// Audiobook Studio: official non_streaming_mode=True prefill."
+PREVIOUS_PATCH_SHA = "ccdc11d446514162c90ecef73c8d9a0100eb287d22f066ab72b5626fab486a4f"
 
 
 def patched(source):
@@ -93,6 +94,10 @@ def patched(source):
 
     func extractSpeakerEmbedding(_ refAudio: MLXArray) -> MLXArray? {
 """)
+    replace("        let stackedMels = stacked(mels, axis: 0)\n",
+        "        let stackedMels = stacked(mels, axis: 0).asType(speakerEncoder.fc.weight.dtype)\n")
+    replace("            let speakerEmbed = speakerEmbedding.reshaped(1, 1, -1)\n",
+        "            let speakerEmbed = speakerEmbedding.asType(codecPrefixEmbed.dtype).reshaped(1, 1, -1)\n")
     return source
 
 
@@ -101,8 +106,14 @@ def apply(path):
     receipt = path.with_suffix(".studio-original")
     if MARKER in source:
         original = receipt.read_text() if receipt.exists() else ""
-        if hashlib.sha256(original.encode()).hexdigest() != UPSTREAM_SHA or patched(original) != source:
+        if hashlib.sha256(original.encode()).hexdigest() != UPSTREAM_SHA:
             raise ValueError("Previously patched Qwen source failed verification")
+        result = patched(original)
+        if result != source:
+            if hashlib.sha256(source.encode()).hexdigest() != PREVIOUS_PATCH_SHA:
+                raise ValueError("Previously patched Qwen source failed verification")
+            path.chmod(path.stat().st_mode | 0o200)
+            path.write_text(result)
         return
     if hashlib.sha256(source.encode()).hexdigest() != UPSTREAM_SHA:
         raise ValueError("Unexpected Qwen Swift source; audit the new revision before building")

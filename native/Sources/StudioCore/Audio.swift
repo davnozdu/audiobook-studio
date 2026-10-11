@@ -133,8 +133,14 @@ public struct NativeAudio {
         "-hide_banner", "-nostats", "-i", file.path, "-af",
         "loudnorm=I=-20:TP=-1.5:LRA=11:print_format=json", "-f", "null", "-",
       ], events: true)
+    return try Self.parseLoudness(stderr)
+  }
+  static func parseLoudness(_ stderr: Data) throws -> (Double, Double) {
     let text = String(data: stderr, encoding: .utf8) ?? ""
-    guard let start = text.lastIndex(of: "{"), let data = String(text[start...]).data(using: .utf8),
+    // FFmpeg prints its output summary after the loudnorm JSON, even with -nostats.
+    guard let end = text.lastIndex(of: "}"),
+      let start = text[..<end].lastIndex(of: "{"),
+      let data = String(text[start...end]).data(using: .utf8),
       let object = try? JSONSerialization.jsonObject(with: data) as? Object,
       let lufs = Double(NativeIO.string(object["input_i"])),
       let peak = Double(NativeIO.string(object["input_tp"])), lufs.isFinite, peak.isFinite
