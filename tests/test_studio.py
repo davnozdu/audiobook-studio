@@ -202,3 +202,44 @@ class BundledMusicTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+class PortableProjectTests(unittest.TestCase):
+    def test_roundtrip_keeps_audio_samples_music_and_relocates_paths(self):
+        import project_bundle
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp); original = base / 'original'; (original / 'roles').mkdir(parents=True)
+            (original / 'book.epub').write_bytes(b'book')
+            (original / 'audio').mkdir(); (original / 'audio/seg.wav').write_bytes(b'audio')
+            sample = base / 'external.wav'; sample.write_bytes(b'voice')
+            music = base / 'music.mp3'; music.write_bytes(b'music')
+            (original / 'roles/manifest.json').write_text(json.dumps({'voices': [{'id': 'misha', 'custom_reference': {'path': str(sample), 'text': 'Привет'}}], 'audio': str(original / 'audio/seg.wav')}))
+            archive = base / 'test.audiobookstudio'
+            project_bundle.export_project(original, archive, {'music': str(music), 'music_volume': 7})
+            shutil = __import__('shutil'); shutil.rmtree(original); sample.unlink(); music.unlink()
+            restored = project_bundle.import_project(archive, base / 'restored')
+            manifest = json.loads((restored / 'roles/manifest.json').read_text())
+            self.assertEqual(Path(manifest['voices'][0]['custom_reference']['path']).read_bytes(), b'voice')
+            self.assertEqual(Path(manifest['audio']).read_bytes(), b'audio')
+            settings = json.loads((restored / 'studio-settings.json').read_text())
+            self.assertEqual(Path(settings['music']).read_bytes(), b'music')
+            self.assertEqual(settings['music_volume'], 7)
+
+    def test_rejects_archive_path_traversal(self):
+        import project_bundle, zipfile
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp) / 'bad.audiobookstudio'
+            with zipfile.ZipFile(archive, 'w') as z: z.writestr('../escape.txt', 'bad')
+            with self.assertRaises(ValueError): project_bundle.import_project(archive, Path(tmp) / 'out')
+            self.assertFalse((Path(tmp) / 'escape.txt').exists())
+
+    def test_excerpt_only_contains_selected_characters_words(self):
+        manifest = {'segments': [{'speaker': 'narrator', 'text': 'Чужой текст автора.'},
+            {'speaker': 'misha', 'text': '— Здравствуйте, добрый человек! Как ваши дела?'},
+            {'speaker': 'other', 'text': 'Не включать.'}]}
+        self.assertEqual(worker.character_excerpt(manifest, 'misha'), 'Здравствуйте, добрый человек! Как ваши дела?')
+
+    def test_long_excerpt_is_short_and_does_not_use_other_speakers(self):
+        text = 'Длинная реплика персонажа ' * 30
+        result = worker.character_excerpt({'segments': [{'speaker': 'misha', 'text': text}]}, 'misha')
+        self.assertLessEqual(len(result), 250)
+        self.assertTrue(result.endswith('…'))

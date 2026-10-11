@@ -352,12 +352,31 @@ struct Character: Identifiable {
     }
 
     func openProject() {
-        let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false
+        let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = true
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        if url.pathExtension == "audiobookstudio" {
+            var r = request("project-open"); r["archive"] = url.path
+            previewByCharacter = [:]; audioPlayer?.stop()
+            launch(r); return
+        }
         project = url.path; book = url.appendingPathComponent("book.epub").path
         previewByCharacter = [:]; audioPlayer?.stop()
         do { try loadProject(); status = "Проект открыт" }
         catch { self.error = "В этой папке нет готового проекта книги"; project = "" }
+    }
+
+    func saveProject() {
+        guard !project.isEmpty, !busy else { return }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [UTType(exportedAs: "com.davnozdu.audiobook-studio.project", conformingTo: .zip)]
+        panel.nameFieldStringValue = URL(fileURLWithPath: project).lastPathComponent + ".audiobookstudio"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        saveThen {
+            var r = self.request("project-export"); r["destination"] = url.path
+            r["settings"] = ["music": r["music"]!, "music_enabled": self.musicEnabled,
+                "music_volume": self.musicVolume, "cloud_stress": self.cloudStress]
+            self.launch(r)
+        }
     }
 
     func chooseMusic() {
@@ -465,6 +484,7 @@ struct Character: Identifiable {
     }
 
     func generateVoice(character: String = "", description: String? = nil, text: String? = nil, autoplay: Bool = false) {
+        generatedSample = ""
         var r = request("voice-preview")
         r["description"] = description ?? voiceDescription
         r["text"] = text ?? voiceTestText
@@ -480,7 +500,7 @@ struct Character: Identifiable {
         let c = characters[index]
         if !c.sample.isEmpty { playAudio(c.sample); return }
         generateVoice(character: c.id, description: c.voice,
-            text: "Сегодня тихое утро. Я открываю новую книгу и приглашаю вас послушать эту историю.", autoplay: true)
+            autoplay: true)
     }
 
     func listenGenerated() {
@@ -493,8 +513,12 @@ struct Character: Identifiable {
             audioPlayer?.stop()
             audioPlayer = try AVAudioPlayer(contentsOf: URL(fileURLWithPath: path))
             playingAudio = path
-            audioPlayer?.prepareToPlay(); audioPlayer?.play()
-        } catch { self.error = "Не удалось воспроизвести образец: \(error.localizedDescription)" }
+            guard let player = audioPlayer, player.prepareToPlay(), player.play() else {
+                throw NSError(domain: "AudiobookStudio.Audio", code: 1, userInfo: [NSLocalizedDescriptionKey: "Аудиоустройство не начало воспроизведение"])
+            }
+            status = "Воспроизведение образца · \(Int(ceil(player.duration))) секунд"
+            appendLog("Воспроизведение образца: " + URL(fileURLWithPath: path).lastPathComponent)
+        } catch { self.error = "Не удалось воспроизвести образец: \(error.localizedDescription)"; status = self.error!; appendLog(status) }
     }
 
     func usePreview(_ index: Int, sample: String) {
@@ -563,7 +587,19 @@ struct Character: Identifiable {
                 }
                 self.fraction = 1
                 if !self.project.isEmpty && ["prepare", "characters", "save", "roles-save", "sample"].contains(request["action"] as? String ?? "") { try? self.loadProject() }
-                if request["action"] as? String == "voice-preview", request["character"] as? String != nil { self.listenGenerated() }
+                if request["action"] as? String == "project-open" {
+                    do {
+                        try self.loadProject()
+                        self.book = URL(fileURLWithPath: self.project).appendingPathComponent("book.epub").path
+                        let url = URL(fileURLWithPath: self.project).appendingPathComponent("studio-settings.json")
+                        if let data = try? Data(contentsOf: url), let settings = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                            self.music = settings["music"] as? String ?? ""
+                            self.musicEnabled = settings["music_enabled"] as? Bool ?? true
+                            self.musicVolume = settings["music_volume"] as? Double ?? 5
+                            self.cloudStress = settings["cloud_stress"] as? Bool ?? false
+                        }
+                    } catch { self.error = "Не удалось открыть проект: \(error.localizedDescription)" }
+                }
                 next?()
             }
         }
@@ -765,6 +801,7 @@ struct ContentView: View {
                             }
                             Spacer()
                             Button("Открыть проект…") { studio.openProject() }
+                            Button("Сохранить проект…") { studio.saveProject() }.disabled(studio.project.isEmpty || studio.busy)
                         }.padding(.bottom, 4)
                         Card {
                             VStack(alignment: .leading, spacing: 16) {
@@ -1025,6 +1062,10 @@ struct SettingsView: View {
         WindowGroup { ContentView(studio: studio).tint(.indigo) }
             .windowStyle(.hiddenTitleBar)
             .commands {
+                CommandGroup(replacing: .newItem) {
+                    Button("Открыть проект…") { studio.openProject() }.keyboardShortcut("o").disabled(studio.busy)
+                    Button("Сохранить проект…") { studio.saveProject() }.keyboardShortcut("s").disabled(studio.project.isEmpty || studio.busy)
+                }
                 CommandGroup(after: .appInfo) {
                     Button("Проверить обновления…") { studio.updater.checkForUpdates(nil) }.disabled(studio.busy)
                 }

@@ -49,6 +49,27 @@ def verify(project, require_resolved=True):
     return manifest, source
 
 
+def character_excerpt(manifest, character):
+    sentences = []
+    for segment in manifest['segments']:
+        if segment.get('speaker') != character: continue
+        text = segment['text'].strip(' —–\n\t')
+        for sentence in re.split(r'(?<=[.!?…])\s+', text):
+            if not any(c.isalpha() for c in sentence): continue
+            if len(sentence) > 240:
+                sentence = sentence[:237].rsplit(' ', 1)[0] + '…'
+            candidate = ' '.join(sentences + [sentence])
+            if len(candidate) > 250:
+                if len(' '.join(sentences)) >= 20: return ' '.join(sentences)
+                continue
+            sentences.append(sentence)
+            if len(sentences) >= 2 and len(candidate) >= 20: return candidate
+    text = ' '.join(sentences)
+    if len(text) < 20:
+        raise ValueError('У персонажа слишком мало текста для пробы голоса. Задайте текст в генераторе голосов.')
+    return text
+
+
 def apply_role_edits(manifest, source, edits):
     lookup = {v['id']: v['voice_id'] for v in manifest['voices']}
     if not set(edits) <= {s['id'] for s in manifest['segments']}:
@@ -257,7 +278,11 @@ def build(request):
     if not py.is_file() or not stress.is_file():
         raise ValueError('Сначала установите движок или выберите готовый комплект в настройках')
     if (project / 'audio').exists():
-        raise ValueError('Аудио уже существует. Создайте копию проекта для повторной сборки')
+        stage('Сохранение предыдущей сборки · подготовка новой версии')
+        revision = project / 'revisions' / datetime.now().strftime('%Y%m%d-%H%M%S-%f')
+        revision.mkdir(parents=True)
+        for name in ('source', 'audio', 'audio-normalized', 'audio-music', 'result'):
+            if (project / name).exists(): shutil.move(str(project / name), revision / name)
     model = runtime / 'models/Qwen3-TTS-12Hz-1.7B-Ru-Stress-CF-source'
     design = runtime / 'models/Qwen3-TTS-12Hz-1.7B-VoiceDesign-8bit'
     for path in (model, design, runtime / 'data/stress/russian_accents_full.sacc'):
@@ -315,6 +340,18 @@ def main():
     action = request['action']
     if action == 'prepare':
         prepare(request)
+    elif action == 'project-export':
+        from project_bundle import export_project
+        stage('Сохранение проекта · упаковка книги, голосов и аудио')
+        export_project(request['project'], request['destination'], request['settings'])
+        emit('done', message='Проект сохранён в один файл')
+    elif action == 'project-open':
+        from project_bundle import import_project
+        stage('Открытие проекта · распаковка книги, голосов и аудио')
+        project = import_project(request['archive'], request['output'])
+        verify(project, require_resolved=False)
+        emit('project', path=str(project))
+        emit('done', path=str(project), message='Проект открыт · можно изменить голоса и собрать книгу заново')
     elif action == 'characters':
         project = Path(request['project']).resolve()
         enrich_project(project, request)
@@ -369,6 +406,9 @@ def main():
     elif action == 'voice-preview':
         from setup_audiobook import ensure_model
         from voice_designer import validate_request
+        if request.get('character'):
+            manifest, _ = verify(Path(request['project']), require_resolved=False)
+            request['text'] = character_excerpt(manifest, request['character'])
         text, description = validate_request(request)
         if request.get('casting'):
             from synthesize_qwen_mlx import reference_instruction
