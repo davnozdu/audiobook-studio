@@ -28,7 +28,14 @@ for bundle in "$NATIVE_BIN"/*.bundle; do
 done
 cp backend/engine/{design_model_files.json,stress_model_files.json,supertonic_rules.json} "$APP/Contents/Resources/engine/"
 cp backend/engine/resources/*.{json,mp3} "$APP/Contents/Resources/engine/resources/"
-python3 scripts/vendor_ffmpeg.py "$APP/Contents/Resources/runtime/bin"
+# Reuse the checked ARM FFmpeg kit built on macOS 15; newer Homebrew bottles require macOS 26.
+if [ ! -d .build-tools/ffmpeg-kit/bin ]; then
+  curl -fL --retry 3 https://github.com/davnozdu/audiobook-studio/releases/download/v0.4.0/AudiobookStudio-0.4.0-arm64.zip -o .build-tools/ffmpeg-source.zip
+  echo '1380400c98f1e78204fd9e19aef66aeb79817f6b5bc03414f080fad41fa6578d  .build-tools/ffmpeg-source.zip' | shasum -a 256 -c -
+  unzip -q .build-tools/ffmpeg-source.zip 'Audiobook Studio.app/Contents/Resources/runtime/bin/*' -d .build-tools/ffmpeg-kit
+  mv '.build-tools/ffmpeg-kit/Audiobook Studio.app/Contents/Resources/runtime/bin' .build-tools/ffmpeg-kit/bin
+fi
+ditto .build-tools/ffmpeg-kit/bin "$APP/Contents/Resources/runtime/bin"
 # Python is exclusively a build tool. Export offline Silero weights and link a C++ executable to libtorch.
 if [ ! -x .build-tools/stress-export/bin/python3 ]; then python3 -m venv .build-tools/stress-export; fi
 BUILD_PY=.build-tools/stress-export/bin/python3

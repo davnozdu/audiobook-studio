@@ -15,7 +15,7 @@ channel = ET.SubElement(rss, 'channel'); ET.SubElement(channel, 'title').text = 
 item = ET.SubElement(channel, 'item'); ET.SubElement(item, 'title').text = f'Audiobook Studio {version}'
 ET.SubElement(item, '{'+ns+'}version').text = os.environ['BUILD_NUMBER']
 ET.SubElement(item, '{'+ns+'}shortVersionString').text = version
-ET.SubElement(item, '{'+ns+'}minimumSystemVersion').text = '14.0'
+ET.SubElement(item, '{'+ns+'}minimumSystemVersion').text = '15.0'
 ET.SubElement(item, '{'+ns+'}hardwareRequirements').text = 'arm64'
 ET.SubElement(item, 'enclosure', url=f'https://github.com/davnozdu/audiobook-studio/releases/download/v{version}/{archive.name}',
               length=str(archive.stat().st_size), type='application/octet-stream', attrib={'{'+ns+'}edSignature': signature})
