@@ -55,6 +55,7 @@ enum CredentialStore {
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let studio = Self.studio else { return .terminateNow }
+        guard studio.confirmApplicationExit() else { return .terminateCancel }
         return studio.shutdown() ? .terminateLater : .terminateNow
     }
     func applicationWillTerminate(_ notification: Notification) {
@@ -67,6 +68,39 @@ struct MusicTrack: Codable, Identifiable {
     var filename: String
     var title: String
     var id: String { filename }
+}
+
+struct ProjectWindowCloseHandler: NSViewRepresentable {
+    let studio: Studio
+    func makeCoordinator() -> Coordinator { Coordinator(studio) }
+    func makeNSView(context: Context) -> NSView { NSView() }
+    func updateNSView(_ view: NSView, context: Context) {
+        DispatchQueue.main.async {
+            guard let window = view.window, window.delegate !== context.coordinator else { return }
+            context.coordinator.previous = window.delegate
+            window.delegate = context.coordinator
+        }
+    }
+    @MainActor final class Coordinator: NSObject, NSWindowDelegate {
+        weak var studio: Studio?
+        weak var previous: NSWindowDelegate?
+        private var approved = false
+        init(_ studio: Studio) { self.studio = studio }
+        func windowShouldClose(_ window: NSWindow) -> Bool {
+            if approved { approved = false; return previous?.windowShouldClose?(window) ?? true }
+            guard let studio, studio.hasBook else { return previous?.windowShouldClose?(window) ?? true }
+            studio.closeProject {
+                DispatchQueue.main.async { self.approved = true; window.performClose(nil) }
+            }
+            return false
+        }
+        override func responds(to selector: Selector!) -> Bool {
+            super.responds(to: selector) || previous?.responds(to: selector) == true
+        }
+        override func forwardingTarget(for selector: Selector!) -> Any? {
+            previous?.responds(to: selector) == true ? previous : super.forwardingTarget(for: selector)
+        }
+    }
 }
 
 @MainActor final class QuietUpdateDriver: SPUStandardUserDriver {
@@ -193,6 +227,28 @@ struct Character: Identifiable {
     @Published var speed: Double?
     @Published var eta: Double?
     @Published var completed = ""
+    @Published var bookCharacterCount = 0
+    @Published var remainingSynthesisSeconds: Double?
+    var estimatedSecondsPerCharacter: Double? {
+        let value = UserDefaults.standard.double(forKey: "nativeSynthesisSecondsPerCharacter")
+        return value.isFinite && value > 0 && value < 60 ? value : nil
+    }
+    private func approximateMinutes(_ seconds: Double) -> String {
+        "\(max(1, Int(ceil(seconds / 60)))) мин"
+    }
+    var bookEstimate: String {
+        guard bookCharacterCount > 0 else { return "" }
+        let speech = Double(bookCharacterCount) / 12
+        let prefix = "Длительность аудиокниги ≈ " + approximateMinutes(speech)
+        if let remainingSynthesisSeconds {
+            if remainingSynthesisSeconds <= 0 { return prefix + " · Синтез завершён" }
+            return prefix + " · Осталось ≈ " + approximateMinutes(remainingSynthesisSeconds) + " озвучивания"
+        }
+        if let rate = estimatedSecondsPerCharacter {
+            return prefix + " · Озвучивание ≈ " + approximateMinutes(Double(bookCharacterCount) * rate) + " по последним замерам"
+        }
+        return prefix + " · Озвучивание ориентировочно " + approximateMinutes(speech / 2) + "–" + approximateMinutes(speech * 2) + " до первых замеров"
+    }
     @Published var resultPath = ""
     @Published var log = ""
     @Published var error: String?
@@ -261,6 +317,8 @@ struct Character: Identifiable {
     private var playingAudio = ""
     private var process: Process?
     private var pending: (() -> Void)?
+    private var afterStop: (() -> Void)?
+    private var quitConfirmed = false
     private var cancelling = false
     private var shuttingDown = false
     private var receivedError = false
@@ -338,12 +396,71 @@ struct Character: Identifiable {
             .appendingPathComponent("Audiobook Studio/Engine")
     }
 
+    var hasBook: Bool { !book.isEmpty || !project.isEmpty }
+    var canSaveProject: Bool {
+        !project.isEmpty && FileManager.default.fileExists(atPath: project + "/roles/manifest.json")
+    }
+    private func closeDecision() -> NSApplication.ModalResponse {
+        let alert = NSAlert()
+        alert.messageText = "Сохранить текущий проект перед закрытием?"
+        alert.informativeText = canSaveProject
+            ? "Сохраните книгу, персонажей, голоса и готовое аудио в один файл, чтобы продолжить позже. Уже сохранённые файлы на диске не удаляются."
+            : "Распознавание проекта ещё не завершено. Исходная книга и созданные файлы останутся на диске, но сохранить готовый проект пока нельзя."
+        alert.addButton(withTitle: "Сохранить проект…").isEnabled = canSaveProject
+        alert.addButton(withTitle: "Не сохранять")
+        alert.addButton(withTitle: "Отмена")
+        return alert.runModal()
+    }
+    private func stopThen(_ continuation: @escaping () -> Void) {
+        if busy {
+            afterStop = continuation
+            cancel()
+            status = "Остановка обработки перед закрытием проекта…"
+        } else { continuation() }
+    }
+    func closeProject(after: (() -> Void)? = nil) {
+        guard hasBook else { after?(); return }
+        stopThen {
+            switch self.closeDecision() {
+            case .alertFirstButtonReturn:
+                self.saveProject(after: { self.clearProject(); after?() })
+            case .alertSecondButtonReturn:
+                self.clearProject(); after?()
+            default: break
+            }
+        }
+    }
+    private func clearProject() {
+        audioPlayer?.stop(); audioPlayer = nil; playingAudio = ""
+        book = ""; project = ""; characters = []; segments = []; selected = nil
+        dirty = false; rolesDirty = false; roleSearch = ""
+        previewByCharacter = [:]; generatedSample = ""; generatedText = ""; generatedDescription = ""
+        resultPath = ""; fraction = 0; speed = nil; eta = nil; completed = ""; error = nil
+        bookCharacterCount = 0; remainingSynthesisSeconds = nil
+        status = "Проект закрыт · выберите другую книгу"
+    }
+    func confirmApplicationExit() -> Bool {
+        guard hasBook && !quitConfirmed else { return true }
+        if busy {
+            stopThen { NSApplication.shared.terminate(nil) }
+            return false
+        }
+        switch closeDecision() {
+        case .alertFirstButtonReturn:
+            saveProject(after: { self.quitConfirmed = true; NSApplication.shared.terminate(nil) })
+            return false
+        case .alertSecondButtonReturn: return true
+        default: return false
+        }
+    }
     func chooseBook() {
+        guard !busy else { return }
         let panel = NSOpenPanel(); panel.allowedContentTypes = [UTType(filenameExtension: "epub")!]
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        book = url.path; project = ""; characters = []; segments = []; selected = nil; dirty = false; rolesDirty = false
-        previewByCharacter = [:]; audioPlayer?.stop()
-        status = "Книга выбрана · можно определить персонажей"
+        closeProject {
+            self.clearProject(); self.book = url.path
+            self.status = "Книга выбрана · можно определить персонажей"
+        }
     }
 
     func chooseOutput() {
@@ -353,21 +470,25 @@ struct Character: Identifiable {
     }
 
     func openProject() {
+        guard !busy else { return }
         let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = true
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        closeProject { self.openSelectedProject(url) }
+    }
+    private func openSelectedProject(_ url: URL) {
         if url.pathExtension == "audiobookstudio" {
             var r = request("project-open"); r["archive"] = url.path
             previewByCharacter = [:]; audioPlayer?.stop()
             launch(r); return
         }
-        project = url.path; book = url.appendingPathComponent("book.epub").path
+        self.project = url.path; self.book = url.appendingPathComponent("book.epub").path
         previewByCharacter = [:]; audioPlayer?.stop()
         do { try loadProject(); status = "Проект открыт" }
         catch { self.error = "В этой папке нет готового проекта книги"; project = "" }
     }
 
-    func saveProject() {
-        guard !project.isEmpty, !busy else { return }
+    func saveProject(after: (() -> Void)? = nil) {
+        guard canSaveProject, !busy else { return }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [UTType(exportedAs: "com.davnozdu.audiobook-studio.project", conformingTo: .zip)]
         panel.nameFieldStringValue = URL(fileURLWithPath: project).lastPathComponent + ".audiobookstudio"
@@ -376,7 +497,7 @@ struct Character: Identifiable {
             var r = self.request("project-export"); r["destination"] = url.path
             r["settings"] = ["music": r["music"]!, "music_enabled": self.musicEnabled,
                 "music_volume": self.musicVolume, "cloud_stress": self.cloudStress]
-            self.launch(r)
+            self.launch(r, after: after)
         }
     }
 
@@ -399,7 +520,9 @@ struct Character: Identifiable {
                 sample: sample["path"] as? String ?? "", sampleText: sample["text"] as? String ?? "",
                 voiceGender: v["voice_gender"] as? String ?? "male", seed: v["seed"] as? Int ?? 17001)
         }
-        segments = (data["segments"] as! [[String: Any]]).map { s in
+        let roleRows = data["segments"] as! [[String: Any]]
+        bookCharacterCount = roleRows.reduce(0) { $0 + ( $1["text"] as? String ?? "").count }
+        segments = roleRows.map { s in
             RoleSegment(id: s["id"] as! String, text: s["text"] as! String,
                 speaker: s["speaker"] as? String ?? "", originalSpeaker: s["speaker"] as? String ?? "",
                 needsReview: s["needs_review"] as? Bool ?? false)
@@ -576,6 +699,7 @@ struct Character: Identifiable {
         busy = true; cancelling = false; receivedError = false; pending = after
         childPID = 0; updateMenuBar()
         fraction = 0; speed = nil; eta = nil; completed = ""; buffer = Data()
+        if request["action"] as? String == "build" { remainingSynthesisSeconds = nil }
         status = "Подготовка…"
         let p = Process(), input = Pipe(), output = Pipe(), errors = Pipe()
         let eventReadLock = NSLock()
@@ -608,6 +732,10 @@ struct Character: Identifiable {
                 self.busy = false; self.process = nil; self.childPID = 0; self.updateMenuBar()
                 let next = self.pending; self.pending = nil
                 if self.shuttingDown { return }
+                if let continuation = self.afterStop {
+                    self.afterStop = nil; self.cancelling = false
+                    continuation(); return
+                }
                 if self.cancelling { self.status = "Операция остановлена"; return }
                 if process.terminationStatus != 0 {
                     if !self.receivedError { self.error = "Движок завершился с ошибкой. См. журнал." }
@@ -656,7 +784,13 @@ struct Character: Identifiable {
             case "child": childPID = (event["pid"] as? NSNumber)?.int32Value ?? 0; applyPriority()
             case "project": project = event["path"] as? String ?? project
             case "progress": status = event["message"] as? String ?? status; fraction = event["fraction"] as? Double ?? 0; speed = nil; eta = nil
+            case "estimate":
+                bookCharacterCount = event["characters"] as? Int ?? bookCharacterCount
             case "metrics":
+                if let rate = event["seconds_per_character"] as? Double, rate.isFinite, rate > 0, rate < 60 {
+                    UserDefaults.standard.set(rate, forKey: "nativeSynthesisSecondsPerCharacter")
+                }
+                remainingSynthesisSeconds = event["eta"] as? Double
                 status = event["message"] as? String ?? status
                 speed = event["speed"] as? Double; eta = event["eta"] as? Double
                 fraction = event["fraction"] as? Double ?? 0
@@ -824,6 +958,14 @@ struct ContentView: View {
             }.padding(22).frame(minWidth: 235, idealWidth: 245, maxWidth: 285)
                 .background(.ultraThinMaterial)
             VStack(spacing: 0) {
+                if studio.hasBook {
+                    HStack {
+                        Label(URL(fileURLWithPath: studio.book).deletingPathExtension().lastPathComponent, systemImage: "book.closed")
+                            .font(.subheadline).lineLimit(1)
+                        Spacer()
+                        Button("Закрыть проект", systemImage: "xmark.circle") { studio.closeProject() }
+                    }.padding(.horizontal, 28).padding(.vertical, 12).background(.bar)
+                }
                 ScrollView {
                     VStack(alignment: .leading, spacing: 20) {
                         HStack {
@@ -845,6 +987,11 @@ struct ContentView: View {
                                     }
                                     Spacer()
                                     Button("Выбрать книгу…") { studio.chooseBook() }
+                                }
+                                if !studio.bookEstimate.isEmpty {
+                                    Label(studio.bookEstimate, systemImage: "clock").font(.subheadline).foregroundStyle(.secondary)
+                                    Text("Оценка относится к синтезу речи. Загрузка моделей, создание голосов и упаковка занимают дополнительное время.")
+                                        .font(.caption).foregroundStyle(.secondary)
                                 }
                                 Button("Собрать автоматически", systemImage: "wand.and.stars") { studio.automaticBuild() }
                                     .buttonStyle(.borderedProminent).tint(.indigo).controlSize(.large).disabled(studio.book.isEmpty)
@@ -1005,6 +1152,7 @@ struct ContentView: View {
                 }.padding(20).background(.bar)
             }.frame(minWidth: 760)
         }.frame(minWidth: 1050, minHeight: 780)
+            .background(ProjectWindowCloseHandler(studio: studio).frame(width: 0, height: 0))
             .sheet(isPresented: $studio.settings) { SettingsView(studio: studio) }
             .sheet(isPresented: $studio.voiceLabOpen) { VoiceLabView(studio: studio) }
             .alert("Требуется внимание", isPresented: Binding(get: { studio.error != nil }, set: { if !$0 { studio.error = nil } })) {
@@ -1099,7 +1247,8 @@ struct SettingsView: View {
             .commands {
                 CommandGroup(replacing: .newItem) {
                     Button("Открыть проект…") { studio.openProject() }.keyboardShortcut("o").disabled(studio.busy)
-                    Button("Сохранить проект…") { studio.saveProject() }.keyboardShortcut("s").disabled(studio.project.isEmpty || studio.busy)
+                    Button("Сохранить проект…") { studio.saveProject() }.keyboardShortcut("s").disabled(!studio.canSaveProject || studio.busy)
+                    Button("Закрыть проект") { studio.closeProject() }.keyboardShortcut("w", modifiers: [.command, .shift]).disabled(!studio.hasBook)
                 }
                 CommandGroup(after: .appInfo) {
                     Button("Проверить обновления…") { studio.updater.checkForUpdates(nil) }.disabled(studio.busy)

@@ -64,6 +64,7 @@ public final class NativeDirector {
     NativeIO.stage("Чтение книги · нативный движок Swift")
     let source = try NativeBook.read(book)
     let paragraphs = NativeIO.objects(source["paragraphs"])
+    NativeIO.emit("estimate", ["characters": paragraphs.reduce(0) { $0 + NativeIO.string($1["text"]).count }])
     try NativeIO.write(project.appendingPathComponent("roles/source.json"), source)
     var cast: [Object] = []
     let castChunks = Self.batches(paragraphs, size: 16000)

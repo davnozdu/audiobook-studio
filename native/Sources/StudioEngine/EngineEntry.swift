@@ -321,6 +321,7 @@ final class Engine {
       throw StudioError("Выберите новую папку для результата")
     }
     var (manifest, source) = try NativeProject.verify(project)
+    NativeIO.emit("estimate", ["characters": NativeIO.objects(manifest["segments"]).reduce(0) { $0 + NativeIO.string($1["text"]).count }])
     let director = NativeDirector(request)
     if NativeIO.objects(manifest["segments"]).contains(where: {
       NativeIO.string($0["speaker"]).isEmpty
@@ -494,6 +495,7 @@ final class Engine {
         [
           "message": "Озвучивание книги", "speed": speed,
           "eta": Double(total - completed) * seconds / Double(chars),
+          "seconds_per_character": seconds / Double(chars),
           "fraction": Double(completed) / Double(total), "completed": i + 1, "total": rows.count,
         ])
       Memory.clearCache()
