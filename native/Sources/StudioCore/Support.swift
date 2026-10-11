@@ -18,8 +18,11 @@ public enum NativeIO {
     logFile = try FileHandle(forWritingTo: file)
     try logFile?.seekToEnd()
   }
-  public static let eventOutput = FileHandle(
-    fileDescriptor: dup(STDOUT_FILENO), closeOnDealloc: true)
+  public static let eventOutput: FileHandle = {
+    let descriptor = dup(STDOUT_FILENO)
+    _ = fcntl(descriptor, F_SETFD, FD_CLOEXEC)
+    return FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+  }()
   public static func object(_ value: Any?) -> Object { value as? Object ?? [:] }
   public static func objects(_ value: Any?) -> [Object] { value as? [Object] ?? [] }
   public static func string(_ value: Any?) -> String { value as? String ?? "" }
@@ -97,11 +100,11 @@ public enum NativeIO {
     let lock = NSLock()
     var capturedError = Data()
     errors.fileHandleForReading.readabilityHandler = { handle in
+      lock.lock()
+      defer { lock.unlock() }
       let data = handle.availableData
       if !data.isEmpty {
-        lock.lock()
         capturedError.append(data)
-        lock.unlock()
       }
     }
     try process.run()
@@ -112,8 +115,8 @@ public enum NativeIO {
     }
     let data = output.fileHandleForReading.readDataToEndOfFile()
     process.waitUntilExit()
-    errors.fileHandleForReading.readabilityHandler = nil
     lock.lock()
+    errors.fileHandleForReading.readabilityHandler = nil
     capturedError.append(errors.fileHandleForReading.readDataToEndOfFile())
     lock.unlock()
     if events { emit("child", ["pid": 0]) }

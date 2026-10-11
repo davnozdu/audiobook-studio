@@ -33,6 +33,8 @@ def copy(source, target):
         copied = copy(dependency, libs / dependency.name)
         relative = '@loader_path/' + ('lib/' if target.parent == destination else '') + copied.name
         subprocess.run(['install_name_tool', '-change', name, relative, str(target)], check=True)
+    if target.suffix == '.dylib':
+        subprocess.run(['install_name_tool', '-id', '@loader_path/' + target.name, str(target)], check=True)
     subprocess.run(['codesign', '--force', '--sign', '-', str(target)], check=True)
     return target
 

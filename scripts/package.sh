@@ -39,6 +39,7 @@ if [ ! -d .build-tools/ffmpeg-kit/bin ]; then
   mv '.build-tools/ffmpeg-kit/Audiobook Studio.app/Contents/Resources/runtime/bin' .build-tools/ffmpeg-kit/bin
 fi
 ditto .build-tools/ffmpeg-kit/bin "$APP/Contents/Resources/runtime/bin"
+python3 scripts/relocate_ffmpeg.py "$APP/Contents/Resources/runtime/bin"
 # Python is exclusively a build tool. Export offline Silero weights and link a C++ executable to libtorch.
 if [ ! -x .build-tools/stress-export/bin/python3 ]; then python3 -m venv .build-tools/stress-export; fi
 BUILD_PY=.build-tools/stress-export/bin/python3

@@ -3,6 +3,36 @@ import XCTest
 @testable import StudioCore
 
 final class CoreTests: XCTestCase {
+  func testModelCacheRecoveryWithoutNetwork() throws {
+    let folder = temporary()
+    defer { try? fm.removeItem(at: folder) }
+    let resources = folder.appendingPathComponent("resources")
+    let root = folder.appendingPathComponent("engine")
+    let name = "Qwen3-TTS-12Hz-1.7B-Ru-Stress-CF-source"
+    let payload = Data("valid model fixture".utf8)
+    try NativeIO.write(resources.appendingPathComponent("stress_model_files.json"), [
+      "repo": "unused", "revision": "unused",
+      "files": [["path": "config.json", "size": payload.count, "sha256": NativeIO.hash(payload)]],
+    ])
+    let model = NativeModels(root: root, resources: resources)
+    let target = root.appendingPathComponent("models/" + name + "/config.json")
+    let old = folder.appendingPathComponent("models/" + name + "/config.json")
+    try fm.createDirectory(at: old.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try payload.write(to: old)
+    try fm.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try Data(repeating: 0, count: payload.count).write(to: target)
+    _ = try model.ensure(design: false)
+    XCTAssertEqual(try Data(contentsOf: target), payload)
+    // A valid cache is accepted without downloading or reading the legacy location.
+    try fm.removeItem(at: old)
+    _ = try model.ensure(design: false)
+    // A completed partial download is validated and promoted without a range request.
+    try fm.removeItem(at: target)
+    try payload.write(to: target.appendingPathExtension("partial"))
+    _ = try model.ensure(design: false)
+    XCTAssertEqual(try Data(contentsOf: target), payload)
+    XCTAssertFalse(fm.fileExists(atPath: target.appendingPathExtension("partial").path))
+  }
   func testNarratorEditsSurviveReanalysis() async throws {
     let voice: Object = [
       "id": "narrator", "name": "Рассказчик", "voice_gender": "female",
