@@ -3,6 +3,23 @@ import XCTest
 @testable import StudioCore
 
 final class CoreTests: XCTestCase {
+  func testSpeechCacheInvalidationAndCorruption() throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let file = dir.appendingPathComponent("segment.wav")
+    let key = try SpeechCache.signature(text: "Привет!", referenceHash: "voice1", referenceText: "Образец", seed: 1)
+    let samples: [Float] = [0.1, -0.2, 0.3]
+    try SpeechCache.save(file, samples: samples, signature: key)
+    XCTAssertEqual(SpeechCache.load(file, signature: key), samples)
+    for changed in [
+      try SpeechCache.signature(text: "Пока!", referenceHash: "voice1", referenceText: "Образец", seed: 1),
+      try SpeechCache.signature(text: "Привет!", referenceHash: "voice2", referenceText: "Образец", seed: 1),
+      try SpeechCache.signature(text: "Привет!", referenceHash: "voice1", referenceText: "Другой", seed: 1),
+      try SpeechCache.signature(text: "Привет!", referenceHash: "voice1", referenceText: "Образец", seed: 2),
+    ] { XCTAssertNil(SpeechCache.load(file, signature: changed)) }
+    try Data("broken".utf8).write(to: file)
+    XCTAssertNil(SpeechCache.load(file, signature: key))
+  }
   func testModelCacheRecoveryWithoutNetwork() throws {
     let folder = temporary()
     defer { try? fm.removeItem(at: folder) }

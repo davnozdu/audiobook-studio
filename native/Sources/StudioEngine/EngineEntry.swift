@@ -506,14 +506,11 @@ final class Engine {
   func synthesize(rows: [Object], voices: [Object], references: [String: (URL, String)],
     basePath: URL) async throws -> ([Object], Int)
   {
-    NativeIO.stage("Загрузка модели озвучки · оценка времени появится после первых фрагментов")
-    let base = try await Qwen3TTSModel.fromModelDirectory(basePath)
+    var base: Qwen3TTSModel?
     var conditioning: [String: Qwen3TTSModel.Qwen3TTSReferenceConditioning] = [:]
+    var referenceHashes: [String: String] = [:]
     for (id, ref) in references {
-      NativeIO.stage("Подготовка голоса для озвучки · " + id)
-      let (_, array) = try loadAudioArray(from: ref.0, sampleRate: 24000)
-      conditioning[id] = try base.prepareReferenceConditioning(
-        refAudio: array, refText: ref.1, language: "Russian")
+      referenceHashes[id] = try NativeIO.hashFile(ref.0)
     }
     let raw = project.appendingPathComponent("audio")
     try fm.createDirectory(
@@ -528,24 +525,43 @@ final class Engine {
       let speaker = NativeIO.string(row["speaker"])
       let text = NativeIO.string(row["tts_text"])
       let start = Date()
-      guard let ref = conditioning[speaker] else {
+      guard let reference = references[speaker], let referenceHash = referenceHashes[speaker] else {
         throw StudioError("Не подготовлен голос " + speaker)
       }
       NativeIO.stage(
         "Озвучивание · \(i+1)/\(rows.count) · " + speaker, Double(completed) / Double(max(1, total))
       )
-      MLXRandom.seed(
-        UInt64(
-          max(
-            0,
-            (voices.first(where: { NativeIO.string($0["id"]) == speaker })?["seed"] as? Int ?? 17001)
-              + i)))
-      let wave = try await base.generate(
-        text: text, conditioning: ref,
-        generationParameters: GenerateParameters(
-          maxTokens: 4096, temperature: 0.9, topP: 1, topK: 50, repetitionPenalty: 1.05))
-      let samples = NativeWAV.trim(wave.asArray(Float.self))
-      try NativeWAV.write(raw.appendingPathComponent("segments/" + id + ".wav"), samples)
+      let seed = max(0, (voices.first(where: { NativeIO.string($0["id"]) == speaker })?["seed"] as? Int ?? 17001) + i)
+      let signature = try SpeechCache.signature(text: text, referenceHash: referenceHash,
+        referenceText: reference.1, seed: seed)
+      let file = raw.appendingPathComponent("segments/" + id + ".wav")
+      let samples: [Float]
+      let reused: Bool
+      if let cached = SpeechCache.load(file, signature: signature) {
+        samples = cached; reused = true
+        NativeIO.stage("Готовая реплика из кеша · \(i+1)/\(rows.count) · " + speaker)
+      } else {
+        reused = false
+        if base == nil {
+          NativeIO.stage("Загрузка модели озвучки · нативный MLX")
+          base = try await Qwen3TTSModel.fromModelDirectory(basePath)
+        }
+        guard let base else { throw StudioError("Модель озвучки не загружена") }
+        if conditioning[speaker] == nil {
+          NativeIO.stage("Подготовка голоса для озвучки · " + speaker)
+          let (_, array) = try loadAudioArray(from: reference.0, sampleRate: 24000)
+          conditioning[speaker] = try base.prepareReferenceConditioning(
+            refAudio: array, refText: reference.1, language: "Russian")
+        }
+        guard let ref = conditioning[speaker] else { throw StudioError("Не подготовлен голос " + speaker) }
+        NativeIO.stage("Озвучивание · \(i+1)/\(rows.count) · " + speaker)
+        MLXRandom.seed(UInt64(seed))
+        let wave = try await base.generate(text: text, conditioning: ref,
+          generationParameters: GenerateParameters(
+            maxTokens: 4096, temperature: 0.9, topP: 1, topK: 50, repetitionPenalty: 1.05))
+        samples = NativeWAV.trim(wave.asArray(Float.self))
+        try SpeechCache.save(file, samples: samples, signature: signature)
+      }
       let begin = Double(montage.frames) / 24000
       try montage.append(samples)
       let finish = Double(montage.frames) / 24000
@@ -557,9 +573,10 @@ final class Engine {
       ])
       let elapsed = max(0.001, Date().timeIntervalSince(start))
       let weight = max(1, NativeIO.string(row["text"]).count)
-      measurements.append((Double(samples.count) / 24000, elapsed, weight))
+      if !reused { measurements.append((Double(samples.count) / 24000, elapsed, weight)) }
       if measurements.count > 12 { measurements.removeFirst() }
       completed += weight
+      if measurements.isEmpty { continue }
       let recent = measurements.suffix(12)
       let seconds = recent.reduce(0) { $0 + $1.1 }
       let chars = recent.reduce(0) { $0 + $1.2 }
