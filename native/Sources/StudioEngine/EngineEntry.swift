@@ -200,7 +200,11 @@ final class Engine {
     } else {
       let text = NativeIO.string(request["text"]).trimmingCharacters(in: .whitespacesAndNewlines)
       guard !text.isEmpty else { throw StudioError("Введите точный текст образца") }
-      let samples = try audio.convert(URL(fileURLWithPath: NativeIO.string(request["sample"])))
+      let sampleURL = URL(fileURLWithPath: NativeIO.string(request["sample"]))
+      guard (3...30).contains(try audio.duration(sampleURL)) else {
+        throw StudioError("Выберите чистый образец одного голоса длительностью 3–30 секунд")
+      }
+      let samples = try audio.convert(sampleURL)
       let seconds = Double(samples.count) / 24000
       guard (3...30).contains(seconds) else {
         throw StudioError("Выберите чистый образец одного голоса длительностью 3–30 секунд")
@@ -285,7 +289,9 @@ final class Engine {
       description = instruction(
         try await NativeDirector(request).directVoice(["voice_description": description]))
     }
-    guard (20...1000).contains(text.count), (10...4000).contains(description.count) else {
+    guard (20...1000).contains(text.count),
+      reference != nil || (10...4000).contains(description.count)
+    else {
       throw StudioError("Задайте текст 20–1000 знаков и описание голоса")
     }
     NativeIO.stage("Проверка модели · проба выбранного голоса")
