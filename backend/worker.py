@@ -36,16 +36,33 @@ def require_key(request):
     return request['key'].strip()
 
 
-def verify(project):
+def verify(project, require_resolved=True):
     source = q.load(project / 'roles/source.json')
     manifest = q.load(project / 'roles/manifest.json')
     book = project / 'book.epub'
     if hashlib.sha256(book.read_bytes()).hexdigest() != manifest['book']['input_sha256']:
         raise ValueError('Исходная книга не соответствует ролям')
     q.check_manifest(manifest, source)
-    if any(s['speaker'] is None for s in manifest['segments']):
+    if require_resolved and any(s['speaker'] is None for s in manifest['segments']):
         raise ValueError('Есть неопределённые роли. Исправьте разметку перед сборкой')
     return manifest, source
+
+
+def apply_role_edits(manifest, source, edits):
+    lookup = {v['id']: v['voice_id'] for v in manifest['voices']}
+    if not set(edits) <= {s['id'] for s in manifest['segments']}:
+        raise ValueError('Неизвестный фрагмент')
+    for segment in manifest['segments']:
+        if segment['id'] in edits:
+            speaker = edits[segment['id']]
+            if speaker not in lookup:
+                raise ValueError('Выберите говорящего из списка персонажей')
+            segment.update(speaker=speaker, voice_id=lookup[speaker], confidence='high',
+                           needs_review=False, reason='Проверено пользователем в GUI')
+    q.check_manifest(manifest, source)
+    manifest['stats']['unresolved_segments'] = sum(s['speaker'] is None for s in manifest['segments'])
+    manifest['stats']['review_segments'] = sum(s['needs_review'] for s in manifest['segments'])
+    return manifest
 
 
 def prepare(request):
@@ -99,8 +116,9 @@ def prepare(request):
         q.export_project(folder, source, cast, labels, args)
     unresolved = sum(s['speaker'] is None for s in q.load(folder / 'manifest.json')['segments'])
     if unresolved:
-        raise ValueError(f'Не определены роли в {unresolved} фрагментах. См. roles/review.json')
-    emit('done', path=str(project), message='Персонажи и роли готовы')
+        emit('done', path=str(project), message=f'Проверьте роли: {unresolved} неопределённых фрагментов')
+    else:
+        emit('done', path=str(project), message='Персонажи и роли готовы')
 
 
 def run_step(python, script, options, project, key=None, progress=None):
@@ -219,11 +237,12 @@ def main():
         prepare(request)
     elif action in ('characters', 'save'):
         project = Path(request['project']).resolve()
-        manifest, source = verify(project)
+        manifest, source = verify(project, require_resolved=action == 'characters')
         if action == 'characters':
             profiles = analyze(manifest, source, require_key(request), request.get('model', 'deepseek-v4.1-flash'),
                                request.get('web_search', False), q, stage)
         else:
+            manifest = apply_role_edits(manifest, source, request.get('edits', {}))
             profiles = request['profiles']
         updated = apply_profiles(manifest, profiles, source, q)
         q.write(project / 'roles/manifest.json', updated)
@@ -261,6 +280,12 @@ def main():
         q.write(project / 'roles/manifest.json', manifest)
         q.write(project / 'roles/voices.json', {'voices': manifest['voices']})
         emit('done', path=str(project), message='Образец голоса обновлён')
+    elif action == 'roles-save':
+        project = Path(request['project']).resolve()
+        manifest, source = verify(project, require_resolved=False)
+        manifest = apply_role_edits(manifest, source, request.get('edits', {}))
+        q.write(project / 'roles/manifest.json', manifest)
+        emit('done', path=str(project), message='Назначения ролей сохранены')
     elif action == 'build':
         build(request)
     elif action == 'setup':

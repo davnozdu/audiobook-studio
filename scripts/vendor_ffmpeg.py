@@ -24,7 +24,6 @@ def copy(source, target):
     seen[source] = target
     shutil.copy2(source, target)
     target.chmod(0o755)
-    subprocess.run(['codesign', '--remove-signature', str(target)], check=False, capture_output=True)
     for name in dependencies(source):
         if not name.startswith('/') or name.startswith(('/usr/lib/', '/System/')):
             continue
@@ -34,8 +33,6 @@ def copy(source, target):
         copied = copy(dependency, libs / dependency.name)
         relative = '@loader_path/' + ('lib/' if target.parent == destination else '') + copied.name
         subprocess.run(['install_name_tool', '-change', name, relative, str(target)], check=True)
-    if target.suffix == '.dylib':
-        subprocess.run(['install_name_tool', '-id', '@rpath/' + target.name, str(target)], check=True)
     subprocess.run(['codesign', '--force', '--sign', '-', str(target)], check=True)
     return target
 

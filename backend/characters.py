@@ -84,12 +84,7 @@ def analyze(manifest, source, key, model, use_web, q, progress):
         contexts = [paragraphs[i] for i in sorted(relevant)]
         if not contexts:
             contexts = paragraphs[:1]
-        web = []
-        if use_web and voice['id'] != 'narrator':
-            progress(f'Веб-поиск: {voice["name"]}', index / len(manifest['voices']))
-            web = search(f'{source["author"]} {source["title"]} {voice["name"]} характер возраст', key)
-        allowed_urls = {r['url'] for r in web if r.get('url')}
-        web = [{k: str(r.get(k, ''))[:5000] for k in ('title', 'url', 'content')} for r in web]
+        web, allowed_urls = [], set()
         profile = None
         chunks = q.batches(contexts, 14000)
         seen = set()
@@ -100,6 +95,14 @@ def analyze(manifest, source, key, model, use_web, q, progress):
             # Synchronous call: retries and web searches never overlap another request.
             reply = q.online_request(q.request_spec(prompt_for(source, voice, chunk, profile, web), args), args, key)
             profile = validate_profile(q.parse_reply(reply), voice, seen, allowed_urls)
+        if use_web and voice['id'] != 'narrator' and profile['certainty'] != 'high':
+            progress(f'Уточнение через веб-поиск: {voice["name"]}', index / len(manifest['voices']))
+            web = search(f'{source["author"]} {source["title"]} {voice["name"]} характер возраст', key)
+            allowed_urls = {r['url'] for r in web if r.get('url')}
+            web = [{k: str(r.get(k, ''))[:5000] for k in ('title', 'url', 'content')} for r in web]
+            if web:
+                reply = q.online_request(q.request_spec(prompt_for(source, voice, chunks[-1], profile, web), args), args, key)
+                profile = validate_profile(q.parse_reply(reply), voice, seen, allowed_urls)
         result.append(profile)
     return {'input_sha256': source['input_sha256'], 'model': model, 'characters': result}
 

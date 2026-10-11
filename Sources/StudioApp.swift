@@ -2,6 +2,15 @@ import SwiftUI
 import AppKit
 import Foundation
 import Sparkle
+import UniformTypeIdentifiers
+
+struct RoleSegment: Identifiable {
+    var id: String
+    var text: String
+    var speaker: String
+    var originalSpeaker: String
+    var needsReview: Bool
+}
 
 struct Character: Identifiable {
     var id: String
@@ -50,6 +59,10 @@ struct Character: Identifiable {
     @Published var settings = false
     @Published var dirty = false
     @Published var showLog = false
+    @Published var segments: [RoleSegment] = []
+    @Published var roleSearch = ""
+    @Published var reviewOnly = true
+    @Published var rolesDirty = false
     private var process: Process?
     private var pending: (() -> Void)?
     private var cancelling = false
@@ -65,9 +78,9 @@ struct Character: Identifiable {
     }
 
     func chooseBook() {
-        let panel = NSOpenPanel(); panel.allowedFileTypes = ["epub"]
+        let panel = NSOpenPanel(); panel.allowedContentTypes = [UTType(filenameExtension: "epub")!]
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        book = url.path; project = ""; characters = []; selected = nil; dirty = false
+        book = url.path; project = ""; characters = []; segments = []; selected = nil; dirty = false; rolesDirty = false
         status = "Книга выбрана · можно определить персонажей"
     }
 
@@ -86,7 +99,7 @@ struct Character: Identifiable {
     }
 
     func chooseMusic() {
-        let panel = NSOpenPanel(); panel.allowedFileTypes = ["mp3", "wav", "m4a", "flac", "aiff", "ogg"]
+        let panel = NSOpenPanel(); panel.allowedContentTypes = [.audio]
         if panel.runModal() == .OK { music = panel.url!.path }
     }
 
@@ -103,8 +116,13 @@ struct Character: Identifiable {
                 assumptions: p["assumptions"] as? [String] ?? [], evidence: p["evidence"] as? [[String: String]] ?? [],
                 sample: sample["path"] as? String ?? "", sampleText: sample["text"] as? String ?? "")
         }
+        segments = (data["segments"] as! [[String: Any]]).map { s in
+            RoleSegment(id: s["id"] as! String, text: s["text"] as! String,
+                speaker: s["speaker"] as? String ?? "", originalSpeaker: s["speaker"] as? String ?? "",
+                needsReview: s["needs_review"] as? Bool ?? false)
+        }
         if selected == nil || !characters.contains(where: { $0.id == selected }) { selected = characters.first?.id }
-        dirty = false
+        dirty = false; rolesDirty = false
     }
 
     func request(_ action: String) -> [String: Any] {
@@ -118,7 +136,14 @@ struct Character: Identifiable {
     func analyze() { saveThen { self.launch(self.request("characters")) } }
 
     func saveThen(_ continuation: @escaping () -> Void) {
-        if dirty { save(after: continuation) } else { continuation() }
+        if dirty || rolesDirty { save(after: continuation) } else { continuation() }
+    }
+
+    func saveRoles(after: (() -> Void)? = nil) {
+        if dirty { save(after: after); return }
+        var r = request("roles-save")
+        r["edits"] = Dictionary(uniqueKeysWithValues: segments.filter { $0.speaker != $0.originalSpeaker }.map { ($0.id, $0.speaker) })
+        launch(r, after: after)
     }
 
     func save(after: (() -> Void)? = nil) {
@@ -127,6 +152,7 @@ struct Character: Identifiable {
             let m = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as! [String: Any]
             let book = m["book"] as! [String: Any]
             var r = request("save")
+            r["edits"] = Dictionary(uniqueKeysWithValues: segments.filter { $0.speaker != $0.originalSpeaker }.map { ($0.id, $0.speaker) })
             r["profiles"] = ["input_sha256": book["input_sha256"]!, "characters": characters.map(\.profile)]
             launch(r, after: after)
         } catch { self.error = error.localizedDescription }
@@ -143,7 +169,7 @@ struct Character: Identifiable {
         guard !characters[index].sampleText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             error = "Сначала введите точный текст, произнесённый в образце"; return
         }
-        let panel = NSOpenPanel(); panel.allowedFileTypes = ["wav", "mp3", "m4a", "flac", "aiff"]
+        let panel = NSOpenPanel(); panel.allowedContentTypes = [.audio]
         guard panel.runModal() == .OK, let url = panel.url else { return }
         let cid = characters[index].id, text = characters[index].sampleText
         saveThen {
@@ -306,11 +332,11 @@ struct CharacterEditor: View {
                 }
             }
         }
-        .onChange(of: studio.characters[index].age) { _ in studio.dirty = true }
-        .onChange(of: studio.characters[index].personality) { _ in studio.dirty = true }
-        .onChange(of: studio.characters[index].habits) { _ in studio.dirty = true }
-        .onChange(of: studio.characters[index].speakingStyle) { _ in studio.dirty = true }
-        .onChange(of: studio.characters[index].voice) { _ in studio.dirty = true }
+        .onChange(of: studio.characters[index].age) { studio.dirty = true }
+        .onChange(of: studio.characters[index].personality) { studio.dirty = true }
+        .onChange(of: studio.characters[index].habits) { studio.dirty = true }
+        .onChange(of: studio.characters[index].speakingStyle) { studio.dirty = true }
+        .onChange(of: studio.characters[index].voice) { studio.dirty = true }
     }
 
     func field(_ label: String, text: Binding<String>) -> some View {
@@ -388,6 +414,35 @@ struct ContentView: View {
                                         Text("Результаты: \(studio.output)").font(.caption).foregroundStyle(.secondary).lineLimit(1)
                                         Button("Изменить…") { studio.chooseOutput() }
                                     }
+                                }
+                            }
+                        }
+                        if !studio.segments.isEmpty {
+                            Card {
+                                DisclosureGroup("Проверить и уточнить говорящих · \(studio.segments.count) фрагментов") {
+                                    VStack(alignment: .leading, spacing: 12) {
+                                        HStack {
+                                            TextField("Найти реплику…", text: $studio.roleSearch).textFieldStyle(.roundedBorder)
+                                            Toggle("Требуют проверки", isOn: $studio.reviewOnly)
+                                        }
+                                        let indices = studio.segments.indices.filter {
+                                            (!studio.reviewOnly || studio.segments[$0].needsReview || studio.segments[$0].speaker.isEmpty) &&
+                                            (studio.roleSearch.isEmpty || studio.segments[$0].text.localizedCaseInsensitiveContains(studio.roleSearch))
+                                        }
+                                        ForEach(Array(indices.prefix(100)), id: \.self) { i in
+                                            HStack(alignment: .top, spacing: 12) {
+                                                Text(studio.segments[i].text).font(.subheadline).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                                                Picker("Говорящий", selection: $studio.segments[i].speaker) {
+                                                    Text("Не определён").tag("")
+                                                    ForEach(studio.characters) { Text($0.name).tag($0.id) }
+                                                }.labelsHidden().frame(width: 190)
+                                                    .onChange(of: studio.segments[i].speaker) { studio.rolesDirty = true }
+                                            }.padding(10).background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 8))
+                                        }
+                                        if indices.isEmpty { Text("Фрагментов для проверки нет").foregroundStyle(.secondary) }
+                                        if indices.count > 100 { Text("Показаны первые 100. Уточните поиск, чтобы найти нужную реплику.").font(.caption).foregroundStyle(.secondary) }
+                                        Button("Сохранить назначения ролей") { studio.saveRoles() }.disabled(!studio.rolesDirty)
+                                    }.padding(.top, 12)
                                 }
                             }
                         }
