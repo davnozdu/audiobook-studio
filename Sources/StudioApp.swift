@@ -66,6 +66,10 @@ struct MusicTrack: Codable, Identifiable {
         if started && updater.canCheckForUpdates { updater.checkForUpdates() }
     }
     func updater(_ updater: SPUUpdater, didAbortWithError error: Error) {
+        // Sparkle reports a successful check with no newer release through this callback too.
+        if (error as NSError).domain == SUSparkleErrorDomain && (error as NSError).code == 1001 {
+            report?("Установлена актуальная версия"); return
+        }
         report?("Проверка обновлений: " + error.localizedDescription)
     }
     func updaterDidNotFindUpdate(_ updater: SPUUpdater) { report?("Установлена актуальная версия") }
