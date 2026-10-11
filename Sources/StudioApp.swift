@@ -3,6 +3,7 @@ import AppKit
 import Foundation
 import Sparkle
 import UniformTypeIdentifiers
+import AVFoundation
 
 final class MenuBarController: NSObject {
     var item: NSStatusItem?
@@ -54,6 +55,8 @@ struct Character: Identifiable {
     var evidence: [[String: String]]
     var sample: String
     var sampleText: String
+    var voiceGender: String
+    var seed: Int
 
     var profile: [String: Any] {
         ["id": id, "age": age, "personality": personality.isEmpty ? "Не определён" : personality,
@@ -92,6 +95,14 @@ struct Character: Identifiable {
     @Published var roleSearch = ""
     @Published var reviewOnly = true
     @Published var rolesDirty = false
+    @Published var voiceLabOpen = false
+    @Published var voiceDescription = "Warm mature Russian narrator, mid-low resonant baritone, clear diction, calm natural delivery."
+    @Published var voiceTestText = "Сегодня тихое утро. Я открываю новую книгу и приглашаю вас послушать эту историю."
+    @Published var generatedSample = ""
+    @Published var generatedText = ""
+    @Published var generatedDescription = ""
+    @Published var voiceSeed = 17001
+    @Published var previewByCharacter: [String: String] = [:]
     @Published var showDock = UserDefaults.standard.object(forKey: "showDock") as? Bool ?? true {
         didSet { UserDefaults.standard.set(showDock, forKey: "showDock"); updatePresence() }
     }
@@ -103,6 +114,8 @@ struct Character: Identifiable {
     }
     private let menuBar = MenuBarController()
     private var childPID: Int32 = 0
+    private var audioPlayer: AVAudioPlayer?
+    private var playingAudio = ""
     private var process: Process?
     private var pending: (() -> Void)?
     private var cancelling = false
@@ -187,7 +200,8 @@ struct Character: Identifiable {
                 habits: p["habits"] as? String ?? "", speakingStyle: p["speaking_style"] as? String ?? "",
                 voice: v["voice_description"] as? String ?? "", certainty: p["certainty"] as? String ?? "low",
                 assumptions: p["assumptions"] as? [String] ?? [], evidence: p["evidence"] as? [[String: String]] ?? [],
-                sample: sample["path"] as? String ?? "", sampleText: sample["text"] as? String ?? "")
+                sample: sample["path"] as? String ?? "", sampleText: sample["text"] as? String ?? "",
+                voiceGender: v["voice_gender"] as? String ?? "male", seed: v["seed"] as? Int ?? 17001)
         }
         segments = (data["segments"] as! [[String: Any]]).map { s in
             RoleSegment(id: s["id"] as! String, text: s["text"] as! String,
@@ -239,12 +253,17 @@ struct Character: Identifiable {
     }
 
     func uploadSample(_ index: Int) {
-        guard !characters[index].sampleText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            error = "Сначала введите точный текст, произнесённый в образце"; return
-        }
         let panel = NSOpenPanel(); panel.allowedContentTypes = [.audio]
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        let cid = characters[index].id, text = characters[index].sampleText
+        var text = characters[index].sampleText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.isEmpty,
+           let data = try? Data(contentsOf: url.deletingPathExtension().appendingPathExtension("json")),
+           let metadata = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            text = metadata["text"] as? String ?? ""
+            characters[index].sampleText = text
+        }
+        guard !text.isEmpty else { error = "Введите точный текст, произнесённый в образце, и повторите загрузку"; return }
+        let cid = characters[index].id
         saveThen {
             var r = self.request("sample"); r["character"] = cid; r["text"] = text; r["sample"] = url.path
             self.launch(r)
@@ -254,6 +273,63 @@ struct Character: Identifiable {
     func removeSample(_ index: Int) {
         var r = request("sample"); r["character"] = characters[index].id; r["remove"] = true
         launch(r)
+    }
+
+    func generateVoice(character: String = "", description: String? = nil, text: String? = nil, autoplay: Bool = false) {
+        var r = request("voice-preview")
+        r["description"] = description ?? voiceDescription
+        r["text"] = text ?? voiceTestText
+        r["character"] = character; r["seed"] = voiceSeed
+        if let c = characters.first(where: { $0.id == character }) {
+            r["seed"] = c.seed
+            r["casting"] = ["id": c.id, "age": c.age, "voice_gender": c.voiceGender, "voice_description": description ?? c.voice]
+        }
+        launch(r, after: autoplay ? { [weak self] in self?.listenGenerated() } : nil)
+    }
+
+    func previewCharacter(_ index: Int) {
+        let c = characters[index]
+        if !c.sample.isEmpty { playAudio(c.sample); return }
+        generateVoice(character: c.id, description: c.voice,
+            text: "Сегодня тихое утро. Я открываю новую книгу и приглашаю вас послушать эту историю.", autoplay: true)
+    }
+
+    func listenGenerated() {
+        if !generatedSample.isEmpty { playAudio(generatedSample) }
+    }
+
+    func playAudio(_ path: String) {
+        if playingAudio == path, audioPlayer?.isPlaying == true { audioPlayer?.stop(); return }
+        do {
+            audioPlayer?.stop()
+            audioPlayer = try AVAudioPlayer(contentsOf: URL(fileURLWithPath: path))
+            playingAudio = path
+            audioPlayer?.prepareToPlay(); audioPlayer?.play()
+        } catch { self.error = "Не удалось воспроизвести образец: \(error.localizedDescription)" }
+    }
+
+    func usePreview(_ index: Int, sample: String) {
+        do {
+            let metadata = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: sample).deletingPathExtension().appendingPathExtension("json"))) as! [String: Any]
+            let text = metadata["text"] as! String, cid = characters[index].id
+            saveThen {
+                var r = self.request("sample"); r["character"] = cid; r["text"] = text; r["sample"] = sample
+                self.launch(r)
+            }
+        } catch { self.error = "Не найден текст пробы голоса" }
+    }
+
+    func saveGenerated() {
+        guard !generatedSample.isEmpty else { return }
+        let panel = NSSavePanel(); panel.allowedContentTypes = [.wav]; panel.nameFieldStringValue = "Мой голос.wav"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let data = try Data(contentsOf: URL(fileURLWithPath: generatedSample))
+            try data.write(to: url, options: .atomic)
+            let sidecar = try JSONSerialization.data(withJSONObject: ["text": generatedText, "description": generatedDescription], options: [.prettyPrinted, .sortedKeys])
+            try sidecar.write(to: url.deletingPathExtension().appendingPathExtension("json"), options: .atomic)
+            status = "Образец WAV и текст сохранены на диск"
+        } catch { self.error = error.localizedDescription }
     }
 
     func launch(_ request: [String: Any], after: (() -> Void)? = nil) {
@@ -296,7 +372,7 @@ struct Character: Identifiable {
                     return
                 }
                 self.fraction = 1
-                if !self.project.isEmpty { try? self.loadProject() }
+                if !self.project.isEmpty && ["prepare", "characters", "save", "roles-save", "sample"].contains(request["action"] as? String ?? "") { try? self.loadProject() }
                 next?()
             }
         }
@@ -317,6 +393,11 @@ struct Character: Identifiable {
             let line = buffer.prefix(upTo: newline); buffer.removeSubrange(...newline)
             guard let event = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { continue }
             switch event["type"] as? String {
+            case "sample":
+                generatedSample = event["path"] as? String ?? ""
+                generatedText = event["text"] as? String ?? ""
+                generatedDescription = event["description"] as? String ?? ""
+                if let cid = event["character"] as? String, !cid.isEmpty { previewByCharacter[cid] = generatedSample }
             case "child": childPID = (event["pid"] as? NSNumber)?.int32Value ?? 0; applyPriority()
             case "project": project = event["path"] as? String ?? project
             case "progress": status = event["message"] as? String ?? status; fraction = event["fraction"] as? Double ?? 0; speed = nil; eta = nil
@@ -389,10 +470,24 @@ struct CharacterEditor: View {
                     .textFieldStyle(.roundedBorder).lineLimit(2...4)
                 HStack {
                     Button("Загрузить свой образец…", systemImage: "arrow.up.doc") { studio.uploadSample(index) }
+                    Button("Прослушать образец", systemImage: "play.fill") { studio.previewCharacter(index) }
                     if !c.sample.isEmpty {
-                        Button("Прослушать", systemImage: "play.fill") { NSWorkspace.shared.open(URL(fileURLWithPath: c.sample)) }
                         Button("Сгенерировать вместо образца") { studio.removeSample(index) }
                     }
+                }
+                if let sample = studio.previewByCharacter[c.id] {
+                    HStack {
+                        Button("Прослушать последнюю пробу") { studio.playAudio(sample) }
+                        Button("Использовать для персонажа") { studio.usePreview(index, sample: sample) }
+                        Button("Сохранить пробу на диск…") {
+                            studio.generatedSample = sample
+                            if let metadata = try? JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: sample).deletingPathExtension().appendingPathExtension("json"))) as? [String: Any] {
+                                studio.generatedText = metadata["text"] as? String ?? ""
+                                studio.generatedDescription = metadata["description"] as? String ?? ""
+                            }
+                            studio.saveGenerated()
+                        }
+                    }.font(.caption)
                 }
                 Text(c.sample.isEmpty ? "Голос будет создан нейросетью по описанию" : "Используется ваш образец: \(URL(fileURLWithPath: c.sample).lastPathComponent)")
                     .font(.caption).foregroundStyle(.secondary)
@@ -453,6 +548,7 @@ struct ContentView: View {
                     }
                 }
                 Spacer(minLength: 0)
+                Button("Генератор голосов", systemImage: "waveform.badge.mic") { studio.voiceLabOpen = true }.disabled(studio.busy)
                 Button("Настройки LLM", systemImage: "slider.horizontal.3") { studio.settings = true }
                 Text("Apple Silicon · локальная озвучка").font(.caption2).foregroundStyle(.secondary)
             }.padding(22).frame(minWidth: 235, idealWidth: 245, maxWidth: 285)
@@ -606,6 +702,7 @@ struct ContentView: View {
             }.frame(minWidth: 760)
         }.frame(minWidth: 1050, minHeight: 780)
             .sheet(isPresented: $studio.settings) { SettingsView(studio: studio) }
+            .sheet(isPresented: $studio.voiceLabOpen) { VoiceLabView(studio: studio) }
             .alert("Требуется внимание", isPresented: Binding(get: { studio.error != nil }, set: { if !$0 { studio.error = nil } })) {
                 Button("Понятно") { studio.error = nil }
             } message: { Text(studio.error ?? "") }
@@ -619,9 +716,49 @@ struct ContentView: View {
     }
 }
 
+struct VoiceLabView: View {
+    @ObservedObject var studio: Studio
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack {
+                Label("Генератор голосов", systemImage: "waveform.badge.mic").font(.title2.bold())
+                Spacer()
+                Button("Закрыть") { studio.voiceLabOpen = false }
+            }
+            Text("Создайте голос отдельно от книги. Опишите возраст, тембр, высоту и манеру говорить, затем введите свой текст.").foregroundStyle(.secondary)
+            Text("Описание голоса").font(.headline)
+            TextEditor(text: $studio.voiceDescription).font(.body).frame(height: 110).padding(8)
+                .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 10)).disabled(studio.busy)
+            Text("Тестовый текст · 20–250 символов").font(.headline)
+            TextEditor(text: $studio.voiceTestText).font(.body).frame(height: 90).padding(8)
+                .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 10)).disabled(studio.busy)
+            HStack {
+                Button("Запустить конструктор для генерации", systemImage: "sparkles") { studio.generateVoice() }
+                    .buttonStyle(.borderedProminent).tint(.indigo).disabled(studio.busy)
+                Stepper("Вариант \(studio.voiceSeed)", value: $studio.voiceSeed, in: 1...99999).disabled(studio.busy)
+            }
+            if studio.busy {
+                HStack { ProgressView().controlSize(.small); Text(studio.status); Spacer(); Button("Остановить") { studio.cancel() } }
+            }
+            if !studio.generatedSample.isEmpty {
+                Divider()
+                HStack {
+                    Button("Прослушать образец", systemImage: "play.fill") { studio.listenGenerated() }
+                    Button("Сохранить образец на диск…", systemImage: "square.and.arrow.down") { studio.saveGenerated() }
+                }.disabled(studio.busy)
+                Text("При сохранении создаются WAV и JSON с точным текстом. Затем загрузите WAV в карточку нужного персонажа.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Text("Загружается только VoiceDesign. Основная модель озвучки не запускается; после генерации модель выгружается.")
+                .font(.caption).foregroundStyle(.secondary)
+        }.padding(30).frame(width: 680)
+    }
+}
+
 struct SettingsView: View {
     @ObservedObject var studio: Studio
     var body: some View {
+        ScrollView {
         VStack(alignment: .leading, spacing: 20) {
             Text("Режиссёр вашей аудиокниги").font(.title2.bold())
             Text("DeepSeek через Ollama Cloud. Запросы выполняются последовательно.").foregroundStyle(.secondary)
@@ -643,7 +780,8 @@ struct SettingsView: View {
             Toggle("Автоматически проверять обновления", isOn: Binding(get: { studio.updater.updater.automaticallyChecksForUpdates }, set: { studio.updater.updater.automaticallyChecksForUpdates = $0 }))
             Button("Проверить обновления…") { studio.updater.checkForUpdates(nil) }
             HStack { Spacer(); Button("Готово") { studio.settings = false }.buttonStyle(.borderedProminent) }
-        }.padding(30).frame(width: 520)
+        }.padding(30)
+        }.frame(width: 560, height: 690)
     }
 }
 

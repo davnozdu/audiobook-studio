@@ -15,6 +15,7 @@ import signal
 import subprocess
 import sys
 import time
+import uuid
 
 ENGINE = Path(__file__).resolve().parent / 'engine'
 sys.path.insert(0, str(ENGINE))
@@ -288,6 +289,27 @@ def main():
         manifest = apply_role_edits(manifest, source, request.get('edits', {}))
         q.write(project / 'roles/manifest.json', manifest)
         emit('done', path=str(project), message='Назначения ролей сохранены')
+    elif action == 'voice-preview':
+        from setup_audiobook import ensure_model
+        from voice_designer import validate_request
+        text, description = validate_request(request)
+        if request.get('casting'):
+            from synthesize_qwen_mlx import reference_instruction
+            description = reference_instruction(request['casting'])
+        root = Path(request['runtime']).expanduser().resolve()
+        root.mkdir(parents=True, exist_ok=True)
+        stage('Проверка модели VoiceDesign')
+        with contextlib.redirect_stdout(sys.stderr):
+            model = ensure_model(root, 'Qwen3-TTS-12Hz-1.7B-VoiceDesign-8bit', q.load(ENGINE / 'design_model_files.json'))
+        output = root.parent / 'VoiceLab' / uuid.uuid4().hex
+        output.mkdir(parents=True)
+        q.write(output / 'request.json', dict(text=text, description=description, seed=request.get('seed', 17001)))
+        stage('Генератор голосов · создание тестового образца')
+        run_step(request['python'], 'voice_designer.py', ['--request', output / 'request.json',
+            '--model', model, '--out', output], output)
+        emit('sample', path=str(output / 'sample.wav'), text=text, description=description,
+             character=request.get('character', ''))
+        emit('done', message='Образец голоса готов · VoiceDesign выгружен')
     elif action == 'build':
         build(request)
     elif action == 'setup':

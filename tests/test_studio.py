@@ -15,6 +15,7 @@ import characters
 import worker
 import prepare_qwen as q
 import synthesize_qwen_mlx as synth
+import voice_designer
 
 
 def fixture():
@@ -96,6 +97,13 @@ class CharacterTests(unittest.TestCase):
 
 
 class VoiceTests(unittest.TestCase):
+    def test_designer_validates_text_before_loading_gpu(self):
+        text, description = voice_designer.validate_request(dict(text='Сегодня мы открываем новую книгу.', description='Warm mature Russian baritone'))
+        self.assertIn('книгу', text)
+        for request in (dict(text='!', description=description), dict(text='x'*251, description=description), dict(text=text, description='')):
+            with self.assertRaises(ValueError):
+                voice_designer.validate_request(request)
+
     def test_user_sample_bypasses_generated_reference(self):
         with tempfile.TemporaryDirectory() as directory:
             wav = Path(directory) / 'original.wav'; wav.write_bytes(b'fake audio')
