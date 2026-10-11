@@ -193,6 +193,7 @@ struct Character: Identifiable {
     @Published var speed: Double?
     @Published var eta: Double?
     @Published var completed = ""
+    @Published var resultPath = ""
     @Published var log = ""
     @Published var error: String?
     @Published var key = "" { didSet { scheduleCredentialSave() } }
@@ -420,13 +421,14 @@ struct Character: Identifiable {
         guard !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             settings = true; status = "Укажите ключ LLM для автоматической сборки"; return
         }
+        guard let destination = chooseBuildDestination() else { return }
         if project.isEmpty {
             var r = request("prepare"); r["automatic"] = true
-            launch(r, after: { self.build() })
+            launch(r, after: { self.build(destination: destination) })
         } else if segments.contains(where: { $0.speaker.isEmpty }) || characters.contains(where: { $0.personality.isEmpty || $0.habits.isEmpty || $0.speakingStyle.isEmpty }) {
             var r = request("characters"); r["automatic"] = true
-            launch(r, after: { self.build() })
-        } else { build() }
+            launch(r, after: { self.build(destination: destination) })
+        } else { build(destination: destination) }
     }
     func analyze() { saveThen { self.launch(self.request("characters")) } }
 
@@ -453,10 +455,32 @@ struct Character: Identifiable {
         } catch { self.error = error.localizedDescription }
     }
 
-    func build() {
+    func chooseBuildDestination() -> String? {
+        let panel = NSSavePanel()
+        panel.title = "Куда сохранить аудиокнигу?"
+        panel.message = "Будет создана папка с двумя файлами: book.m4b и book-read-along.epub. Укажите имя папки и место сохранения."
+        panel.prompt = "Создать папку и собрать"
+        panel.canCreateDirectories = true
+        panel.directoryURL = URL(fileURLWithPath: UserDefaults.standard.string(forKey: "buildOutputFolder") ?? output)
+        panel.nameFieldStringValue = URL(fileURLWithPath: book).deletingPathExtension().lastPathComponent + " — аудиокнига"
+        guard panel.runModal() == .OK, let url = panel.url else { return nil }
+        if FileManager.default.fileExists(atPath: url.path) {
+            error = "Выберите имя новой папки для сборки. Предыдущие результаты сохраняются отдельно."
+            return nil
+        }
+        UserDefaults.standard.set(url.deletingLastPathComponent().path, forKey: "buildOutputFolder")
+        resultPath = url.path
+        return url.path
+    }
+
+    func build(destination: String? = nil) {
+        guard let destination = destination ?? chooseBuildDestination() else { return }
         saveThen {
             // Setup checks all files and downloads only missing models. No pip/install on client.
-            self.launch(self.request("setup"), after: { self.launch(self.request("build")) })
+            self.launch(self.request("setup"), after: {
+                var r = self.request("build"); r["destination"] = destination
+                self.launch(r)
+            })
         }
     }
 
@@ -637,6 +661,7 @@ struct Character: Identifiable {
                 completed = "\(event["completed"] ?? 0) / \(event["total"] ?? 0) фрагментов"
             case "log": appendLog(event["message"] as? String ?? "")
             case "error": receivedError = true; error = event["message"] as? String; status = "Требуется внимание"; appendLog(error ?? "Ошибка движка")
+            case "result": resultPath = event["path"] as? String ?? resultPath
             case "done": status = event["message"] as? String ?? "Готово"; project = event["path"] as? String ?? project
             default: break
             }
@@ -828,7 +853,7 @@ struct ContentView: View {
                                 }
                                 if studio.project.isEmpty {
                                     HStack {
-                                        Text("Результаты: \(studio.output)").font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                                        Text("Рабочие проекты: \(studio.output)").font(.caption).foregroundStyle(.secondary).lineLimit(1)
                                         Button("Изменить…") { studio.chooseOutput() }
                                     }
                                 }
@@ -931,7 +956,7 @@ struct ContentView: View {
                                 }
                                 Button("Собрать аудиокнигу и наложить на EPUB", systemImage: "waveform.badge.plus") { studio.build() }
                                     .buttonStyle(.borderedProminent).controlSize(.large).tint(.indigo).disabled(studio.characters.isEmpty)
-                                Text("Два результата: отдельный M4B и EPUB со встроенным аудио. Модели скачиваются автоматически при первой сборке.")
+                                Text(studio.resultPath.isEmpty ? "Перед сборкой выберите, где создать папку с M4B и EPUB. Модели скачиваются автоматически." : "Аудиокнига и EPUB: " + studio.resultPath)
                                     .font(.caption).foregroundStyle(.secondary)
                             }
                         }
@@ -965,6 +990,9 @@ struct ContentView: View {
                         }
                         Spacer()
                         if !studio.project.isEmpty {
+                            if !studio.resultPath.isEmpty {
+                                Button("Папка аудиокниги", systemImage: "folder.fill") { NSWorkspace.shared.open(URL(fileURLWithPath: studio.resultPath)) }
+                            }
                             Button("Папка проекта", systemImage: "folder") { NSWorkspace.shared.open(URL(fileURLWithPath: studio.project)) }
                         }
                     }.font(.caption)

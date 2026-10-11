@@ -272,6 +272,8 @@ class Speed:
 def build(request):
     project = Path(request['project']).resolve()
     manifest, source = verify(project)
+    if request.get('destination') and Path(request['destination']).expanduser().exists():
+        raise ValueError('Папка результата уже существует. Выберите новую папку для сборки')
     runtime = Path(request['runtime']).expanduser().resolve()
     py = runtime / '.venv-mlx/bin/python'
     stress = runtime / '.venv-stress/bin/python'
@@ -327,7 +329,13 @@ def build(request):
     stage('Сборка отдельного M4B и EPUB с синхронным аудио')
     run_step(py, 'audiobook_epub.py', ['package', '--manifest', prepared, '--audio-dir', final_audio,
              '--out', project / 'result'], project)
-    emit('done', path=str(project), message='Готовы book.m4b и book-read-along.epub')
+    result = project / 'result'
+    if request.get('destination'):
+        result = Path(request['destination']).expanduser().resolve()
+        stage('Сохранение аудиокниги и EPUB · ' + str(result))
+        shutil.copytree(project / 'result', result)
+    emit('result', path=str(result))
+    emit('done', path=str(project), message='Аудиокнига и EPUB сохранены: ' + str(result))
 
 
 def main():
