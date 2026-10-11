@@ -55,6 +55,9 @@ final class CoreTests: XCTestCase {
     XCTAssertEqual(try ru.integer(1234), "одна тысяча двести тридцать четыре")
     XCTAssertEqual(try ru.normalize("25%"), "двадцать пять процентов")
     XCTAssertEqual(try ru.normalize("Глава IV"), "Глава четвёртая")
+    XCTAssertEqual(try ru.normalize("Главы I, II и III"), "Главы первая, вторая и третья")
+    XCTAssertEqual(
+      try ru.normalize("В 1870 он вернулся."), "В тысяча восемьсот семидесятом он вернулся.")
     XCTAssertEqual(
       try ru.normalize("21.01.2024"), "двадцать первого января две тысячи двадцать четвёртого года")
     XCTAssertEqual(try ru.normalize("12:30"), "двенадцать часов тридцать минут")
@@ -152,4 +155,35 @@ final class CoreTests: XCTestCase {
     try Data("SACC".utf8).write(to: file)
     XCTAssertThrowsError(try AccentDictionary(file))
   }
+  func testEPUBReadAlongPreservesText() throws {
+    let folder = temporary()
+    defer { try? fm.removeItem(at: folder) }
+    let text = "Ёж 😀 сказал: «Я дома!»"
+    let id = "seg000001"
+    let source: Object = [
+      "paragraphs": [["id": "p00001", "chapter_id": "ch001", "text": text]],
+      "chapters": [["id": "ch001", "title": "Первая глава"]],
+    ]
+    let manifest: Object = [
+      "book": ["title": "Тест", "author": "Автор"],
+      "segments": [
+        [
+          "id": id, "paragraph_id": "p00001", "chapter_id": "ch001", "text": text,
+          "source": ["char_start": 0, "char_end": text.unicodeScalars.count],
+        ]
+      ],
+    ]
+    let audio = folder.appendingPathComponent("fixture.m4b")
+    try Data("fixture".utf8).write(to: audio)
+    let output = folder.appendingPathComponent("fixture.epub")
+    try NativeBook.epub(
+      manifest, source: source,
+      timeline: [["segment_id": id, "audio_start": 0.0, "clip_end": 1.0]], audio: audio,
+      output: output)
+    let parsed = try NativeBook.read(output)
+    XCTAssertEqual(
+      NativeIO.objects(parsed["paragraphs"]).map { NativeIO.string($0["text"]) }, [text])
+    XCTAssertEqual(NativeIO.string(parsed["title"]), "Тест")
+  }
+
 }

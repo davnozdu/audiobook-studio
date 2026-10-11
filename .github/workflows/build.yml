@@ -34,8 +34,21 @@ jobs:
             echo "VERSION=0.1.0" >> "$GITHUB_ENV"
           fi
           echo "BUILD_NUMBER=$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
+      - name: Restore native compilation cache
+        id: native-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .build-tools/native-build
+          key: studio-native-macos26-${{ hashFiles('native/Package.swift') }}-${{ github.run_id }}
+          restore-keys: studio-native-macos26-${{ hashFiles('native/Package.swift') }}-
       - name: Build standalone app
         run: bash scripts/package.sh
+      - name: Save native compilation cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .build-tools/native-build
+          key: ${{ steps.native-cache.outputs.cache-primary-key }}
       - name: Sign update archive and feed
         env:
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}

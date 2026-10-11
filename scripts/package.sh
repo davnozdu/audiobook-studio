@@ -19,7 +19,7 @@ cp assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 swiftc -O -swift-version 5 -target arm64-apple-macosx14.0 -parse-as-library Sources/StudioApp.swift -F .build-tools -framework Sparkle -Xlinker -rpath -Xlinker @executable_path/../Frameworks -o "$APP/Contents/MacOS/AudiobookStudio"
 ditto .build-tools/Sparkle.framework "$APP/Contents/Frameworks/Sparkle.framework"
 xcodebuild -downloadComponent MetalToolchain
-(cd native && xcodebuild build -scheme StudioEngine -configuration Release -destination "platform=macOS,arch=arm64" -derivedDataPath ../.build-tools/native-build MACOSX_DEPLOYMENT_TARGET=14.0 CODE_SIGNING_ALLOWED=NO) > .build-tools/native-build.log 2>&1 || { tail -100 .build-tools/native-build.log; exit 1; }
+(cd native && xcodebuild build -scheme StudioNative-Package -configuration Release -destination "platform=macOS,arch=arm64" -derivedDataPath ../.build-tools/native-build MACOSX_DEPLOYMENT_TARGET=14.0 CODE_SIGNING_ALLOWED=NO) > .build-tools/native-build.log 2>&1 || { tail -100 .build-tools/native-build.log; exit 1; }
 NATIVE_BIN=".build-tools/native-build/Build/Products/Release"
 cp "$NATIVE_BIN/StudioEngine" "$APP/Contents/MacOS/StudioEngine"
 # SwiftPM resource bundles contain MLX Metal kernels; loaders locate them beside the executable.

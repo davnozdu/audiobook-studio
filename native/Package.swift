@@ -1,7 +1,7 @@
 // swift-tools-version: 6.2
 import PackageDescription
 import Foundation
-let coreOnly = ProcessInfo.processInfo.environment["STUDIO_CORE_ONLY"] == "1"
+let coreOnly = Context.environment["STUDIO_CORE_ONLY"] == "1"
 let package = Package(name: "StudioNative", platforms: [.macOS(.v14)], products: coreOnly ? [] : [
     .executable(name: "StudioEngine", targets: ["StudioEngine"])
 ], dependencies: coreOnly ? [] : [
