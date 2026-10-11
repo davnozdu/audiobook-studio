@@ -95,7 +95,19 @@ def runtime(root, name, requirements, modules, check_only):
     return python
 
 
-def setup(root, check_only=False):
+def bundled_runtime_check():
+    # This path is used by the app: validation only, never venv/pip/installation.
+    modules = ['mlx.core', 'mlx_audio.tts.utils', 'torch', 'silero_stress',
+               'ebooklib', 'razdel', 'soundfile', 'bs4', 'lxml.etree']
+    expression = 'import importlib; [importlib.import_module(x) for x in ' + repr(modules) + ']'
+    probe = subprocess.run([sys.executable, '-s', '-B', '-c', expression], capture_output=True, text=True)
+    if probe.returncode:
+        raise ValueError('Встроенный движок повреждён или несовместим с macOS. Установите полную сборку приложения; зависимости автоматически не устанавливаются.')
+    return Path(sys.executable)
+
+
+def setup(root, check_only=False, bundled_engine=None):
+    engine = Path(bundled_engine).resolve() if bundled_engine else root
     report_status('Подготовка локального движка · проверка совместимости Mac')
     if sys.platform != 'darwin' or platform.machine() != 'arm64': raise ValueError('Комплект рассчитан на macOS Apple Silicon (Python arm64, не Rosetta)')
     if not Path(os.environ.get('AUDIOBOOK_FFMPEG', '/opt/homebrew/bin/ffmpeg')).exists():
@@ -104,29 +116,34 @@ def setup(root, check_only=False):
         for name in ['books', 'results', 'models']:
             (root / name).mkdir(parents=True, exist_ok=True)
     report_status('Проверка встроенного движка озвучки MLX')
-    runtime(root,'.venv-mlx','requirements.txt',['mlx_audio','ebooklib','razdel','soundfile','bs4'],check_only)
-    report_status('Проверка движка ударений Silero')
-    runtime(root,'.venv-stress','requirements-stress.txt',['torch','silero_stress'],check_only)
+    if bundled_engine:
+        bundled_runtime_check()
+        report_status('Встроенный движок готов · установка зависимостей не требуется')
+    else:
+        runtime(root,'.venv-mlx','requirements.txt',['mlx_audio','ebooklib','razdel','soundfile','bs4'],check_only)
+        report_status('Проверка движка ударений Silero')
+        runtime(root,'.venv-stress','requirements-stress.txt',['torch','silero_stress'],check_only)
     for name, spec_file in [('Qwen3-TTS-12Hz-1.7B-Ru-Stress-CF-source','stress_model_files.json'),
                             ('Qwen3-TTS-12Hz-1.7B-VoiceDesign-8bit','design_model_files.json')]:
-        ensure_model(root,name,json.loads((root / spec_file).read_text()),check_only)
+        ensure_model(root,name,json.loads((engine / spec_file).read_text()),check_only)
     report_status('Подготовка словарей ударений')
     dictionary = root / 'data/stress/dictionary.json'
     if not dictionary.exists():
         if check_only: raise ValueError('Не установлен словарь исключений')
         dictionary.parent.mkdir(parents=True,exist_ok=True)
-        shutil.copyfile(root / 'resources/stress_dictionary.json',dictionary)
+        shutil.copyfile(engine / 'resources/stress_dictionary.json',dictionary)
     binary = root / 'data/stress/russian_accents_full.sacc'
     expected = 'a1ac32606e99f6d8ab8e8ce796b0005b0693908555460656976c54e171658b27'
     if not binary.exists():
         if check_only: raise ValueError('Не установлен бинарный словарь')
-        bundled = root / 'resources/russian_accents_full.sacc'
+        bundled = engine / 'resources/russian_accents_full.sacc'
         installed = root.parent / 'qwen-epub-audiobook/data/stress/russian_accents_full.sacc'
         if bundled.is_file() and checksum(bundled) == expected:
             shutil.copyfile(bundled, binary)
         elif installed.is_file() and checksum(installed) == expected:
             subprocess.run(['cp','-c',str(installed),str(binary)],check=True)
         else:
+            if bundled_engine: raise ValueError('В полной сборке отсутствует встроенный словарь ударений. Переустановите приложение.')
             partial = binary.with_suffix('.sacc.partial')
             subprocess.run(['curl','-fL','--retry','3','-C','-',
                 'https://github.com/davnozdu/supertonic-dictionaries/releases/download/russian-v1.1/russian_accents_full.sacc',
@@ -137,7 +154,7 @@ def setup(root, check_only=False):
     if binary.stat().st_size != 179200764 or checksum(binary) != expected:
         raise ValueError('Повреждён бинарный словарь; не перезаписываю')
     report_status('Проверка встроенной музыки')
-    music = root / 'resources/Lamplight_and_Paper.mp3'
+    music = engine / 'resources/Lamplight_and_Paper.mp3'
     from mix_book_music import FIRST_TRACK
     if not music.is_file() or music.stat().st_size != FIRST_TRACK['size'] or checksum(music) != FIRST_TRACK['sha256']:
         raise ValueError('Музыка не совпадает с каталогом MyTTS')
@@ -148,6 +165,7 @@ if __name__ == '__main__':
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root',type=Path,default=Path(__file__).resolve().parent)
     parser.add_argument('--check-only',action='store_true')
+    parser.add_argument('--bundled-engine',type=Path)
     args=parser.parse_args()
-    try: setup(args.root.resolve(),args.check_only)
+    try: setup(args.root.resolve(),args.check_only,args.bundled_engine)
     except (ValueError,OSError,subprocess.CalledProcessError) as exc: parser.exit(1,f'Ошибка установки: {exc}\n')

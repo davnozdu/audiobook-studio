@@ -580,9 +580,11 @@ struct Character: Identifiable {
         let p = Process(), input = Pipe(), output = Pipe(), errors = Pipe()
         p.executableURL = URL(fileURLWithPath: python)
         p.qualityOfService = .userInitiated
-        p.arguments = ["-u", resources.appendingPathComponent("backend/worker.py").path]
+        p.arguments = ["-s", "-B", "-u", resources.appendingPathComponent("backend/worker.py").path]
         var env = ProcessInfo.processInfo.environment
         env.removeValue(forKey: "OLLAMA_API_KEY")
+        for name in ["PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE"] { env.removeValue(forKey: name) }
+        env["PYTHONNOUSERSITE"] = "1"
         env["AUDIOBOOK_FFMPEG"] = resources.appendingPathComponent("runtime/bin/ffmpeg").path
         env["AUDIOBOOK_FFPROBE"] = resources.appendingPathComponent("runtime/bin/ffprobe").path
         env["PYTHONDONTWRITEBYTECODE"] = "1"

@@ -21,8 +21,9 @@ mkdir -p "$APP/Contents/Resources/runtime"
 if [ ! -x "$APP/Contents/Resources/runtime/python/bin/python3" ]; then
   curl -fL --retry 3 'https://github.com/astral-sh/python-build-standalone/releases/download/20261009/cpython-3.11.17%2B20261009-aarch64-apple-darwin-install_only.tar.gz' -o .build-tools/python.tar.gz
   tar -xf .build-tools/python.tar.gz -C "$APP/Contents/Resources/runtime"
-  "$APP/Contents/Resources/runtime/python/bin/python3" -m pip install -r backend/engine/requirements.txt -r backend/engine/requirements-stress.txt
 fi
+# Resolve and install all dependencies on the build runner, including when reusing a build directory.
+"$APP/Contents/Resources/runtime/python/bin/python3" -m pip install -r backend/engine/requirements.txt -r backend/engine/requirements-stress.txt
 if [ ! -x "$APP/Contents/Resources/runtime/bin/ffmpeg" ]; then
   python3 scripts/vendor_ffmpeg.py "$APP/Contents/Resources/runtime/bin"
 fi
@@ -36,6 +37,6 @@ python3 scripts/plist.py
 # Sign Mach-O dependencies first, then the app; no Apple account needed for test builds.
 python3 scripts/sign_bundle.py "$APP"
 codesign --verify --deep --strict "$APP"
-"$APP/Contents/Resources/runtime/python/bin/python3" -c 'import bs4, torch, silero_stress, mlx.core, mlx_audio, ebooklib, soundfile; print("Embedded engine imports OK")'
+python3 scripts/check_bundle.py "$APP"
 "$APP/Contents/Resources/runtime/bin/ffmpeg" -version
 ditto -c -k --sequesterRsrc --keepParent "$APP" "dist/AudiobookStudio-$VERSION-arm64.zip"

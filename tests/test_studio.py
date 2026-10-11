@@ -252,3 +252,30 @@ class PortableProjectTests(unittest.TestCase):
         self.assertLessEqual(len(result), 150)
         self.assertNotIn('Чужая', result)
         self.assertIn('рассказать', result)
+
+class StandaloneRuntimeTests(unittest.TestCase):
+    def test_bundled_dependency_failure_never_installs_anything(self):
+        with patch.object(setup_audiobook.subprocess, 'run', return_value=SimpleNamespace(returncode=1)) as run:
+            with self.assertRaisesRegex(ValueError, 'зависимости автоматически не устанавливаются'):
+                setup_audiobook.bundled_runtime_check()
+        self.assertEqual(run.call_count, 1)
+        self.assertNotIn('pip', run.call_args.args[0])
+        self.assertEqual(run.call_args.args[0][0], sys.executable)
+
+    def test_bundled_setup_does_not_create_venv_or_download_dictionary(self):
+        import mix_book_music
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / 'state'; root.mkdir()
+            engine = Path(tmp) / 'engine'; resources = engine / 'resources'; resources.mkdir(parents=True)
+            (resources / 'stress_dictionary.json').write_text('{}')
+            (resources / 'russian_accents_full.sacc').touch()
+            with (resources / 'russian_accents_full.sacc').open('wb') as f: f.truncate(179200764)
+            (resources / 'Lamplight_and_Paper.mp3').write_bytes(b'music')
+            for name in ('stress_model_files.json', 'design_model_files.json'): (engine / name).write_text('{}')
+            expected = 'a1ac32606e99f6d8ab8e8ce796b0005b0693908555460656976c54e171658b27'
+            def checksum(path): return 'music' if Path(path).suffix == '.mp3' else expected
+            with patch.object(setup_audiobook.sys, 'platform', 'darwin'), patch.object(setup_audiobook.platform, 'machine', return_value='arm64'), patch.dict(setup_audiobook.os.environ, {'AUDIOBOOK_FFMPEG': str(resources / 'Lamplight_and_Paper.mp3')}), patch.object(setup_audiobook, 'bundled_runtime_check'), patch.object(setup_audiobook, 'runtime', side_effect=AssertionError('Legacy installer must not run')), patch.object(setup_audiobook, 'ensure_model') as models, patch.object(setup_audiobook, 'checksum', side_effect=checksum), patch.object(setup_audiobook.subprocess, 'run', side_effect=AssertionError('No installations or dictionary downloads')), patch.dict(mix_book_music.FIRST_TRACK, {'size': 5, 'sha256': 'music'}), patch('builtins.print'):
+                setup_audiobook.setup(root, bundled_engine=engine)
+            self.assertEqual(models.call_count, 2)
+            self.assertFalse((root / '.venv-mlx').exists())
+            self.assertTrue((root / 'data/stress/dictionary.json').is_file())

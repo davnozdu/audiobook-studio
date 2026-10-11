@@ -220,10 +220,12 @@ def resolve_automatic_roles(manifest, source, folder, args, key):
 def run_step(python, script, options, project, key=None, progress=None):
     env = dict(os.environ)
     env.pop('OLLAMA_API_KEY', None)
+    for name in ('PYTHONPATH', 'PYTHONHOME', 'PYTHONUSERBASE'): env.pop(name, None)
+    env['PYTHONNOUSERSITE'] = '1'
     env['PATH'] = '/opt/homebrew/bin:/usr/local/bin:' + env.get('PATH', '')
     if key:
         env['OLLAMA_API_KEY'] = key
-    child = subprocess.Popen([str(python), '-u', str(ENGINE / script), *map(str, options)],
+    child = subprocess.Popen([str(python), '-s', '-B', '-u', str(ENGINE / script), *map(str, options)],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
     emit('child', pid=child.pid)
     with (project / 'run.log').open('a', encoding='utf-8') as log:
@@ -275,8 +277,7 @@ def build(request):
     if request.get('destination') and Path(request['destination']).expanduser().exists():
         raise ValueError('Папка результата уже существует. Выберите новую папку для сборки')
     runtime = Path(request['runtime']).expanduser().resolve()
-    py = runtime / '.venv-mlx/bin/python'
-    stress = runtime / '.venv-stress/bin/python'
+    py = stress = Path(request['python'])
     if not py.is_file() or not stress.is_file():
         raise ValueError('Сначала установите движок или выберите готовый комплект в настройках')
     if (project / 'audio').exists():
@@ -447,23 +448,8 @@ def main():
     elif action == 'setup':
         root = Path(request['runtime']).expanduser().resolve()
         root.mkdir(parents=True, exist_ok=True)
-        # A single bundled interpreter includes both MLX and Silero dependencies.
-        # Compatibility paths preserve the existing engine without separate venvs.
-        for name in ('.venv-mlx', '.venv-stress'):
-            executable = root / name / 'bin/python'
-            executable.parent.mkdir(parents=True, exist_ok=True)
-            if executable.is_symlink():
-                executable.unlink()
-            elif executable.exists():
-                raise ValueError('Каталог движка занят другим Python-окружением')
-            executable.symlink_to(Path(request['python']).resolve())
-        for path in ENGINE.rglob('*'):
-            if path.is_file() and '__pycache__' not in path.parts:
-                target = root / path.relative_to(ENGINE)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(path, target)
-        stage('Проверка встроенного движка · загрузка необходимых моделей')
-        run_step(request['python'], 'setup_audiobook.py', ['--root', root], root)
+        stage('Проверка встроенного движка · загрузка только необходимых моделей')
+        run_step(request['python'], 'setup_audiobook.py', ['--root', root, '--bundled-engine', ENGINE], root)
         emit('done', message='Движок установлен')
     else:
         raise ValueError('Неизвестная команда')
