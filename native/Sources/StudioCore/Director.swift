@@ -2,12 +2,29 @@ import Foundation
 
 public final class NativeDirector {
   let key: String, model: String, useWeb: Bool
+  let diagnostics: URL?
   public init(_ request: Object) {
     key = NativeIO.string(request["key"])
     model = NativeIO.string(request["model"])
     useWeb = request["web_search"] as? Bool ?? false
+    let folder = NativeIO.string(request["project"])
+    diagnostics = folder.isEmpty ? nil : URL(fileURLWithPath: folder).appendingPathComponent("llm-responses")
   }
   public func call(_ prompt: String) async throws -> Object {
+    for attempt in 0..<3 {
+      try Task.checkCancellation()
+      do {
+        return try await callOnce(prompt + (attempt == 0 ? "" : "\nОтвет предыдущей попытки оказался непригоден для JSON-парсера. Верни только один завершённый JSON-объект, без Markdown, объяснений и рассуждений."))
+      } catch {
+        guard let issue = error as? StudioError, issue.message.hasPrefix("LLM:"),
+          !issue.message.hasPrefix("LLM: HTTP"), attempt < 2 else { throw error }
+        NativeIO.emit("log", ["message": issue.message])
+        NativeIO.stage("Повтор запроса LLM · корректный JSON · попытка \(attempt+2)/3")
+      }
+    }
+    throw StudioError("LLM: не удалось получить корректный ответ")
+  }
+  private func callOnce(_ prompt: String) async throws -> Object {
     guard !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
       throw StudioError("Введите ключ Ollama в настройках")
     }
@@ -18,18 +35,24 @@ public final class NativeDirector {
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.httpBody = try NativeIO.json([
       "model": model, "stream": false, "think": false, "format": "json",
-      "options": ["num_predict": 12000], "messages": [["role": "user", "content": prompt]],
+      "options": ["temperature": 0, "num_predict": 12000], "messages": [["role": "user", "content": prompt]],
     ])
     let (data, response) = try await URLSession.shared.data(for: request)
     guard let status = (response as? HTTPURLResponse)?.statusCode, status == 200 else {
       throw StudioError("LLM: HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)")
     }
-    let object = try JSONSerialization.jsonObject(with: data)
-    let content = NativeIO.string(NativeIO.object(NativeIO.object(object)["message"])["content"])
-    guard let json = content.data(using: .utf8),
-      let result = try JSONSerialization.jsonObject(with: json) as? Object
-    else { throw StudioError("LLM вернула некорректный JSON") }
-    return result
+    do { return try LLMReply.parse(data) }
+    catch {
+      if let diagnostics {
+        try? FileManager.default.createDirectory(at: diagnostics, withIntermediateDirectories: true)
+        let file = diagnostics.appendingPathComponent("invalid-" + UUID().uuidString + ".txt")
+        let safe = (String(data: data, encoding: .utf8) ?? "Не удалось декодировать UTF-8")
+          .replacingOccurrences(of: key, with: "[REDACTED]")
+        try? Data(safe.utf8).write(to: file, options: .atomic)
+        NativeIO.emit("log", ["message": "Ответ LLM для диагностики сохранён: " + file.path])
+      }
+      throw error
+    }
   }
   func search(_ query: String) async throws -> [Object] {
     var request = URLRequest(url: URL(string: "https://ollama.com/api/web_search")!)

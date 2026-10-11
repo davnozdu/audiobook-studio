@@ -3,6 +3,20 @@ import XCTest
 @testable import StudioCore
 
 final class CoreTests: XCTestCase {
+  func testLLMJSONWrappersAndErrors() throws {
+    for content in ["{\"characters\":[]}", "  ```json\n{\"characters\":[]}\n```  ", "```\n{\"characters\":[]}\n```", "\u{FEFF}{\"characters\":[]}"] {
+      let reply = try NativeIO.json(["done": true, "done_reason": "stop", "message": ["content": content]])
+      XCTAssertNotNil(try LLMReply.parse(reply)["characters"])
+    }
+    for reply: Object in [
+      ["done_reason": "length", "message": ["content": "{}"]],
+      ["done": false, "message": ["content": "{}"]],
+      ["message": ["content": ""]],
+      ["message": ["content": "```json\n{broken}\n```"]],
+      ["message": ["content": "[1,2]"]],
+    ] { XCTAssertThrowsError(try LLMReply.parse(NativeIO.json(reply))) }
+    XCTAssertThrowsError(try LLMReply.parse(Data("not JSON".utf8)))
+  }
   func testSilentSpeechRetriesAndStops() async throws {
     var seeds: [Int] = []
     let result = try await SpeechRecovery.generate(text: "— Да… как же это? —", seed: 10, label: "test") { text, seed in
