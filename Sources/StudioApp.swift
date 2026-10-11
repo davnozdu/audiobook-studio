@@ -578,6 +578,7 @@ struct Character: Identifiable {
         fraction = 0; speed = nil; eta = nil; completed = ""; buffer = Data()
         status = "Подготовка…"
         let p = Process(), input = Pipe(), output = Pipe(), errors = Pipe()
+        let eventReadLock = NSLock()
         p.executableURL = engine
         p.qualityOfService = .userInitiated
         p.arguments = []
@@ -587,6 +588,7 @@ struct Character: Identifiable {
         env["AUDIOBOOK_FFPROBE"] = resources.appendingPathComponent("runtime/bin/ffprobe").path
         p.environment = env; p.standardInput = input; p.standardOutput = output; p.standardError = errors
         output.fileHandleForReading.readabilityHandler = { handle in
+            eventReadLock.lock(); defer { eventReadLock.unlock() }
             let data = handle.availableData
             if !data.isEmpty { DispatchQueue.main.async { self.consume(data) } }
         }
@@ -597,8 +599,9 @@ struct Character: Identifiable {
             }
         }
         p.terminationHandler = { process in
-            let rest = output.fileHandleForReading.readDataToEndOfFile()
+            eventReadLock.lock(); defer { eventReadLock.unlock() }
             output.fileHandleForReading.readabilityHandler = nil
+            let rest = output.fileHandleForReading.readDataToEndOfFile()
             errors.fileHandleForReading.readabilityHandler = nil
             DispatchQueue.main.async {
                 self.consume(rest)
