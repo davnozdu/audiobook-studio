@@ -29,7 +29,7 @@ public enum VoiceDirection {
     let state = manners[manner] ?? ""
     let timbre = NativeIO.string(voice["tts_voice"]), habit = NativeIO.string(voice["tts_delivery"])
     guard !state.isEmpty, !timbre.isEmpty else { return nil }
-    return timbre + " " + state + " " + habit + readingRules
+    return sentence(timbre) + " " + state + (habit.isEmpty ? "" : " " + sentence(habit)) + readingRules
   }
 
   public static func input(_ voice: Object) -> Object {
@@ -51,7 +51,7 @@ public enum VoiceDirection {
       validEnglish(voice), validEnglish(delivery) else {
       throw StudioError("LLM не подготовила короткую английскую инструкцию голоса")
     }
-    let result = voice + " " + delivery
+    let result = sentence(voice) + " " + sentence(delivery)
     guard result.split(whereSeparator: { $0.isWhitespace }).count <= 120,
       !requestsExtraSounds(result) else {
       throw StudioError("Инструкция голоса содержит лишние слова или звуки вместо манеры речи")
@@ -59,6 +59,12 @@ public enum VoiceDirection {
     return result + readingRules
   }
 
+  /// Parts are joined into one instruction; an unterminated part would merge two phrases.
+  static func sentence(_ text: String) -> String {
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard let last = trimmed.last, !".!?".contains(last) else { return trimmed }
+    return trimmed + "."
+  }
   static func parts(_ reply: Object) -> (String, String) {
     (NativeIO.string(reply["voice"]).trimmingCharacters(in: .whitespacesAndNewlines),
      NativeIO.string(reply["delivery"]).trimmingCharacters(in: .whitespacesAndNewlines))

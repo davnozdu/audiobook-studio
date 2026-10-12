@@ -67,7 +67,12 @@ import Combine
                         var delivered = 0
                         while let reply = state.outbox.first, delivered < 5 {
                             delivered += 1
-                            try await client.send(reply)
+                            // A message Telegram rejects outright (blocked bot, deleted chat, bad
+                            // markup) is dropped; otherwise it would block every later reply.
+                            do { try await client.send(reply) }
+                            catch let error as RemoteError where error.rejected {
+                                message = "Telegram не принял сообщение (HTTP \(error.status ?? 0)); оно пропущено"
+                            }
                             state.outbox.removeAll { $0.id == reply.id }; try persist()
                         }
                         kick()
@@ -288,7 +293,8 @@ import Combine
         }
         actions[token] = target
         if actions.count > 500 {
-            for key in Array(actions.keys).prefix(actions.count - 400) { actions.removeValue(forKey: key) }
+            let oldest = actions.sorted { ($0.value.created ?? .distantPast) < ($1.value.created ?? .distantPast) }
+            for (key, _) in oldest.prefix(actions.count - 400) { actions.removeValue(forKey: key) }
         }
         state.catalogActions = actions
         return token
@@ -339,8 +345,10 @@ import Combine
             return true
         }
         let parts = data.split(separator: ":", maxSplits: 1).map(String.init)
-        guard parts.count == 2, ["catalog-delete", "catalog-confirm-delete", "catalog-cancel-delete"].contains(parts[0]),
-              let target = state.catalogActions?[parts[1]] else { return false }
+        guard parts.count == 2, ["catalog-delete", "catalog-confirm-delete", "catalog-cancel-delete"].contains(parts[0]) else { return false }
+        guard let target = state.catalogActions?[parts[1]] else {
+            reply("⌛ Эта кнопка устарела. Откройте медиатеку заново: /books", chat: chat); return true
+        }
         switch parts[0] {
         case "catalog-delete":
             if let job = state.jobs.first(where: { $0.provider == target.provider && $0.cloudFolder == (target.path ?? target.id) && ($0.phase.active || $0.phase == .queued) }) {

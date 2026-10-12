@@ -83,7 +83,9 @@ public final class RemoteHTTP {
         request.httpBody = try RemoteJSON.data(body); request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if let bearer { request.setValue("Bearer " + bearer, forHTTPHeaderField: "Authorization") }
         let (data, response) = try await send(request)
-        guard (200..<300).contains(response.statusCode) else { throw RemoteError("Сервис вернул HTTP \(response.statusCode)") }
+        guard (200..<300).contains(response.statusCode) else {
+            throw RemoteError("Сервис вернул HTTP \(response.statusCode)", status: response.statusCode)
+        }
         return try RemoteJSON.object(data)
     }
 }

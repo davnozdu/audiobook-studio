@@ -1,8 +1,9 @@
 # Short-line batching and large-book assembly
 
 The pinned Qwen Swift source is extended by `scripts/native/Qwen3TTSStudioBatch.swift`.
-One GPU batch contains at most four short or two long (97–480 characters) similarly sized
-lines; each lane has its own voice, so characters and manner samples may share a batch. Voice-only ICL pieces (reference text and
+One GPU batch contains at most four short (≤96 characters), similarly sized lines; each lane
+has its own voice, so characters and manner samples may share a batch. Long lines stay single:
+measured pairs ran at 1.20× against 1.19× for single lines, with ~1 GB more peak memory. Voice-only ICL pieces (reference text and
 codec embeddings, codec prefix with speaker embedding) are built once per character.
 Inputs use the official offline ICL layout, left padding, attention masks and
 per-lane positions. Token choice is vectorised over [batch, vocab] with the same

@@ -135,6 +135,19 @@ final class RemoteTests: XCTestCase {
         try await bot.handle(callback("cancel")); XCTAssertEqual(bot.state.jobs[0].phase, .queued)
         try await bot.handle(callback("stop")); XCTAssertEqual(bot.state.jobs[0].phase, .cancelled); XCTAssertEqual(bot.state.jobs[1].phase, .confirmation)
     }
+    @MainActor func testCatalogKeepsNewestButtonsAndAnswersStaleOnes() async throws {
+        let f = try folder(); defer { try? FileManager.default.removeItem(at: f) }
+        let bot = BotService(folder: f, secrets: MemorySecrets()); bot.state.ownerID = 12
+        var tokens: [String] = []
+        for i in 0..<501 { tokens.append(bot.catalogToken(RemoteCatalogTarget(.dropbox, "id\(i)", created: Date(timeIntervalSince1970: Double(i))))) }
+        XCTAssertEqual(bot.state.catalogActions?.count, 400)
+        XCTAssertNotNil(bot.state.catalogActions?[tokens.last!]); XCTAssertNil(bot.state.catalogActions?[tokens[0]])
+        try await bot.handle(["callback_query": ["from": ["id": 12], "data": "catalog-delete:" + tokens[0],
+            "message": ["chat": ["id": 12, "type": "private"]]]])
+        XCTAssertTrue(bot.state.outbox.last?.text.contains("устарела") == true)
+        XCTAssertTrue(RemoteError("x", status: 403).rejected); XCTAssertFalse(RemoteError("x", status: 429).rejected)
+        XCTAssertFalse(RemoteError("x", status: 502).rejected); XCTAssertFalse(RemoteError("x").rejected)
+    }
     @MainActor func testGoogleResumeUsesServerOffsetAndVerifiesHash() async throws {
         let f = try folder(); defer { try? FileManager.default.removeItem(at: f); MockHTTP.handler = nil }
         let file = f.appendingPathComponent("audiobook.m4b"); let bytes = Data(repeating: 7, count: 300000); try bytes.write(to: file)

@@ -98,7 +98,11 @@ public struct RemoteButton: Codable, Equatable {
 }
 public struct RemoteCatalogTarget: Codable {
     public var provider: RemoteProvider, id: String, path: String?
-    public init(_ provider: RemoteProvider, _ id: String, path: String? = nil) { self.provider = provider; self.id = id; self.path = path }
+    /// Issue time; the oldest buttons are forgotten first. Optional for saved queues.
+    public var created: Date?
+    public init(_ provider: RemoteProvider, _ id: String, path: String? = nil, created: Date = Date()) {
+        self.provider = provider; self.id = id; self.path = path; self.created = created
+    }
 }
 public struct RemoteReply: Codable, Identifiable {
     public var id = UUID().uuidString
@@ -175,6 +179,10 @@ public final class RemoteStateStore {
 }
 public struct RemoteError: LocalizedError {
     public var message: String
-    public init(_ message: String) { self.message = message }
+    /// HTTP status of a definitive service answer, when there was one.
+    public var status: Int?
+    public init(_ message: String, status: Int? = nil) { self.message = message; self.status = status }
+    /// The service rejected this exact request (not throttling); repeating it cannot succeed.
+    public var rejected: Bool { status.map { (400..<500).contains($0) && $0 != 429 } ?? false }
     public var errorDescription: String? { message }
 }

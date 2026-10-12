@@ -1,28 +1,23 @@
 import Foundation
 
 public enum SpeechBatch {
-  /// Similarly sized lines share a batch: up to four short lines, or two long ones (memory
-  /// grows with length). Each lane carries its own voice, so speakers may mix. Book order is
-  /// restored by segment ID afterwards; scheduling never joins or rewrites text.
+  /// Only short (≤96 characters), similarly sized lines share a batch; each lane carries its
+  /// own voice, so speakers may mix. Long lines stay single: measured pairs read at the same
+  /// speed as one line (1.20× vs 1.19×) with ~1 GB more peak memory. Book order is restored by
+  /// segment ID afterwards; scheduling never joins or rewrites text.
   public static func plan(_ rows: [Object], pending: Set<Int>, maximum: Int = 4) throws -> [[Int]] {
     guard (1...4).contains(maximum), pending.allSatisfy(rows.indices.contains) else {
       throw StudioError("Некорректный план пакетной озвучки")
     }
-    func size(_ i: Int) -> Int { SpeechRecovery.text(NativeIO.string(rows[i]["tts_text"])).count }
-    // Length class: short lines in 24-character steps, long ones in 48/64-character steps.
-    func bucket(_ count: Int) -> Int? {
-      count <= 96 ? max(0, count - 1) / 24 : count <= 240 ? 100 + (count - 1) / 48
-        : count <= 480 ? 200 + (count - 1) / 64 : nil
-    }
     var remaining = pending, jobs: [[Int]] = []
     for first in rows.indices where remaining.contains(first) {
-      let count = size(first)
-      let capacity = min(maximum, count <= 96 ? 4 : 2)
+      let count = SpeechRecovery.text(NativeIO.string(rows[first]["tts_text"])).count
       var indices = [first]
-      if capacity > 1, let group = bucket(count) {
+      if maximum > 1, count <= 96 {
         for i in (first + 1)..<min(rows.count, first + 65) where remaining.contains(i) {
-          if bucket(size(i)) == group { indices.append(i) }
-          if indices.count == capacity { break }
+          let size = SpeechRecovery.text(NativeIO.string(rows[i]["tts_text"])).count
+          if size <= 96, max(0, size - 1) / 24 == max(0, count - 1) / 24 { indices.append(i) }
+          if indices.count == maximum { break }
         }
       }
       jobs.append(indices)

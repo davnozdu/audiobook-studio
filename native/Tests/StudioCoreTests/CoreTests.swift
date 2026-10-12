@@ -108,12 +108,12 @@ final class CoreTests: XCTestCase {
     XCTAssertTrue(jobs.allSatisfy { (1...4).contains($0.count) })
     // Voices may mix within a batch; only similarly sized short lines share one.
     XCTAssertTrue(jobs.contains { Set($0.map { NativeIO.string(rows[$0]["speaker"]) }).count == 2 })
-    XCTAssertTrue(jobs.filter { $0.count > 2 }.allSatisfy { $0.allSatisfy { SpeechRecovery.text(NativeIO.string(rows[$0]["tts_text"])).count <= 96 } })
-    // Long lines pair only with a similar length; very long ones stay alone.
+    XCTAssertTrue(jobs.filter { $0.count > 1 }.allSatisfy { $0.allSatisfy { SpeechRecovery.text(NativeIO.string(rows[$0]["tts_text"])).count <= 96 } })
+    // Long lines stay single even with an equally long neighbour.
     let long: [Object] = [200, 210, 205, 120, 600].enumerated().map { i, n in
       ["id": "l\(i)", "speaker": "v\(i % 2)", "tts_text": String(repeating: "а", count: n)]
     }
-    XCTAssertEqual(try SpeechBatch.plan(long, pending: Set(long.indices)), [[0, 1], [2], [3], [4]])
+    XCTAssertEqual(try SpeechBatch.plan(long, pending: Set(long.indices)), [[0], [1], [2], [3], [4]])
     XCTAssertEqual(jobs.first(where: { $0.contains(7) }), [7])
     XCTAssertTrue(try SpeechBatch.plan(rows, pending: pending, maximum: 1).allSatisfy { $0.count == 1 })
     XCTAssertThrowsError(try SpeechBatch.plan(rows, pending: [100]))

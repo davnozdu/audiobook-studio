@@ -731,7 +731,7 @@ final class Engine {
     }
     let total = rows.indices.reduce(0) { $0 + weight($1) }
     let jobs = try SpeechBatch.plan(rows, pending: pending)
-    NativeIO.emit("log", ["message": "План озвучки: \(jobs.count) запусков · \(pending.count) новых реплик · \(jobs.filter { $0.count > 1 }.count) пакетов · до 4 коротких или 2 длинных реплик, голоса могут смешиваться"])
+    NativeIO.emit("log", ["message": "План озвучки: \(jobs.count) запусков · \(pending.count) новых реплик · \(jobs.filter { $0.count > 1 }.count) пакетов · до 4 коротких реплик, голоса могут смешиваться"])
     var measurements: [(Double, Double, Int)] = []
     for (jobNumber, indices) in jobs.enumerated() {
       try Task.checkCancellation()
