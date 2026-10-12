@@ -1,21 +1,13 @@
 # Short-line batching and large-book assembly
 
 The pinned Qwen Swift source is extended by `scripts/native/Qwen3TTSStudioBatch.swift`.
-One GPU batch contains at most four similarly sized lines of one speaker.
-Text up to 240 characters can use four lanes; 241–480 characters use at most two
-to bound GPU memory. Larger inputs remain singletons. A bounded 64-row lookahead
-and separate length buckets prevent mixing tiny utterances with long passages.
+One GPU batch contains at most four short, similarly sized lines of one speaker.
 Inputs use the official offline ICL layout, left padding, attention masks and
 per-lane positions. Each lane owns its sampling key, token history, EOS flag and
 codec frames. Finished lanes stop collecting frames; token-limit failures are
 retried independently while accepted neighbours are saved immediately.
-Codec decoding also uses the batch dimension in a single shared decoder call;
-there are no concurrent callers racing its mutable streaming state. Short lanes
-get right padding AFTER their real codec frames. The convolution and attention
-layers are causal, so later padding cannot influence their valid prefix. Each
-lane is cropped by its actual frame count, then reference audio is removed by
-its exact codec frame count, including valid zero-valued codec IDs.
-Reference: [official causal decoder](https://github.com/QwenLM/Qwen3-TTS/blob/main/qwen_tts/core/tokenizer_12hz/modeling_qwen3_tts_tokenizer_v2.py).
+Codec decoding is sequential, using the shared decoder safely. Reference audio
+is cut by its exact codec frame count, including valid zero-valued codec IDs.
 
 References: [Qwen model](https://github.com/QwenLM/Qwen3-TTS/blob/main/qwen_tts/core/models/modeling_qwen3_tts.py),
 [Qwen inference](https://github.com/QwenLM/Qwen3-TTS/blob/main/qwen_tts/inference/qwen3_tts_model.py),
@@ -28,14 +20,6 @@ It loads no voice weights and generates no speech. Core tests check retries,
 complete ID coverage, original order, final-utterance duration and 10/20-hour
 frame counts. Sparse RF64 fixtures verify the bundled FFprobe above 4 GB.
 These are structural/numerical checks, not a multi-hour acoustic benchmark.
-
-Test.3 adds a genuine tiny Swift tokenizer/decoder self-check with nonzero,
-distinct synthetic codebook parameters. It compares every sample with the
-original single-lane streaming decode for B=4, unequal lengths, zero codec IDs,
-chunk sizes 3/5/300, reference removal and complete final samples. B=4→B=1→B=2
-checks shared-state reset. Lengths must match exactly, all samples must be finite
-and maximum absolute difference must stay below 0.0001. This gate runs before
-packaging/distribution. Model weights and voice/sample settings remain unchanged.
 
 Scheduling scans a bounded 64-row window per pending row; a large book does not
 repeatedly sort all remaining rows. Montage streams one utterance at a time and

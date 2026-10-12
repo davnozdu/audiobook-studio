@@ -3,24 +3,6 @@ import XCTest
 @testable import StudioCore
 
 final class CoreTests: XCTestCase {
-  func testExtendedBatchPlannerGroupsLongLinesAndCapsLargestInputs() throws {
-    var rows: [Object] = []
-    for i in 0..<12 {
-      rows.append(["id": "s\(i)", "speaker": "hero", "tts_text": String(repeating: "я", count: i < 6 ? 160 : 300)])
-    }
-    rows.append(["id": "n", "speaker": "narrator", "tts_text": String(repeating: "я", count: 160)])
-    rows.append(["id": "overlong", "speaker": "hero", "tts_text": String(repeating: "я", count: 481)])
-    rows.append(["id": "short", "speaker": "hero", "tts_text": "Короткая."])
-    let jobs = try SpeechBatch.plan(rows, pending: Set(rows.indices))
-    XCTAssertEqual(jobs.flatMap { $0 }.sorted(), Array(rows.indices))
-    XCTAssertEqual(jobs.first, [0, 1, 2, 3])
-    XCTAssertEqual(jobs.first(where: { $0.contains(6) }), [6, 7])
-    XCTAssertTrue(jobs.filter { $0.contains(where: { (6...11).contains($0) }) }.allSatisfy { $0.count <= 2 })
-    for i in [12, 13, 14] { XCTAssertEqual(jobs.first(where: { $0.contains(i) }), [i]) }
-    let remaining = Set(rows.indices).subtracting([1, 6, 8])
-    XCTAssertEqual(try SpeechBatch.plan(rows, pending: remaining).flatMap { $0 }.sorted(), remaining.sorted())
-    XCTAssertTrue(try SpeechBatch.plan(rows, pending: Set(rows.indices), maximum: 1).allSatisfy { $0.count == 1 })
-  }
   func testPCMStreamPreservesExactOrderPausesAndFinalSamples() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }

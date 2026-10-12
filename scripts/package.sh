@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
-VERSION="${VERSION:-0.5.16-test.3}"
+VERSION="${VERSION:-0.5.16-test.2}"
 BUILD_NUMBER="${BUILD_NUMBER:-1}"
 APP="dist/Audiobook Studio.app"
 SPARKLE_VERSION=2.9.6
