@@ -299,19 +299,6 @@ import Combine
         }
         do {
             let client = CloudClient(provider: provider, config: config, secrets: secrets, http: http)
-            let legacyJobs = state.jobs.filter { $0.provider == provider && $0.phase == .complete && $0.bookTitle?.isEmpty != false }
-            for old in legacyJobs {
-                let metadata = Self.projectBookMetadata(old.project)
-                let fallback = URL(fileURLWithPath: old.name).deletingPathExtension().lastPathComponent
-                let title = metadata.title.isEmpty ? fallback : metadata.title
-                if let moved = try await client.migrateLegacy(jobID: old.id, title: title, author: metadata.author,
-                                                              sourceFolder: old.cloudFolder, uploads: old.uploads) {
-                    try mutate(old.id) { job in
-                        job.cloudFolder = moved.folder; job.uploads = moved.uploads
-                        job.bookTitle = title; job.bookAuthor = metadata.author
-                    }
-                }
-            }
             let page: CloudClient.CloudLibraryPage = provider == .googleDrive
                 ? try await client.googleBooks(search: search, pageToken: pageToken)
                 : try await client.dropboxBooks(search: search, cursor: pageToken)
