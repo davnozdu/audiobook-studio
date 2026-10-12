@@ -8,11 +8,14 @@ import Darwin
 import Security
 
 enum CredentialStore {
-    static let identity: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
-        kSecAttrService as String: "com.davnozdu.audiobook-studio.credentials",
-        kSecAttrAccount as String: "ollama-api-key"]
-    static func read() throws -> String {
-        var query = identity
+    /// One Keychain item per service: "ollama-api-key" (existing installs) or "deepseek-api-key".
+    static func identity(_ account: String) -> [String: Any] {
+        [kSecClass as String: kSecClassGenericPassword,
+         kSecAttrService as String: "com.davnozdu.audiobook-studio.credentials",
+         kSecAttrAccount as String: account]
+    }
+    static func read(_ account: String = "ollama-api-key") throws -> String {
+        var query = identity(account)
         query[kSecReturnData as String] = true; query[kSecMatchLimit as String] = kSecMatchLimitOne
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
@@ -22,7 +25,8 @@ enum CredentialStore {
         }
         return value
     }
-    static func write(_ value: String) throws {
+    static func write(_ value: String, account: String = "ollama-api-key", label: String = "Audiobook Studio — Ollama") throws {
+        let identity = identity(account)
         if value.isEmpty {
             let status = SecItemDelete(identity as CFDictionary)
             guard status == errSecSuccess || status == errSecItemNotFound else { throw NSError(domain: NSOSStatusErrorDomain, code: Int(status)) }
@@ -32,7 +36,7 @@ enum CredentialStore {
         var status = SecItemUpdate(identity as CFDictionary, attributes as CFDictionary)
         if status == errSecItemNotFound {
             var item = identity; item[kSecValueData as String] = Data(value.utf8)
-            item[kSecAttrLabel as String] = "Audiobook Studio — Ollama"
+            item[kSecAttrLabel as String] = label
             status = SecItemAdd(item as CFDictionary, nil)
         }
         guard status == errSecSuccess else { throw NSError(domain: NSOSStatusErrorDomain, code: Int(status)) }
@@ -232,7 +236,7 @@ struct StoryCharacter: Identifiable {
     var remoteBusy = false
     lazy var bot: BotService = {
         let service = BotService(folder: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Audiobook Studio/Remote"))
-        service.canStart = { [weak self] in self.map { !$0.busy && !$0.shuttingDown && !$0.key.isEmpty } ?? false }
+        service.canStart = { [weak self] in self.map { !$0.busy && !$0.shuttingDown && !$0.activeKey.isEmpty } ?? false }
         service.makeRequest = { [weak self] action in self?.request(action) ?? [:] }
         service.executable = { [weak self] in self?.engine ?? URL(fileURLWithPath: "/nonexistent") }
         service.activity = { [weak self] active, message in
@@ -278,6 +282,15 @@ struct StoryCharacter: Identifiable {
     @Published var model = UserDefaults.standard.string(forKey: "llmModel") ?? "deepseek-v4.1-flash" {
         didSet { UserDefaults.standard.set(model, forKey: "llmModel") }
     }
+    @Published var llmProvider = UserDefaults.standard.string(forKey: "llmProvider") ?? "ollama" {
+        didSet { UserDefaults.standard.set(llmProvider, forKey: "llmProvider") }
+    }
+    @Published var deepseekKey = "" { didSet { scheduleCredentialSave() } }
+    @Published var deepseekModel = UserDefaults.standard.string(forKey: "deepseekModel") ?? "deepseek-flash" {
+        didSet { UserDefaults.standard.set(deepseekModel, forKey: "deepseekModel") }
+    }
+    /// Key of the selected chat provider; analysis and the Telegram queue need it.
+    var activeKey: String { llmProvider == "deepseek" ? deepseekKey : key }
     @Published var webSearch = UserDefaults.standard.bool(forKey: "webSearch") {
         didSet { UserDefaults.standard.set(webSearch, forKey: "webSearch") }
     }
@@ -348,10 +361,13 @@ struct StoryCharacter: Identifiable {
     private var credentialDirty = false
     private var credentialSave: DispatchWorkItem?
     private var buffer = Data()
+    /// Keeps the Mac awake (display may sleep) while the engine runs: an idle sleep would
+    /// pause an overnight 10–20 hour book until morning.
+    private var wakeActivity: NSObjectProtocol?
     let updater = UpdateController()
 
     init() {
-        do { key = try CredentialStore.read() }
+        do { key = try CredentialStore.read(); deepseekKey = try CredentialStore.read("deepseek-api-key") }
         catch { keyStorageStatus = "Не удалось прочитать ключ из Связки ключей macOS. Сохранённый ключ не удалён." }
         restoringCredential = false
         AppLifecycle.studio = self
@@ -382,8 +398,10 @@ struct StoryCharacter: Identifiable {
         guard credentialDirty else { return }
         do {
             try CredentialStore.write(key.trimmingCharacters(in: .whitespacesAndNewlines))
+            try CredentialStore.write(deepseekKey.trimmingCharacters(in: .whitespacesAndNewlines),
+                                      account: "deepseek-api-key", label: "Audiobook Studio — DeepSeek")
             credentialDirty = false
-            keyStorageStatus = key.isEmpty ? "Ключ удалён из Связки ключей macOS." : "Ключ сохранён в Связке ключей macOS."
+            keyStorageStatus = activeKey.isEmpty ? "Ключ выбранного сервиса не задан." : "Ключи сохранены в Связке ключей macOS."
         } catch {
             keyStorageStatus = "Не удалось сохранить ключ в Связке ключей macOS."
             appendLog(keyStorageStatus)
@@ -562,6 +580,7 @@ struct StoryCharacter: Identifiable {
         ["action": action, "book": book, "project": project, "output": output,
          "runtime": runtime.path, "resources": resources.appendingPathComponent("engine").path,
          "ffmpeg": resources.appendingPathComponent("runtime/bin/ffmpeg").path, "ffprobe": resources.appendingPathComponent("runtime/bin/ffprobe").path, "key": key, "model": model,
+         "llm_provider": llmProvider, "deepseek_key": deepseekKey, "deepseek_model": deepseekModel,
          "web_search": webSearch, "cloud_stress": cloudStress,
          "music": music.isEmpty ? resources.appendingPathComponent("engine/resources/" + bundledMusic).path : music,
          "music_enabled": musicEnabled, "music_volume": musicVolume]
@@ -739,12 +758,14 @@ struct StoryCharacter: Identifiable {
         childPID = 0; updateMenuBar()
         fraction = 0; speed = nil; eta = nil; completed = ""; buffer = Data()
         if request["action"] as? String == "build" { remainingSynthesisSeconds = nil }
+        wakeActivity = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .idleSystemSleepDisabled],
+                                                             reason: "Audiobook Studio: обработка книги")
         status = "Подготовка…"
         let p = Process(), input = Pipe(), output = Pipe(), errors = Pipe()
         let eventReadLock = NSLock()
         let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("AudiobookStudio-" + UUID().uuidString)
         do { try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true) }
-        catch { busy = false; pending = nil; self.error = error.localizedDescription; return }
+        catch { busy = false; pending = nil; endWakeActivity(); self.error = error.localizedDescription; return }
         p.executableURL = engine
         p.qualityOfService = .userInitiated
         p.arguments = []
@@ -762,7 +783,7 @@ struct StoryCharacter: Identifiable {
         errors.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
             if let text = String(data: data, encoding: .utf8), !text.isEmpty {
-                DispatchQueue.main.async { self.appendLog(text.replacingOccurrences(of: self.key.isEmpty ? "\u{0}" : self.key, with: "[REDACTED]")) }
+                DispatchQueue.main.async { self.appendLog(self.redacted(text)) }
             }
         }
         p.terminationHandler = { process in
@@ -782,6 +803,7 @@ struct StoryCharacter: Identifiable {
             DispatchQueue.main.async {
                 self.consume(rest)
                 self.busy = false; self.process = nil; self.childPID = 0; self.updateMenuBar()
+                self.endWakeActivity()
                 self.appendLog("Движок завершён · память моделей и GPU освобождена")
                 let next = self.pending; self.pending = nil
                 if self.shuttingDown { return }
@@ -819,9 +841,12 @@ struct StoryCharacter: Identifiable {
             try input.fileHandleForWriting.close()
         } catch {
             try? FileManager.default.removeItem(at: temporary)
-            p.terminate(); busy = false; pending = nil
+            p.terminate(); busy = false; pending = nil; endWakeActivity()
             self.error = "Не удалось запустить встроенный движок: \(error.localizedDescription)"
         }
+    }
+    func endWakeActivity() {
+        if let activity = wakeActivity { ProcessInfo.processInfo.endActivity(activity); wakeActivity = nil }
     }
 
     func consume(_ data: Data) {
@@ -861,6 +886,10 @@ struct StoryCharacter: Identifiable {
         }
     }
 
+    /// Keys never reach the visible log, whichever service they belong to.
+    func redacted(_ text: String) -> String {
+        [key, deepseekKey].filter { !$0.isEmpty }.reduce(text) { $0.replacingOccurrences(of: $1, with: "[REDACTED]") }
+    }
     func appendLog(_ text: String) { log = String((log + text + "\n").suffix(24000)) }
     func cancel() {
         if remoteBusy { bot.cancelActive(); return }
@@ -1276,13 +1305,24 @@ struct SettingsView: View {
         ScrollView {
         VStack(alignment: .leading, spacing: 20) {
             Text("Режиссёр вашей аудиокниги").font(.title2.bold())
-            Text("DeepSeek через Ollama Cloud. Запросы выполняются последовательно.").foregroundStyle(.secondary)
-            SecureField("Ollama API key", text: $studio.key).textFieldStyle(.roundedBorder)
+            Picker("Сервис LLM", selection: $studio.llmProvider) {
+                Text("Ollama Cloud").tag("ollama")
+                Text("DeepSeek · официальный API").tag("deepseek")
+            }.pickerStyle(.segmented)
+            Text("Запросы выполняются последовательно.").foregroundStyle(.secondary)
+            if studio.llmProvider == "deepseek" {
+                SecureField("DeepSeek API key", text: $studio.deepseekKey).textFieldStyle(.roundedBorder)
+                TextField("Модель DeepSeek", text: $studio.deepseekModel).textFieldStyle(.roundedBorder)
+                Text("deepseek-flash — быстрая, deepseek-v4-pro — сильнее и дороже. Режим рассуждений отключён.").font(.caption).foregroundStyle(.secondary)
+                SecureField("Ollama API key (только для веб-поиска, необязательно)", text: $studio.key).textFieldStyle(.roundedBorder)
+            } else {
+                SecureField("Ollama API key", text: $studio.key).textFieldStyle(.roundedBorder)
+                TextField("Модель", text: $studio.model).textFieldStyle(.roundedBorder)
+            }
             Text(studio.keyStorageStatus).font(.caption).foregroundStyle(.secondary)
-            TextField("Модель", text: $studio.model).textFieldStyle(.roundedBorder)
             Toggle("Разрешить веб-поиск при анализе характеров", isOn: $studio.webSearch)
             Toggle("LLM проверяет спорные ударения", isOn: $studio.cloudStress)
-            Text("Для ролей и характеров текст книги отправляется в Ollama. Озвучка выполняется локально на Mac.").font(.caption).foregroundStyle(.secondary)
+            Text("Для ролей и характеров текст книги отправляется в " + (studio.llmProvider == "deepseek" ? "DeepSeek" : "Ollama") + ". Озвучка выполняется локально на Mac.").font(.caption).foregroundStyle(.secondary)
             Divider()
             BotSettingsView(bot: studio.bot)
             Divider()

@@ -7,11 +7,17 @@ struct TransientLLMError: LocalizedError {
 }
 
 public final class NativeDirector {
+  /// `key` is the Ollama key: chat when Ollama is selected, web search with either provider.
   let key: String, model: String, useWeb: Bool
+  let provider: String, deepseekKey: String, deepseekModel: String
   let diagnostics: URL?
   public init(_ request: Object) {
     key = NativeIO.string(request["key"])
     model = NativeIO.string(request["model"])
+    provider = NativeIO.string(request["llm_provider"]) == "deepseek" ? "deepseek" : "ollama"
+    deepseekKey = NativeIO.string(request["deepseek_key"])
+    let chosen = NativeIO.string(request["deepseek_model"]).trimmingCharacters(in: .whitespacesAndNewlines)
+    deepseekModel = chosen.isEmpty ? "deepseek-flash" : chosen
     useWeb = request["web_search"] as? Bool ?? false
     let folder = NativeIO.string(request["project"])
     diagnostics = folder.isEmpty ? nil : URL(fileURLWithPath: folder).appendingPathComponent("llm-responses")
@@ -56,15 +62,24 @@ public final class NativeDirector {
     throw StudioError("LLM: не удалось получить корректный ответ")
   }
   private func callOnce(_ prompt: String) async throws -> Object {
-    guard !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-      throw StudioError("Введите ключ Ollama в настройках")
+    let deepseek = provider == "deepseek"
+    let secret = deepseek ? deepseekKey : key, service = deepseek ? "DeepSeek" : "Ollama"
+    guard !secret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+      throw StudioError("Введите ключ " + service + " в настройках")
     }
-    var request = URLRequest(url: URL(string: "https://ollama.com/api/chat")!)
+    var request = URLRequest(url: URL(string: deepseek
+      ? "https://api.deepseek.com/chat/completions" : "https://ollama.com/api/chat")!)
     request.httpMethod = "POST"
     request.timeoutInterval = 240
-    request.setValue("Bearer " + key, forHTTPHeaderField: "Authorization")
+    request.setValue("Bearer " + secret, forHTTPHeaderField: "Authorization")
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-    request.httpBody = try NativeIO.json([
+    // DeepSeek: thinking is on by default and is switched off; JSON mode needs the word "json".
+    request.httpBody = try NativeIO.json(deepseek ? [
+      "model": deepseekModel, "stream": false, "temperature": 0, "max_tokens": 12000,
+      "thinking": ["type": "disabled"], "response_format": ["type": "json_object"],
+      "messages": [["role": "system", "content": "Answer with one complete json object only."],
+                   ["role": "user", "content": prompt]],
+    ] : [
       "model": model, "stream": false, "think": false,
       "options": ["temperature": 0, "num_predict": 12000], "messages": [["role": "user", "content": prompt]],
     ])
@@ -75,17 +90,17 @@ public final class NativeDirector {
     } catch let error as URLError where error.code == .cancelled {
       throw CancellationError()
     } catch let error as URLError {
-      throw TransientLLMError(message: "Нет связи с Ollama: " + error.localizedDescription)
+      throw TransientLLMError(message: "Нет связи с " + service + ": " + error.localizedDescription)
     }
     let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-    guard status == 200 else { throw Self.httpError(status, data, key: key) }
-    do { return try LLMReply.parse(data) }
+    guard status == 200 else { throw Self.httpError(status, data, key: secret, service: service) }
+    do { return try deepseek ? LLMReply.parseChatCompletion(data) : LLMReply.parse(data) }
     catch {
       if let diagnostics {
         try? FileManager.default.createDirectory(at: diagnostics, withIntermediateDirectories: true)
         let file = diagnostics.appendingPathComponent("invalid-" + UUID().uuidString + ".txt")
         let safe = (String(data: data, encoding: .utf8) ?? "Не удалось декодировать UTF-8")
-          .replacingOccurrences(of: key, with: "[REDACTED]")
+          .replacingOccurrences(of: secret, with: "[REDACTED]")
         try? Data(safe.utf8).write(to: file, options: .atomic)
         NativeIO.emit("log", ["message": "Ответ LLM для диагностики сохранён: " + file.path])
       }
@@ -93,20 +108,26 @@ public final class NativeDirector {
     }
   }
   /// Rate limits and server failures are retried; rejected keys and requests are reported.
-  static func httpError(_ status: Int, _ data: Data, key: String = "") -> Error {
-    var detail = NativeIO.string(
-      NativeIO.object(try? JSONSerialization.jsonObject(with: data))["error"])
+  static func httpError(_ status: Int, _ data: Data, key: String = "", service: String = "Ollama") -> Error {
+    let error = NativeIO.object(try? JSONSerialization.jsonObject(with: data))["error"]
+    // Ollama sends a string; DeepSeek an object with a message.
+    var detail = (error as? Object).map { NativeIO.string($0["message"]) } ?? NativeIO.string(error)
     if !key.isEmpty { detail = detail.replacingOccurrences(of: key, with: "[REDACTED]") }
     let suffix = detail.isEmpty ? "" : " · " + String(detail.prefix(300))
     if status == 429 || (500...599).contains(status) {
-      return TransientLLMError(message: "Ollama временно недоступна (HTTP \(status))" + suffix)
+      return TransientLLMError(message: service + " временно недоступен (HTTP \(status))" + suffix)
     }
     if status == 401 || status == 403 {
-      return StudioError("Ollama отклонила ключ (HTTP \(status)). Проверьте ключ в настройках" + suffix)
+      return StudioError(service + " отклонил ключ (HTTP \(status)). Проверьте ключ в настройках" + suffix)
     }
-    return StudioError("Ollama: ошибка запроса (HTTP \(status))" + suffix)
+    if status == 402 {
+      return StudioError(service + ": недостаточно средств на балансе API (HTTP 402)" + suffix)
+    }
+    return StudioError(service + ": ошибка запроса (HTTP \(status))" + suffix)
   }
   func search(_ query: String) async throws -> [Object] {
+    // Web search is an Ollama service; without its key the profile uses the book only.
+    guard !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
     var request = URLRequest(url: URL(string: "https://ollama.com/api/web_search")!)
     request.httpMethod = "POST"
     request.timeoutInterval = 90

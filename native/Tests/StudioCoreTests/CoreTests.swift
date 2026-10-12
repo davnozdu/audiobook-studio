@@ -730,7 +730,7 @@ final class CoreTests: XCTestCase {
       text)
     XCTAssertEqual(NativeDirector.stressCandidates(text, disputes: disputes).map(\.id), [1])
   }
-  func testLLMHTTPFailuresAreClassified() {
+  func testLLMHTTPFailuresAreClassified() throws {
     let body = Data("{\"error\":\"model overloaded\"}".utf8)
     XCTAssertTrue(NativeDirector.httpError(503, body) is TransientLLMError)
     XCTAssertTrue(NativeDirector.httpError(429, Data()) is TransientLLMError)
@@ -738,6 +738,17 @@ final class CoreTests: XCTestCase {
     XCTAssertTrue(rejected is StudioError)
     XCTAssertTrue(rejected.localizedDescription.contains("ключ"))
     XCTAssertFalse(rejected.localizedDescription.contains("secret"))
+    // DeepSeek: OpenAI-style error object and chat completion body.
+    let balance = NativeDirector.httpError(402, Data("{\"error\":{\"message\":\"Insufficient Balance\"}}".utf8), service: "DeepSeek")
+    XCTAssertTrue(balance.localizedDescription.contains("DeepSeek") && balance.localizedDescription.contains("Insufficient Balance"))
+    func completion(_ content: String, _ reason: String = "stop") -> Data {
+      try! NativeIO.json(["choices": [["finish_reason": reason, "message": ["role": "assistant", "content": content]]]])
+    }
+    XCTAssertEqual(NativeIO.string(try LLMReply.parseChatCompletion(completion("{\"voice\":\"low\"}"))["voice"]), "low")
+    for bad in [completion(""), completion("{\"a\":", "length"), Data("{\"error\":{\"message\":\"x\"}}".utf8)] {
+      do { _ = try LLMReply.parseChatCompletion(bad); XCTFail("accepted a broken completion") }
+      catch { XCTAssertTrue((error as? StudioError)?.message.hasPrefix("LLM:") == true) }
+    }
   }
   func testOwnSampleSurvivesMovedProject() throws {
     let folder = temporary()

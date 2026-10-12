@@ -21,6 +21,26 @@ public enum LLMReply {
     }
     return try object(content)
   }
+  /// OpenAI-style chat completion (DeepSeek).
+  public static func parseChatCompletion(_ data: Data) throws -> Object {
+    guard let reply = (try? JSONSerialization.jsonObject(with: data)) as? Object else {
+      throw StudioError("LLM: сервер вернул ответ не в формате JSON")
+    }
+    if let error = reply["error"] as? Object {
+      throw StudioError("LLM: " + String(NativeIO.string(error["message"]).prefix(300)))
+    }
+    let choice = NativeIO.objects(reply["choices"]).first ?? [:]
+    let reason = NativeIO.string(choice["finish_reason"])
+    guard reason.isEmpty || reason == "stop" else {
+      throw StudioError("LLM: ответ не завершён (" + reason + "). Требуется повтор запроса")
+    }
+    // JSON mode may occasionally return empty content; that is retried like malformed JSON.
+    guard let content = NativeIO.object(choice["message"])["content"] as? String,
+      !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+      throw StudioError("LLM: модель вернула пустой ответ")
+    }
+    return try object(content)
+  }
   public static func object(_ content: String) throws -> Object {
     var text = content.trimmingCharacters(in: .whitespacesAndNewlines)
     if text.hasPrefix("\u{FEFF}") { text.removeFirst(); text = text.trimmingCharacters(in: .whitespacesAndNewlines) }
