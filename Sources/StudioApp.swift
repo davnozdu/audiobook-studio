@@ -657,21 +657,26 @@ struct StoryCharacter: Identifiable {
         launch(r)
     }
 
-    func generateVoice(character: String = "", description: String? = nil, text: String? = nil, autoplay: Bool = false) {
+    func generateVoice(character: String = "", description: String? = nil, text: String? = nil, seed: Int? = nil, autoplay: Bool = false) {
         generatedSample = ""
         var r = request("voice-preview")
         r["description"] = description ?? voiceDescription
         r["text"] = text ?? voiceTestText
         r["character"] = character; r["seed"] = voiceSeed
-        if let c = characters.first(where: { $0.id == character }) { r["seed"] = c.seed }
+        if let c = characters.first(where: { $0.id == character }) { r["seed"] = seed ?? c.seed }
         launch(r, after: autoplay ? { [weak self] in self?.listenGenerated() } : nil)
     }
 
-    func previewCharacter(_ index: Int) {
+    /// Variant 0 is the voice the build uses; other variants are kept only via «Использовать для персонажа».
+    var previewVariants: [String: Int] = [:]
+    func previewCharacter(_ index: Int, another: Bool = false) {
         let c = characters[index]
+        let variant = another ? (previewVariants[c.id] ?? 0) + 1 : 0
+        previewVariants[c.id] = variant
         saveThen {
             if let current = self.characters.first(where: { $0.id == c.id }) {
-                self.generateVoice(character: current.id, description: current.voice, autoplay: true)
+                self.generateVoice(character: current.id, description: current.voice,
+                                   seed: current.seed + variant * 7919, autoplay: true)
             }
         }
     }
@@ -941,6 +946,10 @@ struct CharacterEditor: View {
                 HStack {
                     Button("Загрузить свой образец…", systemImage: "arrow.up.doc") { studio.uploadSample(index) }
                     Button("Прослушать образец", systemImage: "play.fill") { studio.previewCharacter(index) }
+                    if c.sample.isEmpty {
+                        Button("Другой вариант голоса", systemImage: "dice") { studio.previewCharacter(index, another: true) }
+                            .help("Тот же характер, другой голос. Понравившийся закрепите кнопкой «Использовать для персонажа»")
+                    }
                     if !c.sample.isEmpty {
                         Button("Сгенерировать вместо образца") { studio.removeSample(index) }
                     }
