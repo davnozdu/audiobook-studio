@@ -31,6 +31,8 @@ import StudioCore
         max(UInt64(512 * 1024 * 1024), ProcessInfo.processInfo.physicalMemory / 8)))
       if CommandLine.arguments.contains("--self-check") {
         let batchError = try Qwen3TTSModel.studioBatchSelfCheck()
+        let decoderError = try Qwen3TTSModel.studioDecoderBatchSelfCheck()
+        NativeIO.emit("log", ["message": "Qwen пакетный декодер: длины, начало, конец и сброс состояния совпадают с одиночным · ошибка " + String(decoderError)])
         NativeIO.emit("log", ["message": "Qwen batch B=4: padding, позиции и независимые потоки совпадают с одиночным расчётом · ошибка " + String(batchError)])
         let codecIDs = MLXArray([Int32(14), 0, 23, 0, 7, -1])
         guard Qwen3TTSModel.studioDecodedFrameCount(codecIDs, upsampleRate: 1920) == 9600,
@@ -620,7 +622,7 @@ final class Engine {
     }
     let total = rows.indices.reduce(0) { $0 + weight($1) }
     let jobs = try SpeechBatch.plan(rows, pending: pending)
-    NativeIO.emit("log", ["message": "План озвучки: \(jobs.count) запусков · \(pending.count) новых реплик · \(jobs.filter { $0.count > 1 }.count) пакетов · максимум 4 реплики одного голоса"])
+    NativeIO.emit("log", ["message": "План озвучки: \(jobs.count) запусков · \(pending.count) новых реплик · \(jobs.filter { $0.count > 1 }.count) пакетов · до 4 реплик одного голоса, для текста свыше 240 символов до 2 · пакетный декодер"])
     var measurements: [(Double, Double, Int)] = []
     for (jobNumber, indices) in jobs.enumerated() {
       try Task.checkCancellation()

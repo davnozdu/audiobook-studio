@@ -154,13 +154,14 @@ extension Qwen3TTSModel {
         let reference = conditioning.referenceSpeechCodes.transposed(0, 2, 1)
         let referenceFrames = reference.dim(1) * speechTokenizer.decodeUpsampleRate
         var output = [[Float]?](repeating: nil, count: texts.count)
-        for lane in texts.indices where stops.finished[lane] && !codes[lane].isEmpty {
+        let completed = texts.indices.filter { stops.finished[$0] && !codes[$0].isEmpty }
+        let joinedStreams = completed.map { lane in
+            concatenated([reference, stacked(codes[lane], axis: 1)], axis: 1)
+        }
+        let decoded = try speechTokenizer.studioDecodeBatch(joinedStreams)
+        for (lane, audio) in zip(completed, decoded) {
             try Task.checkCancellation()
-            let target = stacked(codes[lane], axis: 1)
-            let joined = concatenated([reference, target], axis: 1)
-            let audio = decodeChunk(joined)
-            let expected = joined.dim(1) * speechTokenizer.decodeUpsampleRate
-            guard audio.dim(0) == expected, referenceFrames < expected else {
+            guard referenceFrames < audio.dim(0) else {
                 throw AudioGenerationError.invalidInput("Qwen batch decoder lost codec frames in lane \(lane)")
             }
             let spoken = audio[referenceFrames...]
@@ -241,5 +242,90 @@ extension Qwen3TTSModel {
             throw AudioGenerationError.invalidInput("Qwen batch differs from independent numerical execution: \(maxError)")
         }
         return maxError
+    }
+
+    /// Real tokenizer components with small synthetic parameters/codes: verify
+    /// batching, causal right padding, reference removal, final samples and reset
+    /// across B=4/B=1/B=2 and several chunk boundaries. No voice weights or speech.
+    public static func studioDecoderBatchSelfCheck() throws -> Float {
+        let json = """
+        {"decode_upsample_rate":8,"decoder_config":{
+          "latent_dim":16,"codebook_dim":16,"codebook_size":16,"decoder_dim":32,
+          "hidden_size":32,"intermediate_size":64,"num_hidden_layers":2,
+          "num_attention_heads":2,"num_key_value_heads":1,"head_dim":16,
+          "num_quantizers":4,"num_semantic_quantizers":1,"semantic_codebook_size":16,
+          "upsample_rates":[2,2],"upsampling_ratios":[2],"sliding_window":72}}
+        """
+        let config = try JSONDecoder().decode(Qwen3TTSTokenizerConfig.self, from: Data(json.utf8))
+        let tokenizer = Qwen3TTSSpeechTokenizer(config: config)
+        let quantizer = tokenizer.decoder.quantizer
+        let layers = quantizer.rvqFirst.vq.layers + quantizer.rvqRest.vq.layers
+        for (index, layer) in layers.enumerated() {
+            let book = layer.codebook, shape = book.embedding_sum.shape
+            book.cluster_usage = MLXArray.ones(book.cluster_usage.shape)
+            book.embedding_sum = MLXArray((0..<(shape[0] * shape[1])).map {
+                Float(0.1 * sin(Double($0 + index * 31) * 0.09))
+            }).reshaped(shape)
+            book.updateInPlace()
+        }
+        let lengths = [5, 10, 7, 13] // includes two common reference frames
+        let streams = lengths.enumerated().map { lane, length in
+            MLXArray((0..<(length * 4)).map { Int32(($0 + lane * 3) % 16) }).reshaped(1, length, 4)
+        }
+        var maxError: Float = 0, maximumSignal: Float = 0
+        for chunk in [3, 5, 300] {
+            let batch = try tokenizer.studioDecodeBatch(streams, chunkTokens: chunk)
+            for lane in streams.indices {
+                // Independent original streaming path, not a second call to the batch helper.
+                let single = concatenated(tokenizer.streamingDecode(streams[lane], chunkTokens: chunk), axis: -1)[0]
+                eval(single)
+                let a = batch[lane].asArray(Float.self), b = single.asArray(Float.self)
+                guard a.count == lengths[lane] * 8, a.count == b.count,
+                      a.allSatisfy({ $0.isFinite }), b.allSatisfy({ $0.isFinite }) else {
+                    throw AudioGenerationError.invalidInput("Batch decoder changed length or produced nonfinite output")
+                }
+                for (x, y) in zip(a, b) { maxError = max(maxError, abs(x - y)); maximumSignal = max(maximumSignal, abs(y)) }
+                let spoken = batch[lane][16...].asArray(Float.self)
+                guard spoken.count == (lengths[lane] - 2) * 8, spoken.last == a.last else {
+                    throw AudioGenerationError.invalidInput("Batch decoder cut the final sample with the reference")
+                }
+            }
+            let reset = try tokenizer.studioDecodeBatch([streams[2]], chunkTokens: chunk)
+            let pair = try tokenizer.studioDecodeBatch([streams[3], streams[0]], chunkTokens: chunk)
+            for (a, b) in [(reset[0], batch[2]), (pair[0], batch[3]), (pair[1], batch[0])] {
+                let x = a.asArray(Float.self), y = b.asArray(Float.self)
+                guard x.count == y.count else { throw AudioGenerationError.invalidInput("Decoder reset lost samples") }
+                for (v, w) in zip(x, y) { maxError = max(maxError, abs(v - w)) }
+            }
+        }
+        guard maximumSignal > 0.000001, maxError < 0.0001 else {
+            throw AudioGenerationError.invalidInput("Causal batched decoder differs from original streaming path: \(maxError)")
+        }
+        return maxError
+    }
+}
+
+extension Qwen3TTSSpeechTokenizer {
+    /// One shared decoder execution, never concurrent mutable decoder callers.
+    /// Padding codec ID 0 is valid and is appended only AFTER each lane's real
+    /// codes. All decoder layers are causal; true lengths, not IDs, crop padding.
+    func studioDecodeBatch(_ streams: [MLXArray], chunkTokens: Int = 300) throws -> [MLXArray] {
+        if streams.isEmpty { return [] }
+        guard (1...4).contains(streams.count), chunkTokens > 0,
+              streams.allSatisfy({ $0.ndim == 3 && $0.dim(0) == 1 && $0.dim(1) > 0 && $0.dim(2) == streams[0].dim(2) }) else {
+            throw AudioGenerationError.invalidInput("Invalid codec batch shape")
+        }
+        let lengths = streams.map { $0.dim(1) }, width = lengths.max()!
+        let packed = concatenated(streams.map { stream in
+            let remaining = width - stream.dim(1)
+            if remaining == 0 { return stream }
+            return concatenated([stream, MLXArray.zeros([1, remaining, stream.dim(2)], dtype: stream.dtype)], axis: 1)
+        }, axis: 0)
+        let audio = concatenated(streamingDecode(packed, chunkTokens: chunkTokens), axis: -1)
+        eval(audio)
+        guard audio.ndim == 2, audio.dim(0) == streams.count, audio.dim(1) == width * decodeUpsampleRate else {
+            throw AudioGenerationError.invalidInput("Batch decoder lost codec frames")
+        }
+        return lengths.enumerated().map { lane, frames in audio[lane, 0..<(frames * decodeUpsampleRate)] }
     }
 }

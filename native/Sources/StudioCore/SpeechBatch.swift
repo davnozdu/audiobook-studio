@@ -1,7 +1,7 @@
 import Foundation
 
 public enum SpeechBatch {
-  /// Only short, similarly sized lines of ONE speaker share a batch. Book order is
+  /// Similarly sized lines of ONE speaker share a batch. Book order is
   /// restored by segment ID afterwards; scheduling never joins or rewrites text.
   public static func plan(_ rows: [Object], pending: Set<Int>, maximum: Int = 4) throws -> [[Int]] {
     guard (1...4).contains(maximum), pending.allSatisfy(rows.indices.contains) else {
@@ -11,16 +11,22 @@ public enum SpeechBatch {
     for first in rows.indices where remaining.contains(first) {
       let speaker = NativeIO.string(rows[first]["speaker"])
       let count = SpeechRecovery.text(NativeIO.string(rows[first]["tts_text"])).count
+      let width = count <= 96 ? 24 : (count <= 240 ? 48 : 64)
+      // Keep the longest inputs at two lanes to bound GPU working memory.
+      let capacity = min(maximum, count <= 240 ? 4 : 2)
       var indices = [first]
-      if maximum > 1, count <= 96 {
+      if capacity > 1, count <= 480 {
         for i in (first + 1)..<min(rows.count, first + 65) where remaining.contains(i) {
           let size = SpeechRecovery.text(NativeIO.string(rows[i]["tts_text"])).count
-          if NativeIO.string(rows[i]["speaker"]) == speaker, size <= 96,
-            max(0, size - 1) / 24 == max(0, count - 1) / 24 {
+          let sameRange = (count <= 96 && size <= 96)
+            || (count > 96 && count <= 240 && size > 96 && size <= 240)
+            || (count > 240 && size > 240 && size <= 480)
+          if NativeIO.string(rows[i]["speaker"]) == speaker, sameRange,
+            max(0, size - 1) / width == max(0, count - 1) / width {
             indices.append(i)
-            if indices.count == maximum { break }
+            if indices.count == capacity { break }
           }
-          if indices.count == maximum { break }
+          if indices.count == capacity { break }
         }
       }
       jobs.append(indices)
