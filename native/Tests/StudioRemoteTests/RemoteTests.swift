@@ -178,4 +178,29 @@ final class RemoteTests: XCTestCase {
         XCTAssertFalse(runner.running); XCTAssertFalse(FileManager.default.fileExists(atPath: f.appendingPathComponent("temp").path))
     }
 
+    @MainActor func testAlbumRejectedEntirelyAndOnceEvenAfterRestart() async throws {
+        let f = try folder(); defer { try? FileManager.default.removeItem(at: f) }
+        let bot = BotService(folder: f, secrets: MemorySecrets()); bot.state.ownerID = 12
+        func doc(_ mid: Int) -> [String: Any] { ["message": ["chat": ["id": 12, "type": "private"], "from": ["id": 12], "message_id": mid, "media_group_id": "group", "document": ["file_name": "book.epub", "file_size": 10, "file_id": "file"]]] }
+        try bot.handle(doc(1)); try bot.handle(doc(2)); try bot.persist()
+        XCTAssertTrue(bot.state.jobs.isEmpty); XCTAssertEqual(bot.state.outbox.count, 1)
+        let restarted = BotService(folder: f, secrets: MemorySecrets()); try restarted.handle(doc(3))
+        XCTAssertTrue(restarted.state.jobs.isEmpty); XCTAssertEqual(restarted.state.outbox.count, 1)
+    }
+    @MainActor func testBusyQueueRequiresAddThenOneBookAndConfirmation() async throws {
+        let f = try folder(); defer { try? FileManager.default.removeItem(at: f) }
+        let bot = BotService(folder: f, secrets: MemorySecrets()); bot.state.ownerID = 12
+        var current = RemoteJob(chatID: 12, messageID: 1, fileID: "current", name: "current.epub", provider: .dropbox); current.phase = .synthesis; bot.state.jobs = [current]
+        let doc: [String: Any] = ["message": ["chat": ["id": 12, "type": "private"], "from": ["id": 12], "message_id": 2, "document": ["file_name": "new.epub", "file_size": 10, "file_id": "new"]]]
+        try bot.handle(doc); XCTAssertEqual(bot.state.jobs.count, 1); XCTAssertTrue(bot.state.outbox.last!.text.contains("/add"))
+        try bot.handle(["message": ["chat": ["id": 12, "type": "private"], "from": ["id": 12], "text": "/add"]])
+        try bot.persist()
+        // Admission intent survives restart, but does not authorize actual synthesis.
+        let restarted = BotService(folder: f, secrets: MemorySecrets()); try restarted.handle(doc)
+        XCTAssertEqual(restarted.state.jobs.count, 2); XCTAssertEqual(restarted.state.jobs[1].phase, .confirmation); XCTAssertNil(restarted.state.addRequestedAt)
+        var third = doc["message"] as! [String: Any]; third["message_id"] = 3
+        restarted.state.jobs[0].phase = .queued
+        try restarted.handle(["message": third]); XCTAssertEqual(restarted.state.jobs.count, 2)
+    }
+
 }

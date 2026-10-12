@@ -24,7 +24,7 @@ public enum RemotePhase: String, Codable {
     }
 }
 public struct RemoteUpload: Codable, Equatable {
-    public var session = "", offset: Int64 = 0, fileID = "", link = ""
+    public var session = "", offset: Int64 = 0, fileID = "", link = "", fingerprint = ""
     public init() {}
 }
 public struct RemoteJob: Codable, Identifiable {
@@ -80,6 +80,8 @@ public struct RemoteReply: Codable, Identifiable {
 public struct RemoteState: Codable {
     public var offset: Int64 = 0, ownerID: Int64?
     public var jobs: [RemoteJob] = [], outbox: [RemoteReply] = []
+    public var rejectedGroups: [String] = []
+    public var addRequestedAt: Date?
     public init() {}
     public var active: RemoteJob? { jobs.first { $0.phase.active } }
     public var next: RemoteJob? {
@@ -112,6 +114,7 @@ public struct RemoteState: Codable {
         let first = (t.split(separator: " ").first ?? "").split(separator: "@").first ?? ""
         if ["/status", "статус", "сколько осталось", "сколько времени осталось", "что делается", "как дела"].contains(t)
             || first == "/status" { return "status" }
+        if first == "/add" || t == "добавить книгу" { return "add" }
         if ["ссылки", "скачать", "готовые книги"].contains(t) || ["/links", "/downloads"].contains(first) { return "links" }
         if t == "очередь" || first == "/queue" { return "queue" }
         if ["отмена", "отмени", "отменить", "отменить текущую", "останови"].contains(t) || first == "/cancel" { return "cancel" }

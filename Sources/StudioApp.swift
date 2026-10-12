@@ -237,6 +237,9 @@ struct StoryCharacter: Identifiable {
         service.executable = { [weak self] in self?.engine ?? URL(fileURLWithPath: "/nonexistent") }
         service.activity = { [weak self] active, message in
             guard let self else { return }; self.remoteBusy = active; self.busy = active; self.status = message
+            if !active, let continuation = self.afterStop {
+                self.afterStop = nil; self.cancelling = false; continuation()
+            }
         }
         return service
     }()

@@ -149,19 +149,40 @@ import Combine
             return
         }
         if let document = incoming["document"] as? [String: Any] {
+            if let group = incoming["media_group_id"] as? String, !group.isEmpty {
+                state.addRequestedAt = nil
+                if !state.rejectedGroups.contains(group) {
+                    state.rejectedGroups.append(group); state.rejectedGroups = Array(state.rejectedGroups.suffix(1000))
+                    reply("Пачка файлов отклонена целиком. Отправляйте EPUB по одному. Для добавления в очередь: /add, затем одна книга.", chat: id)
+                }
+                return
+            }
+            let authorizedAdd = state.addRequestedAt.map { Date().timeIntervalSince($0) < 600 } ?? false
+            if let current = state.active ?? state.next, !authorizedAdd {
+                reply("Сейчас \(current.phase == .queued ? "ожидает обработки" : "обрабатывается") «\(current.name)».\nДля добавления новой книги в очередь отправьте /add, затем один EPUB.\nЧтобы остановить текущую книгу, отправьте /cancel и подтвердите отмену.", chat: id)
+                return
+            }
             let name = document["file_name"] as? String ?? ""
             guard name.lowercased().hasSuffix(".epub"), RemoteJSON.integer(document, "file_size") > 0,
                   RemoteJSON.integer(document, "file_size") <= 20 * 1024 * 1024, let fileID = document["file_id"] as? String else {
                 reply("Пришлите книгу EPUB размером до 20 МБ.", chat: id); return
             }
+            state.addRequestedAt = nil
             let messageID = RemoteJSON.integer(incoming, "message_id")
             if state.jobs.contains(where: { $0.chatID == id && $0.messageID == messageID }) { return }
             let job = state.receive(chatID: id, messageID: messageID, fileID: fileID, name: String(name.prefix(240)), provider: config.provider)
-            reply("«\(job.name)»\nНачать озвучивание в автоматическом режиме?\nРезультат: \(job.provider.title).", chat: id,
+            let current = state.active ?? state.next
+            let queueText = current.map { "Сейчас: «" + $0.name + "» · " + $0.phase.title + ".\nНовая книга будет ждать в очереди. /cancel — остановить текущую.\n" } ?? ""
+            reply(queueText + "«\(job.name)»\nНачать озвучивание в автоматическом режиме?\nРезультат: \(job.provider.title).", chat: id,
                   buttons: [[RemoteButton("Да", "run:" + job.id), RemoteButton("Нет", "reject:" + job.id)]])
             return
         }
         switch RemoteState.command(text) {
+        case "add":
+            state.addRequestedAt = Date()
+            let current = state.active ?? state.next
+            let prefix = current.map { "Сейчас: «" + $0.name + "» · " + $0.phase.title + ".\n" } ?? ""
+            reply(prefix + "Отправьте один EPUB в течение 10 минут. Я предложу добавить его в очередь с подтверждением. Пачка файлов не принимается. /cancel — отменить текущую обработку.", chat: id)
         case "status":
             let waiting = state.jobs.filter { $0.phase == .queued }.count
             reply("Общий статус: " + (state.active == nil ? "озвучивание сейчас не идёт" : "идёт обработка книги") + ".\nВ очереди: \(waiting).\nФайлы в облаке хранятся до вашего ручного удаления. /links — готовые книги со ссылками.", chat: id)
@@ -180,7 +201,7 @@ import Combine
         case "cancel":
             if let job = state.active ?? state.next { askCancel(job) } else { reply("Сейчас нечего отменять.", chat: id) }
         default:
-            reply("Отправьте EPUB. /status — статус и время; /queue — список книг; /links — готовые книги и ссылки; /cancel — отменить текущую книгу. После перезапуска продолжение требует подтверждения.", chat: id,
+            reply("Отправьте EPUB. /status — статус и время; /queue — список книг; /add, затем один EPUB — добавить книгу в очередь; /links — готовые книги и ссылки; /cancel — отменить текущую книгу. После перезапуска продолжение требует подтверждения.", chat: id,
                   buttons: state.jobs.filter { [.paused, .failed, .cancelled].contains($0.phase) }.suffix(10).map { [RemoteButton("Продолжить: " + String($0.name.prefix(25)), "run:" + $0.id)] })
         }
     }

@@ -55,9 +55,13 @@ import CryptoKit
         let hashing = Task.detached { try Self.hashes(file) }
         let hash = try await withTaskCancellationHandler(operation: { try await hashing.value }, onCancel: { hashing.cancel() })
         guard hash.size > 0 else { throw RemoteError("Пустой файл результата") }
-        if !saved.link.isEmpty { return saved }
-        if provider == .dropbox { return try await dropbox(file, folder, hash, saved, checkpoint) }
-        return try await google(file, folder, hash, saved, checkpoint)
+        let fingerprint = String(hash.size) + ":" + (provider == .dropbox ? hash.dropbox : hash.md5)
+        var bound = saved
+        if !bound.fingerprint.isEmpty && bound.fingerprint != fingerprint { bound = RemoteUpload() }
+        bound.fingerprint = fingerprint; try checkpoint(bound)
+        if !bound.link.isEmpty { return bound }
+        if provider == .dropbox { return try await dropbox(file, folder, hash, bound, checkpoint) }
+        return try await google(file, folder, hash, bound, checkpoint)
     }
     func dropbox(_ file: URL, _ folder: String, _ hash: (size: Int64, md5: String, dropbox: String), _ saved: RemoteUpload,
                  _ checkpoint: (RemoteUpload) throws -> Void) async throws -> RemoteUpload {
