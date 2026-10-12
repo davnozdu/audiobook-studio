@@ -7,6 +7,31 @@ public enum VoiceDirection {
   // Only content rules: diction/clarity demands pull every voice towards a neutral announcer.
   public static let readingRules = " Say only the supplied text, no added sounds."
 
+  /// Momentary manner of one line. "calm" reads with the character's main sample;
+  /// every other manner gets its own sample of the same voice in that state.
+  public static let manners: [String: String] = [
+    "calm": "",
+    "joyful": "Right now joyful and delighted: bright lively pitch, warm smiling tone, quick light breath.",
+    "excited": "Right now excited and agitated: fast animated pace, raised pitch, urgent energetic breath.",
+    "angry": "Right now angry: loud forceful voice, harsh tense timbre, sharp stressed words, heated breath.",
+    "frightened": "Right now frightened: tense shaky voice, high strained pitch, hurried uneven breath.",
+    "sad": "Right now sad and weary: low quiet voice, slow heavy pace, sighing breath.",
+    "mocking": "Right now mocking: sneering sarcastic drawl, exaggerated ironic intonation.",
+    "pleading": "Right now pleading: soft whining voice, imploring rising intonation, anxious breath.",
+    "whisper": "Right now hushed: quiet breathy half-whisper, secretive close tone.",
+  ]
+  public static func manner(_ value: Any?) -> String {
+    let name = NativeIO.string(value).lowercased()
+    return manners[name] == nil ? "calm" : name
+  }
+  /// Same voice and habitual delivery, plus the momentary state; nil for calm or old projects.
+  public static func mannerInstruction(_ voice: Object, manner: String) -> String? {
+    let state = manners[manner] ?? ""
+    let timbre = NativeIO.string(voice["tts_voice"]), habit = NativeIO.string(voice["tts_delivery"])
+    guard !state.isEmpty, !timbre.isEmpty else { return nil }
+    return timbre + " " + state + " " + habit + readingRules
+  }
+
   public static func input(_ voice: Object) -> Object {
     let profile = NativeIO.object(voice["character_profile"])
     var result: Object = ["voice_gender": NativeIO.string(voice["voice_gender"])]
@@ -17,12 +42,11 @@ public enum VoiceDirection {
   }
 
   public static func signature(_ voice: Object) throws -> String {
-    try NativeIO.hash(NativeIO.json(["version": 4, "rules": readingRules, "profile": input(voice)]))
+    try NativeIO.hash(NativeIO.json(["version": 5, "rules": readingRules, "profile": input(voice)]))
   }
 
   public static func compose(_ reply: Object) throws -> String {
-    let voice = NativeIO.string(reply["voice"]).trimmingCharacters(in: .whitespacesAndNewlines)
-    let delivery = NativeIO.string(reply["delivery"]).trimmingCharacters(in: .whitespacesAndNewlines)
+    let (voice, delivery) = parts(reply)
     guard (20...350).contains(voice.count), (20...500).contains(delivery.count),
       validEnglish(voice), validEnglish(delivery) else {
       throw StudioError("LLM не подготовила короткую английскую инструкцию голоса")
@@ -33,6 +57,11 @@ public enum VoiceDirection {
       throw StudioError("Инструкция голоса содержит лишние слова или звуки вместо манеры речи")
     }
     return result + readingRules
+  }
+
+  static func parts(_ reply: Object) -> (String, String) {
+    (NativeIO.string(reply["voice"]).trimmingCharacters(in: .whitespacesAndNewlines),
+     NativeIO.string(reply["delivery"]).trimmingCharacters(in: .whitespacesAndNewlines))
   }
 
   /// True when a sentence asks to add words or sounds; prohibitions such as
@@ -76,7 +105,12 @@ extension NativeDirector {
     var instruction: String?
     for attempt in 0..<2 {
       let reply = try await call(prompt + (attempt == 0 ? "" : "\nShorter. Return only the two required fields. Omit all directions to add or repeat words or sounds."))
-      do { instruction = try VoiceDirection.compose(reply); break }
+      do {
+        instruction = try VoiceDirection.compose(reply)
+        let (timbre, habit) = VoiceDirection.parts(reply)
+        voice["tts_voice"] = timbre; voice["tts_delivery"] = habit
+        break
+      }
       catch {
         if attempt == 1 { throw error }
         NativeIO.emit("log", ["message": error.localizedDescription])

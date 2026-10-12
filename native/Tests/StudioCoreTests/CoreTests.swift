@@ -108,7 +108,12 @@ final class CoreTests: XCTestCase {
     XCTAssertTrue(jobs.allSatisfy { (1...4).contains($0.count) })
     // Voices may mix within a batch; only similarly sized short lines share one.
     XCTAssertTrue(jobs.contains { Set($0.map { NativeIO.string(rows[$0]["speaker"]) }).count == 2 })
-    XCTAssertTrue(jobs.filter { $0.count > 1 }.allSatisfy { $0.allSatisfy { SpeechRecovery.text(NativeIO.string(rows[$0]["tts_text"])).count <= 96 } })
+    XCTAssertTrue(jobs.filter { $0.count > 2 }.allSatisfy { $0.allSatisfy { SpeechRecovery.text(NativeIO.string(rows[$0]["tts_text"])).count <= 96 } })
+    // Long lines pair only with a similar length; very long ones stay alone.
+    let long: [Object] = [200, 210, 205, 120, 600].enumerated().map { i, n in
+      ["id": "l\(i)", "speaker": "v\(i % 2)", "tts_text": String(repeating: "а", count: n)]
+    }
+    XCTAssertEqual(try SpeechBatch.plan(long, pending: Set(long.indices)), [[0, 1], [2], [3], [4]])
     XCTAssertEqual(jobs.first(where: { $0.contains(7) }), [7])
     XCTAssertTrue(try SpeechBatch.plan(rows, pending: pending, maximum: 1).allSatisfy { $0.count == 1 })
     XCTAssertThrowsError(try SpeechBatch.plan(rows, pending: [100]))
@@ -502,6 +507,19 @@ final class CoreTests: XCTestCase {
       XCTAssertThrowsError(try NativeDirector.validateSpeakers(
         bad, chunk: [paragraph], fragments: split, allowed: ["hero", "narrator"]))
     }
+    // Manner splits a speaker's span; narrator is always calm; a broken list is calm, not an error.
+    let toned = try NativeDirector.validateSpeakers(["paragraphs": [[
+      "id": "p00001", "speakers": ["hero", "narrator", "hero", "hero"],
+      "manners": ["joyful", "angry", "angry", "shouting"]]]], chunk: [paragraph], fragments: split, allowed: ["hero", "narrator"])
+    XCTAssertEqual(NativeIO.objects(toned[0]["spans"]).map { NativeIO.string($0["manner"]) }, ["joyful", "calm", "angry", "calm"])
+    let untoned = try NativeDirector.validateSpeakers(["paragraphs": [[
+      "id": "p00001", "speakers": ["hero", "narrator", "hero", "hero"], "manners": ["angry"]]]],
+      chunk: [paragraph], fragments: split, allowed: ["hero", "narrator"])
+    XCTAssertEqual(NativeIO.objects(untoned[0]["spans"]).map { NativeIO.string($0["manner"]) }, ["calm", "calm", "calm"])
+    XCTAssertEqual(VoiceDirection.mannerInstruction(["tts_voice": "Old frail male voice.", "tts_delivery": "Slow."], manner: "angry"),
+      "Old frail male voice. " + VoiceDirection.manners["angry"]! + " Slow." + VoiceDirection.readingRules)
+    XCTAssertNil(VoiceDirection.mannerInstruction(["tts_voice": "Old frail male voice."], manner: "calm"))
+    XCTAssertNil(VoiceDirection.mannerInstruction([:], manner: "angry"))
   }
   func testExcerptNeverBorrowsAnotherRole() throws {
     let own =

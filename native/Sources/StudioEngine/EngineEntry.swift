@@ -528,6 +528,47 @@ final class Engine {
         ])
       references[id] = (file, text)
     }
+    // Manner samples: the same voice and habits in another momentary state, only for
+    // manners that this character actually uses. A failed sample falls back to the main one.
+    var mannerUses: [String: Set<String>] = [:]
+    for row in rows where VoiceDirection.manner(row["manner"]) != "calm" {
+      mannerUses[NativeIO.string(row["speaker"]), default: []].insert(VoiceDirection.manner(row["manner"]))
+    }
+    for voice in voices where used.contains(NativeIO.string(voice["id"])) {
+      let id = NativeIO.string(voice["id"])
+      guard try custom(voice) == nil else { continue }
+      for manner in (mannerUses[id] ?? []).sorted() {
+        guard let description = VoiceDirection.mannerInstruction(voice, manner: manner) else { continue }
+        let directory = project.appendingPathComponent("voices")
+        let file = directory.appendingPathComponent(id + "--" + manner + ".wav")
+        let meta = directory.appendingPathComponent(id + "--" + manner + ".json")
+        let text = (try? NativeProject.excerpt(manifest, character: id, manner: manner))
+          ?? references[id]?.1 ?? "Сегодня тихое утро. Я спокойно и ясно читаю эту книгу."
+        let seed = voice["seed"] as? Int ?? 17001
+        let signature = try VoiceSample.signature(text: text, instruction: description,
+          profile: VoiceDirection.signature(voice), seed: seed)
+        if fm.fileExists(atPath: file.path), let old = try? NativeIO.load(meta),
+          NativeIO.string(old["signature"]) == signature,
+          (try NativeIO.hashFile(file)) == NativeIO.string(old["sha256"])
+        {
+          references[id + "|" + manner] = (file, NativeIO.string(old["text"]))
+          continue
+        }
+        NativeIO.stage("Создание голоса · " + NativeIO.string(voice["name"]) + " · " + manner)
+        do {
+          if design == nil { design = try await Qwen3TTSModel.fromModelDirectory(designPath) }
+          let samples = try await generate(design!, text: text, description: description, reference: nil, seed: seed)
+          try NativeWAV.write(file, samples)
+          try NativeIO.write(meta, ["signature": signature, "text": text, "description": description,
+            "sha256": try NativeIO.hashFile(file)])
+          references[id + "|" + manner] = (file, text)
+        } catch is CancellationError {
+          throw CancellationError()
+        } catch {
+          NativeIO.emit("log", ["message": "Образец манеры не создан · \(id) · \(manner) · читается основным голосом: " + error.localizedDescription])
+        }
+      }
+    }
     design = nil
     Memory.clearCache()
     memoryLog("VoiceDesign выгружен")
@@ -581,6 +622,8 @@ final class Engine {
     NativeIO.stage("Генерация пробы · \(text.count) знаков · примерно 10 секунд")
     return try await generate(model, text: text, description: description, reference: reference, seed: seed)
   }
+  /// Cosine similarity of speaker embeddings required to read lines with a manner sample.
+  static let mannerIdentityThreshold = 0.65
   /// Per-batch memory: MLX peak since the previous batch and system swap, to tell
   /// memory pressure apart from slow code in speed measurements.
   func batchMemoryLog(_ batch: Int) {
@@ -608,6 +651,62 @@ final class Engine {
     defer { withExtendedLifetime(referenceArrays) {} }
     var referenceHashes: [String: String] = [:]
     for (id, ref) in references { referenceHashes[id] = try NativeIO.hashFile(ref.0) }
+    func prepareVoice(_ key: String, progress: Double) async throws {
+      guard voicesReady[key] == nil else { return }
+      if base == nil {
+        NativeIO.synthesisStage("Загрузка модели озвучки · нативный MLX", progress)
+        base = try await Qwen3TTSModel.fromModelDirectory(basePath)
+      }
+      guard let base, let reference = references[key] else { throw StudioError("Не подготовлен голос " + key) }
+      NativeIO.synthesisStage("Подготовка голоса для озвучки · " + key, progress)
+      let (_, array) = try loadAudioArray(from: reference.0, sampleRate: 24000)
+      referenceArrays[key] = array
+      let conditioning = try base.prepareReferenceConditioning(refAudio: array, refText: reference.1, language: "Russian")
+      guard let identity = conditioning.speakerEmbedding else { throw StudioError("Не извлечена личность голоса · " + key) }
+      let values = identity.asArray(Float.self)
+      guard !values.isEmpty, values.allSatisfy({ $0.isFinite }), values.contains(where: { abs($0) > 0.000001 }) else {
+        throw StudioError("Повреждено представление личности голоса · " + key)
+      }
+      let hash = values.withUnsafeBytes { NativeIO.hash(Data($0)) }
+      NativeIO.emit("log", ["message": "Личность голоса [\(key)] · \(values.count) признаков · SHA256 " + hash])
+      NativeIO.emit("log", ["message": "Образец для озвучки [\(key)] · SHA256 " + (referenceHashes[key] ?? "")])
+      voicesReady[key] = try base.studioSpeaker(conditioning)
+    }
+    // A manner sample is used only while its voice identity stays close to the character's
+    // main sample; a drifted sample would sound like another person, so those lines fall back.
+    var mannerAccepted = Set<String>()
+    var unchecked: [String] = []
+    let mannerKeys = Set(rows.map { NativeIO.string($0["speaker"]) + "|" + VoiceDirection.manner($0["manner"]) })
+      .filter { references[$0] != nil }
+    for key in mannerKeys.sorted() {
+      let main = String(key.split(separator: "|")[0])
+      let check = references[key]!.0.deletingPathExtension().appendingPathExtension("identity.json")
+      if let old = try? NativeIO.load(check), NativeIO.string(old["pair"]) == (referenceHashes[key] ?? "") + ":" + (referenceHashes[main] ?? ""),
+        let similarity = old["similarity"] as? Double {
+        if similarity >= Self.mannerIdentityThreshold { mannerAccepted.insert(key) }
+      } else { unchecked.append(key) }
+    }
+    for key in unchecked {
+      try Task.checkCancellation()
+      let main = String(key.split(separator: "|")[0])
+      try await prepareVoice(main, progress: 0)
+      try await prepareVoice(key, progress: 0)
+      let a = voicesReady[main]!.conditioning.speakerEmbedding!.asArray(Float.self)
+      let b = voicesReady[key]!.conditioning.speakerEmbedding!.asArray(Float.self)
+      let dot = zip(a, b).reduce(Float(0)) { $0 + $1.0 * $1.1 }
+      let norms = sqrt(a.reduce(Float(0)) { $0 + $1 * $1 }) * sqrt(b.reduce(Float(0)) { $0 + $1 * $1 })
+      let similarity = Double(dot / max(norms, 1e-12))
+      let accepted = similarity >= Self.mannerIdentityThreshold
+      if accepted { mannerAccepted.insert(key) }
+      try NativeIO.write(references[key]!.0.deletingPathExtension().appendingPathExtension("identity.json"),
+        ["pair": (referenceHashes[key] ?? "") + ":" + (referenceHashes[main] ?? ""), "similarity": similarity])
+      NativeIO.emit("log", ["message": String(format: "Манера [%@]: сходство с основным голосом %.3f · %@", key, similarity,
+        accepted ? "используется" : "голос отличается, реплики читаются основным образцом")])
+    }
+    func voiceKey(_ row: Object) -> String {
+      let key = NativeIO.string(row["speaker"]) + "|" + VoiceDirection.manner(row["manner"])
+      return mannerAccepted.contains(key) ? key : NativeIO.string(row["speaker"])
+    }
     let raw = project.appendingPathComponent("audio/segments")
     try fm.createDirectory(at: raw, withIntermediateDirectories: true)
     var files: [URL] = [], signatures: [String] = [], seeds: [Int] = []
@@ -617,9 +716,9 @@ final class Engine {
     func weight(_ i: Int) -> Int { max(1, NativeIO.string(rows[i]["text"]).count) }
     for (i, row) in rows.enumerated() {
       try Task.checkCancellation()
-      let id = NativeIO.string(row["id"]), speaker = NativeIO.string(row["speaker"])
-      guard let reference = references[speaker], let hash = referenceHashes[speaker] else {
-        throw StudioError("Не подготовлен голос " + speaker)
+      let id = NativeIO.string(row["id"]), speaker = NativeIO.string(row["speaker"]), key = voiceKey(row)
+      guard let reference = references[key], let hash = referenceHashes[key] else {
+        throw StudioError("Не подготовлен голос " + key)
       }
       let seed = max(0, (voices.first(where: { NativeIO.string($0["id"]) == speaker })?["seed"] as? Int ?? 17001) + i)
       let signature = try SpeechCache.signature(text: SpeechRecovery.text(NativeIO.string(row["tts_text"])),
@@ -632,37 +731,18 @@ final class Engine {
     }
     let total = rows.indices.reduce(0) { $0 + weight($1) }
     let jobs = try SpeechBatch.plan(rows, pending: pending)
-    NativeIO.emit("log", ["message": "План озвучки: \(jobs.count) запусков · \(pending.count) новых реплик · \(jobs.filter { $0.count > 1 }.count) пакетов · до 4 коротких реплик, голоса могут смешиваться"])
+    NativeIO.emit("log", ["message": "План озвучки: \(jobs.count) запусков · \(pending.count) новых реплик · \(jobs.filter { $0.count > 1 }.count) пакетов · до 4 коротких или 2 длинных реплик, голоса могут смешиваться"])
     var measurements: [(Double, Double, Int)] = []
     for (jobNumber, indices) in jobs.enumerated() {
       try Task.checkCancellation()
       let start = Date(), progress = Double(completed) / Double(max(1, total))
-      let laneSpeakers = indices.map { NativeIO.string(rows[$0]["speaker"]) }
+      let laneSpeakers = indices.map { voiceKey(rows[$0]) }
       var listed = Set<String>()
       let speakerList = laneSpeakers.filter { listed.insert($0).inserted }
       let ids = indices.map { NativeIO.string(rows[$0]["id"]) }
       NativeIO.synthesisStage("Пакетная озвучка · \(jobNumber+1)/\(jobs.count) · \(indices.count) реплик · " + speakerList.joined(separator: ", "), progress)
-      if base == nil {
-        NativeIO.synthesisStage("Загрузка модели озвучки · нативный MLX", progress)
-        base = try await Qwen3TTSModel.fromModelDirectory(basePath)
-      }
+      for key in speakerList { try await prepareVoice(key, progress: progress) }
       guard let base else { throw StudioError("Модель озвучки не загружена") }
-      for speaker in speakerList where voicesReady[speaker] == nil {
-        guard let reference = references[speaker] else { throw StudioError("Не подготовлен голос " + speaker) }
-        NativeIO.synthesisStage("Подготовка голоса для озвучки · " + speaker, progress)
-        let (_, array) = try loadAudioArray(from: reference.0, sampleRate: 24000)
-        referenceArrays[speaker] = array
-        let conditioning = try base.prepareReferenceConditioning(refAudio: array, refText: reference.1, language: "Russian")
-        guard let identity = conditioning.speakerEmbedding else { throw StudioError("Не извлечена личность голоса · " + speaker) }
-        let values = identity.asArray(Float.self)
-        guard !values.isEmpty, values.allSatisfy({ $0.isFinite }), values.contains(where: { abs($0) > 0.000001 }) else {
-          throw StudioError("Повреждено представление личности голоса · " + speaker)
-        }
-        let hash = values.withUnsafeBytes { NativeIO.hash(Data($0)) }
-        NativeIO.emit("log", ["message": "Личность голоса [\(speaker)] · \(values.count) признаков · SHA256 " + hash])
-        NativeIO.emit("log", ["message": "Образец для озвучки [\(speaker)] · SHA256 " + (referenceHashes[speaker] ?? "")])
-        voicesReady[speaker] = try base.studioSpeaker(conditioning)
-      }
       let laneVoices = try laneSpeakers.map { speaker -> StudioQwenSpeaker in
         guard let voice = voicesReady[speaker] else { throw StudioError("Не подготовлен голос " + speaker) }
         return voice

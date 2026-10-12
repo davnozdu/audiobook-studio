@@ -1,8 +1,8 @@
 # Short-line batching and large-book assembly
 
 The pinned Qwen Swift source is extended by `scripts/native/Qwen3TTSStudioBatch.swift`.
-One GPU batch contains at most four short, similarly sized lines; each lane has its
-own voice, so characters may share a batch. Voice-only ICL pieces (reference text and
+One GPU batch contains at most four short or two long (97–480 characters) similarly sized
+lines; each lane has its own voice, so characters and manner samples may share a batch. Voice-only ICL pieces (reference text and
 codec embeddings, codec prefix with speaker embedding) are built once per character.
 Inputs use the official offline ICL layout, left padding, attention masks and
 per-lane positions. Token choice is vectorised over [batch, vocab] with the same
@@ -64,3 +64,9 @@ With both internal/external M4B+EPUB copies, the PCM+final-file bound is roughly
 5.2/10.4 GB plus metadata and transient packaging. AAC faststart and EPUB packaging
 may add one extra compressed copy temporarily. Model downloads total about
 7.6 GB independently of book length and remain available for subsequent books.
+
+Manner samples: role markup tags each line calm, joyful, excited, angry, frightened, sad,
+mocking, pleading or whisper. For each manner a character uses, VoiceDesign creates a sample
+from the same voice text, habitual delivery and seed plus that state. Before reading, its
+speaker embedding is compared with the character's main sample (cosine >= 0.65, logged and
+cached per sample pair); a drifted sample is not used and those lines read with the main voice.

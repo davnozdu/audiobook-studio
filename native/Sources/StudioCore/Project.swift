@@ -1,7 +1,7 @@
 import Foundation
 
 public enum NativeProject {
-  /// Rebuild speech blocks inside contiguous spans of the same speaker and paragraph.
+  /// Rebuild speech blocks inside contiguous spans of the same speaker, manner and paragraph.
   /// Use source offsets, never concatenated/rewritten LLM text; role changes remain boundaries.
   public static func speechBlocks(_ manifest: Object, source: Object) throws -> Object {
     let paragraphs = Dictionary(uniqueKeysWithValues: NativeIO.objects(source["paragraphs"]).map {
@@ -11,6 +11,7 @@ public enum NativeProject {
     for row in NativeIO.objects(manifest["segments"]) {
       if var previous = groups.last,
         NativeIO.string(previous["speaker"]) == NativeIO.string(row["speaker"]),
+        VoiceDirection.manner(previous["manner"]) == VoiceDirection.manner(row["manner"]),
         NativeIO.string(previous["paragraph_id"]) == NativeIO.string(row["paragraph_id"]),
         NativeIO.string(previous["chapter_id"]) == NativeIO.string(row["chapter_id"]) {
         var anchor = NativeIO.object(previous["source"])
@@ -146,12 +147,22 @@ public enum NativeProject {
     }
     return (manifest, source)
   }
-  public static func excerpt(_ manifest: Object, character: String, target: Int = 120) throws
-    -> String
+  public static func excerpt(_ manifest: Object, character: String, manner: String? = nil,
+    target: Int = 120) throws -> String
+  {
+    // A manner sample prefers the character's own lines in that manner.
+    if let manner, let text = try? excerpt(manifest: manifest, character: character, target: target,
+      where: { VoiceDirection.manner($0["manner"]) == manner }) {
+      return text
+    }
+    return try excerpt(manifest: manifest, character: character, target: target, where: { _ in true })
+  }
+  static func excerpt(manifest: Object, character: String, target: Int,
+    where include: (Object) -> Bool) throws -> String
   {
     var text = ""
     for segment in NativeIO.objects(manifest["segments"])
-    where NativeIO.string(segment["speaker"]) == character {
+    where NativeIO.string(segment["speaker"]) == character && include(segment) {
       let part = NativeIO.replace("\\s+", NativeIO.string(segment["text"]), " ").trimmingCharacters(
         in: CharacterSet(charactersIn: " —–\n\t"))
       guard part.count >= 4, part.rangeOfCharacter(from: .letters) != nil else { continue }
