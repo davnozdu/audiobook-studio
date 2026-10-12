@@ -95,28 +95,48 @@ public final class NativeStress {
     text.replacingOccurrences(of: "+", with: "").replacingOccurrences(of: "\u{301}", with: "")
       .lowercased().replacingOccurrences(of: "ё", with: "е")
   }
+  /// Counted by scalars: a stressed vowel with its combining mark is one Character.
+  static func vowelCount(_ word: String) -> Int {
+    word.lowercased().unicodeScalars.filter { RussianText.vowels.unicodeScalars.contains($0) }.count
+  }
+  /// Puts the predicted stress on the book's own letters. A predicted 'ё' replaces the
+  /// book's 'е' (books are often printed without 'ё'); 'ё' is always stressed, so no mark
+  /// follows it. One-vowel words get no mark, as Silero does without stress_single_vowel.
   static func transfer(_ original: String, _ prediction: String) -> String {
     guard plain(original) == plain(prediction) else { return original }
     let scalars = Array(original.unicodeScalars)
-    var out = ""
+    var out = String.UnicodeScalarView()
     var index = 0
+    var afterYo = false
     for scalar in acute(prediction).unicodeScalars {
       if scalar.value == 0x301 {
-        out.append("\u{301}")
-      } else {
-        guard index < scalars.count else { return original }
-        out.unicodeScalars.append(scalars[index])
-        index += 1
+        if !afterYo { out.append(scalar) }
+        afterYo = false
+        continue
       }
+      guard index < scalars.count else { return original }
+      var letter = scalars[index]
+      if scalar == "ё" || scalar == "Ё" {
+        if letter == "е" { letter = "ё" } else if letter == "Е" { letter = "Ё" }
+      }
+      afterYo = letter == "ё" || letter == "Ё"
+      out.append(letter)
+      index += 1
     }
-    return out
+    let result = String(out)
+    return vowelCount(result) <= 1 ? result.replacingOccurrences(of: "\u{301}", with: "") : result
   }
-  func exception(_ word: String, _ object: Object) -> String? {
-    guard let position = (object[word] as? [Int])?.first, position >= 0,
+  /// Silero exceptions store the stressed character and, when present, the 'е' that is 'ё'.
+  static func exception(_ word: String, _ object: Object) -> String? {
+    guard let entry = object[word] as? [Int], let position = entry.first, position >= 0,
       position < word.unicodeScalars.count
     else { return nil }
-    let scalars = Array(word.unicodeScalars)
+    var scalars = Array(word.unicodeScalars)
     guard RussianText.vowels.unicodeScalars.contains(scalars[position]) else { return nil }
+    if entry.count > 1, entry[1] >= 0, entry[1] < scalars.count, scalars[entry[1]] == "е" {
+      scalars[entry[1]] = "ё"
+      if entry[1] == position { return String(String.UnicodeScalarView(scalars)) }
+    }
     return String(String.UnicodeScalarView(scalars[0...position])) + "\u{301}"
       + String(String.UnicodeScalarView(scalars[(position + 1)...]))
   }
@@ -200,10 +220,32 @@ public final class NativeStress {
     return ids
   }
   public func apply(_ text: String, prefix: String = "", suffix: String = "") throws -> String {
+    try annotate(text, prefix: prefix, suffix: suffix).text
+  }
+  public struct Annotated {
+    public let text: String
+    /// Homographs the neural model resolved with low confidence, by word index in `text`
+    /// (same word regex as `stressCandidates`), with every reading rendered on the word.
+    public let disputes: [Int: [String]]
+  }
+  public func annotate(_ text: String, prefix: String = "", suffix: String = "") throws
+    -> Annotated
+  {
     let matches = NativeIO.regex("[А-Яа-яЁё]+(?:\\u0301[А-Яа-яЁё]*)*", text)
     let ns = text as NSString
     let homographs = NativeIO.object(metadata["homographs"])
     let patterns = NativeIO.object(metadata["patterns"])
+    // Hyphenated words ("по-моему", "кто-то") are looked up whole first: their stress
+    // differs from the parts read separately ("моему́").
+    var compounds: [(NSRange, String)] = []
+    for m in NativeIO.regex("[А-Яа-яЁё]+(?:-[А-Яа-яЁё]+)+", text) {
+      let original = ns.substring(with: m.range)
+      guard let entry = try binary.lookup(original.lowercased()),
+        Self.plain(entry) == Self.plain(original)
+      else { continue }
+      let marked = Self.transfer(original, entry)
+      if marked != original { compounds.append((m.range, marked)) }
+    }
     var words: [String] = []
     var wordPositions: [Int] = []
     var homos: [Object] = []
@@ -212,8 +254,12 @@ public final class NativeStress {
     for (i, m) in matches.enumerated() {
       let original = ns.substring(with: m.range)
       let word = original.lowercased()
-      guard !word.contains("\u{301}"), !word.contains("ё"),
-        word.filter({ RussianText.vowels.contains($0) }).count > 1
+      if compounds.contains(where: { NSLocationInRange(m.range.location, $0.0) }) { continue }
+      // One-vowel words need no stress mark, but все/всё, чем/чём and similar
+      // homographs still have to choose their letter from context.
+      let yoHomograph = (homographs[word] as? [String])?.contains { $0.contains("ё") } ?? false
+      let vowels = Self.vowelCount(word)
+      guard !word.contains("\u{301}"), !word.contains("ё"), vowels > 1 || (vowels == 1 && yoHomograph)
       else { continue }
       if homographs[word] != nil || patterns[word] != nil {
         let before = String(
@@ -269,7 +315,7 @@ public final class NativeStress {
         continue
       }
       if NativeIO.object(dictionary["homographs"])[word] == nil {
-        if let exc = exception(word, NativeIO.object(dictionary["exceptions"])) {
+        if let exc = Self.exception(word, NativeIO.object(dictionary["exceptions"])) {
           predictions[i] = exc
           continue
         }
@@ -289,7 +335,7 @@ public final class NativeStress {
           continue
         }
       }
-      if let exc = exception(word, NativeIO.object(metadata["exceptions"])) {
+      if let exc = Self.exception(word, NativeIO.object(metadata["exceptions"])) {
         predictions[i] = exc
         continue
       }
@@ -299,6 +345,7 @@ public final class NativeStress {
     let response = try request(["words": words, "homographs": homos])
     let stress = NativeIO.objects(response["stress"])
     let homoPreds = response["homographs"] as? [Int] ?? []
+    let homoProbabilities = response["homograph_probabilities"] as? [Double] ?? []
     guard stress.count == words.count, homoPreds.count == homos.count else {
       throw StudioError("Некорректный ответ нативной модели ударений")
     }
@@ -306,31 +353,51 @@ public final class NativeStress {
       let row = stress[j]
       let vowel = row["vowel"] as? Int ?? -1
       let prob = row["probability"] as? Double ?? 0
-      let chars = Array(words[j].unicodeScalars)
+      var chars = Array(words[j].unicodeScalars)
       let positions = chars.indices.filter { RussianText.vowels.unicodeScalars.contains(chars[$0]) }
       if prob > 0.5 && positions.indices.contains(vowel) {
         let p = positions[vowel]
-        predictions[i] =
-          String(String.UnicodeScalarView(chars[0...p])) + "\u{301}"
-          + String(String.UnicodeScalarView(chars[(p + 1)...]))
+        // As in Silero: the predicted 'ё' is used only where the stress falls on that 'е'.
+        let yo = row["yo"] as? Int ?? 0
+        let ye = chars.indices.filter { chars[$0] == "е" }
+        if yo > 0, (row["yo_probability"] as? Double ?? 0) > 0.5, yo - 1 < ye.count, ye[yo - 1] == p {
+          chars[p] = "ё"
+          predictions[i] = String(String.UnicodeScalarView(chars))
+        } else {
+          predictions[i] =
+            String(String.UnicodeScalarView(chars[0...p])) + "\u{301}"
+            + String(String.UnicodeScalarView(chars[(p + 1)...]))
+        }
       }
     }
+    var disputes: [Int: [String]] = [:]
     for (j, i) in homoPositions.enumerated() {
-      let word = ns.substring(with: matches[i].range).lowercased()
-      let variants = homographs[word] as? [String] ?? []
+      let original = ns.substring(with: matches[i].range)
+      let variants = homographs[original.lowercased()] as? [String] ?? []
       let p = homoPreds[j]
       guard variants.indices.contains(p) else {
         throw StudioError("Нет варианта ударения омографа")
       }
       predictions[i] = variants[p]
-    }
-    var output = text
-    for (i, m) in matches.enumerated().reversed() {
-      if let target = predictions[i] {
-        output = (output as NSString).replacingCharacters(
-          in: m.range, with: Self.transfer(ns.substring(with: m.range), target))
+      if homoProbabilities.indices.contains(j), (0.2...0.8).contains(homoProbabilities[j]) {
+        var readings: [String] = []
+        for variant in variants {
+          let reading = Self.transfer(original, variant)
+          if !readings.contains(reading) { readings.append(reading) }
+        }
+        if readings.count > 1 { disputes[i] = readings }
       }
     }
-    return output
+    var replacements = compounds
+    for (i, m) in matches.enumerated() {
+      if let target = predictions[i] {
+        replacements.append((m.range, Self.transfer(ns.substring(with: m.range), target)))
+      }
+    }
+    var output = text
+    for (range, value) in replacements.sorted(by: { $0.0.location > $1.0.location }) {
+      output = (output as NSString).replacingCharacters(in: range, with: value)
+    }
+    return Annotated(text: output, disputes: disputes)
   }
 }

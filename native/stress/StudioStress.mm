@@ -29,12 +29,23 @@ int main(int argc, const char *argv[]) {
                         auto outputs = accentor.forward({input}).toTuple()->elements();
                         auto probs = outputs[0].toTensor().softmax(1);
                         auto indices = probs.argmax(1);
+                        // Second output: which 'е' (1-based, 0 = none) is really 'ё'.
+                        bool hasYo = outputs.size() > 1;
+                        torch::Tensor yoProbs, yoIndices;
+                        if (hasYo) { yoProbs = outputs[1].toTensor().softmax(1); yoIndices = yoProbs.argmax(1); }
                         for (int64_t i=0; i<indices.size(0); ++i) {
                             auto index = indices[i].item<int64_t>();
-                            [stress addObject:@{@"vowel": @(index), @"probability": @(probs[i][index].item<double>())}];
+                            NSMutableDictionary *row = [@{@"vowel": @(index), @"probability": @(probs[i][index].item<double>())} mutableCopy];
+                            if (hasYo) {
+                                auto yo = yoIndices[i].item<int64_t>();
+                                row[@"yo"] = @(yo);
+                                row[@"yo_probability"] = @(yoProbs[i][yo].item<double>());
+                            }
+                            [stress addObject:row];
                         }
                     }
                     NSMutableArray *predictions = [NSMutableArray array];
+                    NSMutableArray *confidence = [NSMutableArray array];
                     // Each homograph has its own context window; no padding influences its prediction.
                     for (NSDictionary *item in request[@"homographs"]) {
                         std::vector<int64_t> ids;
@@ -43,10 +54,12 @@ int main(int argc, const char *argv[]) {
                         auto start = torch::tensor({[item[@"start"] longLongValue]}, torch::TensorOptions().dtype(torch::kInt64));
                         auto end = torch::tensor({[item[@"end"] longLongValue]}, torch::TensorOptions().dtype(torch::kInt64));
                         auto logits = homo.forward({tensor, start, end}).toTensor();
-                        auto index = torch::round(torch::sigmoid(logits)).flatten()[0].item<int64_t>();
+                        auto probability = torch::sigmoid(logits).flatten()[0];
+                        auto index = torch::round(probability).item<int64_t>();
                         [predictions addObject:@(index)];
+                        [confidence addObject:@(probability.item<double>())];
                     }
-                    NSDictionary *response = @{@"stress": stress, @"homographs": predictions};
+                    NSDictionary *response = @{@"stress": stress, @"homographs": predictions, @"homograph_probabilities": confidence};
                     NSData *encoded = [NSJSONSerialization dataWithJSONObject:response options:0 error:&error];
                     std::cout.write((const char *)encoded.bytes, encoded.length); std::cout << "\n" << std::flush;
                 }

@@ -432,6 +432,34 @@ final class CoreTests: XCTestCase {
     XCTAssertEqual(NativeDirector.applyStress(text, rows: rows), "Ма\u{301}ма мыла раму.")
     XCTAssertEqual(NativeDirector.applyStress(text, rows: []), text)
   }
+  func testStressKeepsYoAndBookLetters() {
+    // Dictionaries and homographs know 'ё' that books often print as 'е'.
+    XCTAssertEqual(NativeStress.transfer("Еще", "ещё\u{301}"), "Ещё")
+    XCTAssertEqual(NativeStress.transfer("осел", "ос+ёл"), "осёл")
+    XCTAssertEqual(NativeStress.transfer("осел", "ос+ел"), "осе\u{301}л")
+    XCTAssertEqual(NativeStress.transfer("все", "вс+ё"), "всё")
+    // One-vowel words get no mark; two-vowel words keep theirs.
+    XCTAssertEqual(NativeStress.transfer("все", "вс+е"), "все")
+    XCTAssertEqual(NativeStress.transfer("домой", "дом+ой"), "домо\u{301}й")
+    XCTAssertEqual(NativeStress.transfer("Кто-то", "кто\u{301}-то"), "Кто\u{301}-то")
+    XCTAssertEqual(NativeStress.transfer("книга", "стол"), "книга")
+    XCTAssertEqual(NativeStress.vowelCount("домо\u{301}й"), 2)
+    // Silero exceptions: [stressed character, 'е' that is 'ё' or -1].
+    XCTAssertEqual(NativeStress.exception("берет", ["берет": [3, 3]]), "берёт")
+    XCTAssertEqual(NativeStress.exception("того", ["того": [3, -1]]), "того\u{301}")
+    XCTAssertNil(NativeStress.exception("того", ["того": [2, -1]]))
+  }
+  func testCloudStressChoosesOnlyPreparedHomographReadings() {
+    let text = "Всё ра\u{301}вно мы узна\u{301}ем."
+    let disputes = [1: ["ра\u{301}вно", "равно\u{301}"]]
+    XCTAssertEqual(
+      NativeDirector.applyStress(text, rows: [["id": 1, "word": "равно\u{301}"]], disputes: disputes),
+      "Всё равно\u{301} мы узна\u{301}ем.")
+    XCTAssertEqual(
+      NativeDirector.applyStress(text, rows: [["id": 1, "word": "ра\u{301}вно\u{301}"]], disputes: disputes),
+      text)
+    XCTAssertEqual(NativeDirector.stressCandidates(text, disputes: disputes).map(\.id), [1])
+  }
   func testLLMHTTPFailuresAreClassified() {
     let body = Data("{\"error\":\"model overloaded\"}".utf8)
     XCTAssertTrue(NativeDirector.httpError(503, body) is TransientLLMError)

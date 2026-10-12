@@ -427,12 +427,13 @@ final class Engine {
         let after = try NativeIO.scalarSlice(
           full, anchor["char_end"] as? Int ?? 0, full.unicodeScalars.count)
         rows[i]["tts_normalized"] = normalized
-        rows[i]["tts_text"] = try stress.apply(normalized, prefix: before, suffix: after)
+        let marked = try stress.annotate(normalized, prefix: before, suffix: after)
+        rows[i]["tts_text"] = marked.text
         if request["cloud_stress"] as? Bool == true {
           // The cloud check is optional: without an answer the dictionary and Silero stay.
           do {
             rows[i]["tts_text"] = try await director.refineStress(
-              NativeIO.string(rows[i]["tts_text"]), context: full)
+              marked.text, context: full, disputes: marked.disputes)
           } catch is CancellationError {
             throw CancellationError()
           } catch {
