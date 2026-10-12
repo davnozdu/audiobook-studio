@@ -33,6 +33,7 @@ public struct RemoteJob: Codable, Identifiable {
     public var provider: RemoteProvider, phase = RemotePhase.confirmation
     public var created = Date(), queuedAt: Date?, started: Date?, finished: Date?
     public var stage = "", project = "", result = "", error = "", account = "", cloudFolder = ""
+    public var bookTitle: String?, bookAuthor: String?
     public var completed = 0, total = 0, fraction: Double = 0, speed: Double?
     public var eta: Double?, measuredAt: Date?
     public var uploads: [String: RemoteUpload] = [:]
@@ -71,7 +72,8 @@ public struct RemoteJob: Codable, Identifiable {
         if phase == .complete {
             for name in uploads.keys.sorted() {
                 if let link = uploads[name]?.link, !link.isEmpty {
-                    lines.append("📥 <a href=\"\(Self.escapedHTML(link))\">\(Self.escapedHTML(name))</a>")
+                    let label = name.lowercased().hasSuffix(".m4b") ? "Скачать аудиокнигу M4B" : "Скачать EPUB"
+                    lines.append("📥 <a href=\"\(Self.escapedHTML(link))\">\(label)</a>")
                 }
             }
         }
@@ -90,8 +92,13 @@ public struct RemoteJob: Codable, Identifiable {
     }
 }
 public struct RemoteButton: Codable, Equatable {
-    public var text: String, data: String
-    public init(_ text: String, _ data: String) { self.text = text; self.data = data }
+    public var text: String, data: String, url: String?
+    public init(_ text: String, _ data: String) { self.text = text; self.data = data; self.url = nil }
+    public init(_ text: String, url: String) { self.text = text; self.data = ""; self.url = url }
+}
+public struct RemoteCatalogTarget: Codable {
+    public var provider: RemoteProvider, id: String, path: String?
+    public init(_ provider: RemoteProvider, _ id: String, path: String? = nil) { self.provider = provider; self.id = id; self.path = path }
 }
 public struct RemoteReply: Codable, Identifiable {
     public var id = UUID().uuidString
@@ -106,6 +113,8 @@ public struct RemoteState: Codable {
     public var jobs: [RemoteJob] = [], outbox: [RemoteReply] = []
     public var rejectedGroups: [String] = []
     public var addRequestedAt: Date?
+    public var catalogNextToken: String?, catalogQuery: String?, catalogProvider: RemoteProvider?
+    public var catalogActions: [String: RemoteCatalogTarget]?
     public init() {}
     public var active: RemoteJob? { jobs.first { $0.phase.active } }
     public var next: RemoteJob? {
@@ -140,6 +149,8 @@ public struct RemoteState: Codable {
             || first == "/status" { return "status" }
         if first == "/add" || t == "добавить книгу" { return "add" }
         if ["ссылки", "скачать", "готовые книги"].contains(t) || ["/links", "/downloads"].contains(first) { return "links" }
+        if t == "книги" || first == "/books" { return "books" }
+        if t.hasPrefix("поиск ") || first == "/search" { return "search" }
         if t == "очередь" || first == "/queue" { return "queue" }
         if ["отмена", "отмени", "отменить", "отменить текущую", "останови"].contains(t) || first == "/cancel" { return "cancel" }
         return "help"

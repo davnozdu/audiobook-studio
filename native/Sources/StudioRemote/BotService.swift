@@ -49,6 +49,7 @@ import Combine
                 let client = TelegramClient(token: token, http: http)
                 let webhook = try await client.call("getWebhookInfo") as? [String: Any] ?? [:]
                 guard RemoteJSON.string(webhook, "url").isEmpty else { throw RemoteError("Этот бот уже подключён через webhook. Используйте отдельного бота.") }
+                await configureCommands(client)
                 message = "Бот подключён · приложение должно оставаться открытым"
                 while !Task.isCancelled && config.enabled && !fatal {
                     kick()
@@ -56,7 +57,7 @@ import Combine
                         // Poll before flushing replies: status/cancel must stay responsive when delivery fails.
                         let updates = try await client.call("getUpdates", ["offset": state.offset, "timeout": 10, "allowed_updates": ["message", "callback_query"]]) as? [[String: Any]] ?? []
                         for update in updates {
-                            try handle(update)
+                            try await handle(update)
                             state.offset = max(state.offset, RemoteJSON.integer(update, "update_id") + 1)
                             try persist()
                             if let callback = update["callback_query"] as? [String: Any], let id = callback["id"] as? String {
@@ -85,11 +86,23 @@ import Combine
         if enabled { start() }
         else { poll?.cancel(); message = running ? "Приём книг выключен; текущая книга продолжает обрабатываться" : "Бот выключен" }
     }
+    func configureCommands(_ client: TelegramClient) async {
+        _ = try? await client.call("setMyCommands", ["language_code": "ru", "commands": [
+            ["command": "status", "description": "Статус и время обработки"],
+            ["command": "queue", "description": "Очередь книг"],
+            ["command": "add", "description": "Добавить одну книгу в очередь"],
+            ["command": "books", "description": "Открыть медиатеку облака"],
+            ["command": "search", "description": "Найти книгу в медиатеке"],
+            ["command": "links", "description": "Последние готовые книги"],
+            ["command": "cancel", "description": "Отменить книгу"]
+        ]])
+    }
     public func connectBot(_ token: String) async {
         guard !connecting, !running else { return }; connecting = true; defer { connecting = false }
         do {
             let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
-            let me = try await TelegramClient(token: trimmed, http: http).call("getMe") as? [String: Any] ?? [:]
+            let telegram = TelegramClient(token: trimmed, http: http)
+            let me = try await telegram.call("getMe") as? [String: Any] ?? [:]
             guard let username = me["username"] as? String else { throw RemoteError("Не удалось определить бота") }
             let previous = try secrets.read("telegramToken")
             if previous != trimmed && !state.jobs.isEmpty { throw RemoteError("Замена бота заблокирована: сохранены задания с файлами прежнего бота.") }
@@ -117,7 +130,7 @@ import Combine
     func buttons(_ job: RemoteJob) -> [[RemoteButton]] {
         [[RemoteButton("📊 Статус", "status:" + job.id), RemoteButton("⏹ Отменить", "cancel:" + job.id)]]
     }
-    public func handle(_ update: [String: Any]) throws {
+    public func handle(_ update: [String: Any]) async throws {
         let callback = update["callback_query"] as? [String: Any]
         let incoming = (callback?["message"] as? [String: Any]) ?? (update["message"] as? [String: Any]) ?? [:]
         let chat = incoming["chat"] as? [String: Any] ?? [:]
@@ -133,6 +146,7 @@ import Combine
         }
         guard state.ownerID == id else { return }
         if let data = callback?["data"] as? String {
+            if await handleCatalogCallback(data, chat: id) { return }
             let parts = data.split(separator: ":", maxSplits: 1).map(String.init)
             guard parts.count == 2, let i = state.jobs.firstIndex(where: { $0.id == parts[1] && $0.chatID == id }) else { return }
             let job = state.jobs[i]
@@ -197,14 +211,29 @@ import Combine
             let completed = state.jobs.filter { $0.phase == .complete }
             if completed.isEmpty { reply("Пока нет полностью собранных и загруженных книг. /status — текущая обработка.", chat: id) }
             for job in completed.suffix(10).reversed() { reply(job.status(), chat: id, html: true) }
+        case "books":
+            let parts = text.split(whereSeparator: \.isWhitespace).map(String.init)
+            let provider = parts.dropFirst().first.flatMap(Self.catalogProvider) ?? config.provider
+            await showBooks(chat: id, provider: provider, search: nil, pageToken: nil)
+        case "search":
+            let parts = text.split(whereSeparator: \.isWhitespace).map(String.init)
+            var provider = config.provider, searchParts = Array(parts.dropFirst())
+            if let first = searchParts.first, let selected = Self.catalogProvider(first) {
+                provider = selected; searchParts.removeFirst()
+            }
+            let query = String(searchParts.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines).prefix(80))
+            guard !query.isEmpty else { reply("🔎 Укажите название для поиска: /search Достоевский", chat: id); return }
+            await showBooks(chat: id, provider: provider, search: query, pageToken: nil)
         case "queue":
             let jobs = state.jobs.filter { $0.phase != .complete && $0.phase != .cancelled }
-            reply(jobs.isEmpty ? "📭 Очередь пуста." : "📚 <b>Очередь</b>\n\n" + jobs.map { "• \(RemoteJob.escapedHTML($0.name)) · \(RemoteJob.escapedHTML($0.phase.title))" }.joined(separator: "\n"), chat: id,
-                  buttons: jobs.prefix(20).map { job in [RemoteButton(String(job.name.prefix(30)), "status:" + job.id), RemoteButton("⏹ Отменить", "cancel:" + job.id)] }, html: true)
+            let visible = Array(jobs.prefix(20))
+            let extra = jobs.count > visible.count ? "\n\n… ещё \(jobs.count - visible.count) книг. Повторите /queue после завершения текущих." : ""
+            reply(jobs.isEmpty ? "📭 Очередь пуста." : "📚 <b>Очередь</b> · \(jobs.count)\n\n" + visible.map { "• \(RemoteJob.escapedHTML(String($0.name.prefix(30)))) · \(RemoteJob.escapedHTML($0.phase.title))" }.joined(separator: "\n") + extra, chat: id,
+                  buttons: visible.map { job in [RemoteButton(String(job.name.prefix(30)), "status:" + job.id), RemoteButton("⏹ Отменить", "cancel:" + job.id)] }, html: true)
         case "cancel":
             if let job = state.active ?? state.next { askCancel(job) } else { reply("Сейчас нечего отменять.", chat: id) }
         default:
-            reply("Отправьте EPUB. /status — статус и время; /queue — список книг; /add, затем один EPUB — добавить книгу в очередь; /links — готовые книги и ссылки; /cancel — отменить текущую книгу. После перезапуска продолжение требует подтверждения.", chat: id,
+            reply("📚 Отправьте EPUB для озвучивания.\n\n📊 /status — ход обработки\n📋 /queue — очередь\n➕ /add — добавить книгу в очередь\n🎧 /books — медиатека\n🔎 /search название — поиск\n🔗 /links — последние готовые книги\n⏹ /cancel — остановить книгу\n\nДля медиатеки другого хранилища: /books google или /books dropbox.", chat: id,
                   buttons: state.jobs.filter { [.paused, .failed, .cancelled].contains($0.phase) }.suffix(10).map { [RemoteButton("Продолжить: " + String($0.name.prefix(25)), "run:" + $0.id)] })
         }
     }
@@ -212,6 +241,98 @@ import Combine
         guard job.phase != .complete && job.phase != .cancelled else { reply(job.status(), chat: job.chatID, html: true); return }
         reply("Отменить обработку «\(job.name)»? Остальные книги останутся в очереди.", chat: job.chatID,
               buttons: [[RemoteButton("Да, отменить", "stop:" + job.id), RemoteButton("Продолжать", "status:" + job.id)]])
+    }
+    static func catalogProvider(_ value: String) -> RemoteProvider? {
+        switch value.lowercased() {
+        case "google", "drive", "google-drive", "googledrive": return .googleDrive
+        case "dropbox", "drop": return .dropbox
+        default: return nil
+        }
+    }
+    func catalogToken(_ target: RemoteCatalogTarget) -> String {
+        var actions = state.catalogActions ?? [:]
+        var token = String(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(8)).lowercased()
+        while actions[token] != nil {
+            token = String(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(8)).lowercased()
+        }
+        actions[token] = target
+        if actions.count > 500 {
+            for key in Array(actions.keys).prefix(actions.count - 400) { actions.removeValue(forKey: key) }
+        }
+        state.catalogActions = actions
+        return token
+    }
+    func showBooks(chat: Int64, provider: RemoteProvider, search: String?, pageToken: String?) async {
+        guard let account = config.connections[provider.rawValue], !account.isEmpty else {
+            reply("☁️ Сначала подключите \(provider.title) в настройках приложения на Mac.", chat: chat); return
+        }
+        do {
+            let client = CloudClient(provider: provider, config: config, secrets: secrets, http: http)
+            let page: CloudClient.CloudLibraryPage = provider == .googleDrive
+                ? try await client.googleBooks(search: search, pageToken: pageToken)
+                : try await client.dropboxBooks(search: search, cursor: pageToken)
+            state.catalogNextToken = page.nextToken; state.catalogQuery = search ?? ""; state.catalogProvider = provider
+            guard !page.books.isEmpty else {
+                let message = page.nextToken == nil
+                    ? (search == nil ? "📭 В папке <b>Audiobook Studio</b> пока нет книг." : "🔎 В папке Audiobook Studio ничего не найдено по запросу «\(RemoteJob.escapedHTML(search ?? ""))».")
+                    : "🔎 На этой странице совпадений нет. Продолжите поиск на следующей странице."
+                let buttons = page.nextToken == nil ? [] : [[RemoteButton("➡️ Продолжить поиск", search == nil ? "catalog-next" : "catalog-search-next")]]
+                reply(message, chat: chat, buttons: buttons, html: true)
+                return
+            }
+            var lines = ["🎧 <b>Медиатека · \(RemoteJob.escapedHTML(provider.title))</b>",
+                         search.map { "🔎 Поиск: «\(RemoteJob.escapedHTML($0))»" } ?? "📁 Папка: Audiobook Studio", ""]
+            var buttons: [[RemoteButton]] = []
+            for book in page.books {
+                lines.append("📚 <b>\(RemoteJob.escapedHTML(String(book.name.prefix(60))))</b>")
+                var row: [RemoteButton] = []
+                if let url = book.m4bURL { row.append(RemoteButton("⬇️ Скачать M4B", url: url)) }
+                if let url = book.epubURL { row.append(RemoteButton("📘 Скачать EPUB", url: url)) }
+                let token = catalogToken(RemoteCatalogTarget(provider, book.id, path: book.path))
+                row.append(RemoteButton("🗑 Удалить", "catalog-delete:" + token))
+                buttons.append(row)
+            }
+            if let next = page.nextToken, !next.isEmpty {
+                buttons.append([RemoteButton("➡️ Следующая страница", search == nil ? "catalog-next" : "catalog-search-next")])
+            }
+            reply(lines.joined(separator: "\n"), chat: chat, buttons: buttons, html: true)
+        } catch { reply("⚠️ Не удалось прочитать медиатеку \(provider.title): \((error as? RemoteError)?.message ?? "проверьте подключение облака")", chat: chat) }
+    }
+    func handleCatalogCallback(_ data: String, chat: Int64) async -> Bool {
+        if data == "catalog-next" || data == "catalog-search-next" {
+            guard let provider = state.catalogProvider, let token = state.catalogNextToken, !token.isEmpty else {
+                reply("📭 Больше страниц нет. Используйте /books или /search название.", chat: chat); return true
+            }
+            await showBooks(chat: chat, provider: provider, search: data == "catalog-next" ? nil : state.catalogQuery,
+                            pageToken: token)
+            return true
+        }
+        let parts = data.split(separator: ":", maxSplits: 1).map(String.init)
+        guard parts.count == 2, ["catalog-delete", "catalog-confirm-delete", "catalog-cancel-delete"].contains(parts[0]),
+              let target = state.catalogActions?[parts[1]] else { return false }
+        switch parts[0] {
+        case "catalog-delete":
+            if let job = state.jobs.first(where: { $0.provider == target.provider && $0.cloudFolder == (target.path ?? target.id) && ($0.phase.active || $0.phase == .queued) }) {
+                reply("⏳ Нельзя удалить папку: сейчас загружается книга «\(job.name)».", chat: chat); return true
+            }
+            reply("🗑 Удалить папку книги и оба файла из \(target.provider.title)? Это действие нельзя отменить.", chat: chat,
+                  buttons: [[RemoteButton("🗑 Да, удалить", "catalog-confirm-delete:" + parts[1]), RemoteButton("↩️ Оставить", "catalog-cancel-delete:" + parts[1])]])
+        case "catalog-cancel-delete": reply("↩️ Книгу оставил в медиатеке.", chat: chat)
+        case "catalog-confirm-delete":
+            if let job = state.jobs.first(where: { $0.provider == target.provider && $0.cloudFolder == (target.path ?? target.id) && ($0.phase.active || $0.phase == .queued) }) {
+                reply("⏳ Удаление отменено: папка сейчас используется книгой «\(job.name)».", chat: chat); return true
+            }
+            do {
+                let client = CloudClient(provider: target.provider, config: config, secrets: secrets, http: http)
+                if target.provider == .googleDrive { try await client.deleteGoogleBook(folderID: target.id) }
+                else { try await client.deleteDropboxBook(folderID: target.id) }
+                reply("✅ Книга удалена из \(target.provider.title).", chat: chat)
+                let query = state.catalogQuery?.isEmpty == true ? nil : state.catalogQuery
+                await showBooks(chat: chat, provider: target.provider, search: query, pageToken: nil)
+            } catch { reply("⚠️ Не удалось удалить книгу: \((error as? RemoteError)?.message ?? "ошибка облачного хранилища")", chat: chat) }
+        default: break
+        }
+        return true
     }
     public func cancelActive() { if let job = state.active { cancel(job.id) } }
     func cancel(_ id: String) {
@@ -275,6 +396,11 @@ import Combine
             }
             try Task.checkCancellation()
             guard !project.isEmpty else { throw RemoteError("Движок не создал проект") }
+            let metadata = Self.projectBookMetadata(project)
+            try mutate(id) { job in
+                if job.bookTitle?.isEmpty != false { job.bookTitle = metadata.title }
+                if job.bookAuthor?.isEmpty != false { job.bookAuthor = metadata.author }
+            }
             try mutate(id) { $0.phase = .synthesis; $0.stage = "Озвучивание" }
             // Incomplete export can only be a copy from an interrupted previous build. Keep the native project cache.
             if FileManager.default.fileExists(atPath: result.path) { try FileManager.default.removeItem(at: result) }
@@ -288,18 +414,42 @@ import Combine
             try mutate(id) { $0.result = result.path }
         }
         try mutate(id) { $0.phase = .uploading; $0.eta = nil; $0.speed = nil; $0.stage = "Отправка M4B и EPUB в " + $0.provider.title }
-        let j = try job(id), cloud = CloudClient(provider: j.provider, config: config, secrets: secrets, http: http)
+        var j = try job(id)
+        if !j.project.isEmpty {
+            let metadata = Self.projectBookMetadata(j.project)
+            if j.bookTitle?.isEmpty != false { j.bookTitle = metadata.title }
+            if j.bookAuthor?.isEmpty != false { j.bookAuthor = metadata.author }
+            try mutate(id) { $0.bookTitle = j.bookTitle; $0.bookAuthor = j.bookAuthor }
+            j = try job(id)
+        }
+        let cloud = CloudClient(provider: j.provider, config: config, secrets: secrets, http: http)
+        let fallbackTitle = URL(fileURLWithPath: j.name).deletingPathExtension().lastPathComponent
+        let title = j.bookTitle?.isEmpty == false ? j.bookTitle! : fallbackTitle
+        let author = j.bookAuthor ?? ""
+        let fileBase = CloudClient.bookBase(title: title, author: author)
         var cloudFolder = j.cloudFolder
-        if cloudFolder.isEmpty { cloudFolder = try await cloud.folder(jobID: id); try mutate(id) { $0.cloudFolder = cloudFolder } }
+        if cloudFolder.isEmpty {
+            cloudFolder = try await cloud.folder(jobID: id, title: title, author: author)
+            try mutate(id) { $0.cloudFolder = cloudFolder }
+        }
         for name in ["audiobook.m4b", "audiobook.epub"] {
             try Task.checkCancellation()
             let saved = try job(id).uploads[name] ?? RemoteUpload()
-            _ = try await cloud.upload(file: result.appendingPathComponent(name), folder: cloudFolder, saved: saved) { checkpoint in
+            let remoteName = fileBase.isEmpty ? name : fileBase + (name.hasSuffix(".m4b") ? ".m4b" : ".epub")
+            _ = try await cloud.upload(file: result.appendingPathComponent(name), folder: cloudFolder, remoteName: remoteName, saved: saved) { checkpoint in
                 try self.mutate(id) { $0.uploads[name] = checkpoint; $0.stage = "\(name): загружено \(checkpoint.offset / 1024 / 1024) МБ" }
             }
         }
         // The source already exists in the verified native project and final EPUB; remove only this redundant inbox copy.
         try? FileManager.default.removeItem(at: input)
+    }
+    static func projectBookMetadata(_ project: String) -> (title: String, author: String) {
+        let manifest = URL(fileURLWithPath: project).appendingPathComponent("roles/manifest.json")
+        guard let data = try? Data(contentsOf: manifest),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let book = object["book"] as? [String: Any] else { return ("", "") }
+        return ((book["title"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
+                (book["author"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines))
     }
     func runEngine(_ id: String, _ request: [String: Any], _ folder: URL) async throws {
         var saveError: Error?

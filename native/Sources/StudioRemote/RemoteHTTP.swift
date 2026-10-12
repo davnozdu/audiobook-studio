@@ -100,7 +100,10 @@ public final class TelegramClient {
         var body: [String: Any] = ["chat_id": reply.chatID, "text": String(reply.text.prefix(3900)), "link_preview_options": ["is_disabled": true]]
         if let parseMode = reply.parseMode { body["parse_mode"] = parseMode }
         if !reply.buttons.isEmpty {
-            body["reply_markup"] = ["inline_keyboard": reply.buttons.map { $0.map { ["text": $0.text, "callback_data": $0.data] } }]
+            body["reply_markup"] = ["inline_keyboard": reply.buttons.map { $0.map { button -> [String: String] in
+                if let url = button.url { return ["text": button.text, "url": url] }
+                return ["text": button.text, "callback_data": button.data]
+            } }]
         }
         _ = try await call("sendMessage", body)
     }

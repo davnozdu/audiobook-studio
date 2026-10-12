@@ -87,13 +87,13 @@ final class RemoteTests: XCTestCase {
         let f = try folder(); defer { try? FileManager.default.removeItem(at: f) }
         let bot = BotService(folder: f, secrets: MemorySecrets()); bot.state.ownerID = 12; bot.config.connections["dropbox"] = "account"
         func message(_ user: Int64, _ mid: Int64) -> [String: Any] { ["message": ["chat": ["id": user, "type": "private"], "from": ["id": user], "message_id": mid, "document": ["file_name": "book.epub", "file_size": 10, "file_id": "file"]]] }
-        try bot.handle(message(99, 1)); XCTAssertTrue(bot.state.jobs.isEmpty)
-        try bot.handle(message(12, 1)); try bot.handle(message(12, 2)); XCTAssertEqual(bot.state.jobs.count, 2); XCTAssertNil(bot.state.next)
+        try await bot.handle(message(99, 1)); XCTAssertTrue(bot.state.jobs.isEmpty)
+        try await bot.handle(message(12, 1)); try await bot.handle(message(12, 2)); XCTAssertEqual(bot.state.jobs.count, 2); XCTAssertNil(bot.state.next)
         let id = bot.state.jobs[0].id
         func callback(_ action: String) -> [String: Any] { ["callback_query": ["from": ["id": 12], "data": action + ":" + id, "message": ["chat": ["id": 12, "type": "private"]]]] }
-        try bot.handle(callback("run")); XCTAssertEqual(bot.state.jobs[0].phase, .queued)
-        try bot.handle(callback("cancel")); XCTAssertEqual(bot.state.jobs[0].phase, .queued)
-        try bot.handle(callback("stop")); XCTAssertEqual(bot.state.jobs[0].phase, .cancelled); XCTAssertEqual(bot.state.jobs[1].phase, .confirmation)
+        try await bot.handle(callback("run")); XCTAssertEqual(bot.state.jobs[0].phase, .queued)
+        try await bot.handle(callback("cancel")); XCTAssertEqual(bot.state.jobs[0].phase, .queued)
+        try await bot.handle(callback("stop")); XCTAssertEqual(bot.state.jobs[0].phase, .cancelled); XCTAssertEqual(bot.state.jobs[1].phase, .confirmation)
     }
     @MainActor func testGoogleResumeUsesServerOffsetAndVerifiesHash() async throws {
         let f = try folder(); defer { try? FileManager.default.removeItem(at: f); MockHTTP.handler = nil }
@@ -143,7 +143,7 @@ final class RemoteTests: XCTestCase {
         ready.phase = .complete; var upload = RemoteUpload(); upload.link = "https://example.test/book"; ready.uploads["audiobook.m4b"] = upload
         var current = RemoteJob(chatID: 12, messageID: 2, fileID: "y", name: "current.epub", provider: .googleDrive); current.phase = .synthesis
         bot.state.jobs = [ready, current]
-        try bot.handle(["message": ["chat": ["id": 12, "type": "private"], "from": ["id": 12], "text": "/status"]])
+        try await bot.handle(["message": ["chat": ["id": 12, "type": "private"], "from": ["id": 12], "text": "/status"]])
         XCTAssertTrue(bot.state.outbox.contains { $0.text.contains("current.epub") })
         XCTAssertTrue(bot.state.outbox.contains { $0.text.contains("https://example.test/book") })
         try bot.persist(); XCTAssertEqual(try RemoteStateStore(f).load().jobs[0].uploads["audiobook.m4b"]?.link, upload.link)
@@ -182,9 +182,9 @@ final class RemoteTests: XCTestCase {
         let f = try folder(); defer { try? FileManager.default.removeItem(at: f) }
         let bot = BotService(folder: f, secrets: MemorySecrets()); bot.state.ownerID = 12
         func doc(_ mid: Int) -> [String: Any] { ["message": ["chat": ["id": 12, "type": "private"], "from": ["id": 12], "message_id": mid, "media_group_id": "group", "document": ["file_name": "book.epub", "file_size": 10, "file_id": "file"]]] }
-        try bot.handle(doc(1)); try bot.handle(doc(2)); try bot.persist()
+        try await bot.handle(doc(1)); try await bot.handle(doc(2)); try bot.persist()
         XCTAssertTrue(bot.state.jobs.isEmpty); XCTAssertEqual(bot.state.outbox.count, 1)
-        let restarted = BotService(folder: f, secrets: MemorySecrets()); try restarted.handle(doc(3))
+        let restarted = BotService(folder: f, secrets: MemorySecrets()); try await restarted.handle(doc(3))
         XCTAssertTrue(restarted.state.jobs.isEmpty); XCTAssertEqual(restarted.state.outbox.count, 1)
     }
     @MainActor func testBusyQueueRequiresAddThenOneBookAndConfirmation() async throws {
@@ -192,15 +192,15 @@ final class RemoteTests: XCTestCase {
         let bot = BotService(folder: f, secrets: MemorySecrets()); bot.state.ownerID = 12
         var current = RemoteJob(chatID: 12, messageID: 1, fileID: "current", name: "current.epub", provider: .dropbox); current.phase = .synthesis; bot.state.jobs = [current]
         let doc: [String: Any] = ["message": ["chat": ["id": 12, "type": "private"], "from": ["id": 12], "message_id": 2, "document": ["file_name": "new.epub", "file_size": 10, "file_id": "new"]]]
-        try bot.handle(doc); XCTAssertEqual(bot.state.jobs.count, 1); XCTAssertTrue(bot.state.outbox.last!.text.contains("/add"))
-        try bot.handle(["message": ["chat": ["id": 12, "type": "private"], "from": ["id": 12], "text": "/add"]])
+        try await bot.handle(doc); XCTAssertEqual(bot.state.jobs.count, 1); XCTAssertTrue(bot.state.outbox.last!.text.contains("/add"))
+        try await bot.handle(["message": ["chat": ["id": 12, "type": "private"], "from": ["id": 12], "text": "/add"]])
         try bot.persist()
         // Admission intent survives restart, but does not authorize actual synthesis.
-        let restarted = BotService(folder: f, secrets: MemorySecrets()); try restarted.handle(doc)
+        let restarted = BotService(folder: f, secrets: MemorySecrets()); try await restarted.handle(doc)
         XCTAssertEqual(restarted.state.jobs.count, 2); XCTAssertEqual(restarted.state.jobs[1].phase, .confirmation); XCTAssertNil(restarted.state.addRequestedAt)
         var third = doc["message"] as! [String: Any]; third["message_id"] = 3
         restarted.state.jobs[0].phase = .queued
-        try restarted.handle(["message": third]); XCTAssertEqual(restarted.state.jobs.count, 2)
+        try await restarted.handle(["message": third]); XCTAssertEqual(restarted.state.jobs.count, 2)
     }
 
 }
