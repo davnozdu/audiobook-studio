@@ -46,15 +46,41 @@ public final class AccentDictionary {
   }
 }
 public final class NativeStress {
-  let metadata: Object, dictionary: Object, binary: AccentDictionary
+  let binary: AccentDictionary
+  // Typed once at start: bridging these Foundation dictionaries per word made stress
+  // preparation take about 13 seconds per 1000 characters.
+  let homographs: [String: [String]], patterns: [String: Object], sileroExceptions: [String: [Int]]
+  let vocab: [String: Int], neverSplit: Set<String>
+  let unk: Int, cls: Int, sep: Int, homoStart: Int, homoEnd: Int
+  let phrases: [String: [[String]]], corrections: [String: String]
+  let dictionaryHomographs: Set<String>, dictionaryExceptions: [String: [Int]]
+  let gram: [String: Set<String>]
+  var compiledPatterns: [String: NSRegularExpression?] = [:]
   let process = Process(), input = Pipe(), output = Pipe()
   var pending = Data()
   public init(resources: URL, helper: URL) throws {
-    metadata = try NativeIO.load(resources.appendingPathComponent("silero/metadata.json"))
-    dictionary = try NativeIO.load(
+    let metadata = try NativeIO.load(resources.appendingPathComponent("silero/metadata.json"))
+    let dictionary = try NativeIO.load(
       resources.appendingPathComponent("resources/stress_dictionary.json"))
     binary = try AccentDictionary(
       resources.appendingPathComponent("resources/russian_accents_full.sacc"))
+    homographs = metadata["homographs"] as? [String: [String]] ?? [:]
+    patterns = metadata["patterns"] as? [String: Object] ?? [:]
+    sileroExceptions = metadata["exceptions"] as? [String: [Int]] ?? [:]
+    vocab = metadata["vocab"] as? [String: Int] ?? [:]
+    neverSplit = Set(metadata["never_split"] as? [String] ?? [])
+    unk = metadata["unk"] as? Int ?? 100
+    cls = metadata["cls"] as? Int ?? 101
+    sep = metadata["sep"] as? Int ?? 102
+    homoStart = metadata["homo_start"] as? Int ?? -1
+    homoEnd = metadata["homo_end"] as? Int ?? -1
+    phrases = (dictionary["phrases"] as? [String: [[String]]] ?? [:]).mapValues {
+      $0.filter { $0.count >= 2 }.sorted { $0[0].count > $1[0].count }
+    }
+    corrections = dictionary["corrections"] as? [String: String] ?? [:]
+    dictionaryHomographs = Set((dictionary["homographs"] as? Object ?? [:]).keys)
+    dictionaryExceptions = dictionary["exceptions"] as? [String: [Int]] ?? [:]
+    gram = (dictionary["gram"] as? [String: [String: String]] ?? [:]).mapValues { Set($0.values) }
     process.executableURL = helper
     process.arguments = [resources.appendingPathComponent("silero").path]
     process.standardInput = input
@@ -127,8 +153,8 @@ public final class NativeStress {
     return vowelCount(result) <= 1 ? result.replacingOccurrences(of: "\u{301}", with: "") : result
   }
   /// Silero exceptions store the stressed character and, when present, the 'е' that is 'ё'.
-  static func exception(_ word: String, _ object: Object) -> String? {
-    guard let entry = object[word] as? [Int], let position = entry.first, position >= 0,
+  static func exception(_ word: String, _ object: [String: [Int]]) -> String? {
+    guard let entry = object[word], let position = entry.first, position >= 0,
       position < word.unicodeScalars.count
     else { return nil }
     var scalars = Array(word.unicodeScalars)
@@ -159,12 +185,9 @@ public final class NativeStress {
     return out
   }
   func tokenize(_ text: String) -> [Int] {
-    let vocab = metadata["vocab"] as? [String: Int] ?? [:]
-    let never = Set(metadata["never_split"] as? [String] ?? [])
-    let unk = metadata["unk"] as? Int ?? 100
     var basic: [String] = []
     for token in text.split(whereSeparator: { $0.isWhitespace }).map(String.init) {
-      if never.contains(token) {
+      if neverSplit.contains(token) {
         basic.append(token)
         continue
       }
@@ -186,7 +209,7 @@ public final class NativeStress {
       }
       if !word.isEmpty { basic.append(word) }
     }
-    var ids = [metadata["cls"] as? Int ?? 101]
+    var ids = [cls]
     for token in basic {
       let chars = Array(token.unicodeScalars)
       if chars.count > 100 {
@@ -216,8 +239,16 @@ public final class NativeStress {
       }
       ids += bad ? [unk] : pieces
     }
-    ids.append(metadata["sep"] as? Int ?? 102)
+    ids.append(sep)
     return ids
+  }
+  /// Silero phrase pattern of a homograph, compiled once per word.
+  func pattern(_ word: String) -> NSRegularExpression? {
+    if let cached = compiledPatterns[word] { return cached }
+    let compiled = try? NSRegularExpression(
+      pattern: NativeIO.string(patterns[word]?["pattern"]), options: .caseInsensitive)
+    compiledPatterns[word] = .some(compiled)
+    return compiled
   }
   public func apply(_ text: String, prefix: String = "", suffix: String = "") throws -> String {
     try annotate(text, prefix: prefix, suffix: suffix).text
@@ -233,8 +264,8 @@ public final class NativeStress {
   {
     let matches = NativeIO.regex("[А-Яа-яЁё]+(?:\\u0301[А-Яа-яЁё]*)*", text)
     let ns = text as NSString
-    let homographs = NativeIO.object(metadata["homographs"])
-    let patterns = NativeIO.object(metadata["patterns"])
+    let context = (prefix + text + suffix).replacingOccurrences(of: "\u{301}", with: "")
+      .lowercased()
     // Hyphenated words ("по-моему", "кто-то") are looked up whole first: their stress
     // differs from the parts read separately ("моему́").
     var compounds: [(NSRange, String)] = []
@@ -257,7 +288,7 @@ public final class NativeStress {
       if compounds.contains(where: { NSLocationInRange(m.range.location, $0.0) }) { continue }
       // One-vowel words need no stress mark, but все/всё, чем/чём and similar
       // homographs still have to choose their letter from context.
-      let yoHomograph = (homographs[word] as? [String])?.contains { $0.contains("ё") } ?? false
+      let yoHomograph = homographs[word]?.contains { $0.contains("ё") } ?? false
       let vowels = Self.vowelCount(word)
       guard !word.contains("\u{301}"), !word.contains("ё"), vowels > 1 || (vowels == 1 && yoHomograph)
       else { continue }
@@ -269,10 +300,9 @@ public final class NativeStress {
             .prefix(150))
         let marked = (before + " [HOMO] " + word + " [/HOMO] " + after).trimmingCharacters(
           in: .whitespacesAndNewlines)
-        let rule = NativeIO.object(patterns[word])
+        let rule = patterns[word] ?? [:]
         var matched = false
-        if let regex = try? NSRegularExpression(
-          pattern: NativeIO.string(rule["pattern"]), options: .caseInsensitive),
+        if !rule.isEmpty, let regex = pattern(word),
           let match = regex.firstMatch(in: marked, range: NSRange(marked.startIndex..., in: marked))
         {
           for (j, variant) in (rule["variants"] as? [String] ?? []).enumerated()
@@ -284,21 +314,18 @@ public final class NativeStress {
         }
         if !matched && homographs[word] != nil {
           let tokens = tokenize(marked)
-          guard let start = tokens.firstIndex(of: metadata["homo_start"] as? Int ?? -1),
-            let end = tokens.firstIndex(of: metadata["homo_end"] as? Int ?? -1)
+          guard let start = tokens.firstIndex(of: homoStart),
+            let end = tokens.firstIndex(of: homoEnd)
           else { throw StudioError("Не удалось отметить омограф") }
           homos.append(["tokens": tokens, "start": start, "end": end])
           homoPositions.append(i)
         }
         if matched || homographs[word] != nil { continue }
       }
-      let context = (prefix + text + suffix).replacingOccurrences(of: "\u{301}", with: "")
-        .lowercased()
-      let phrases = NativeIO.object(dictionary["phrases"])[word] as? [[String]] ?? []
       let cleanBefore = (prefix + ns.substring(to: m.range.location)).replacingOccurrences(
         of: "\u{301}", with: ""
       ).utf16.count
-      for pair in phrases.sorted(by: { $0[0].count > $1[0].count }) where pair.count >= 2 {
+      for pair in phrases[word] ?? [] {
         let hits = NativeIO.regex(
           "(?<!\\w)" + NSRegularExpression.escapedPattern(for: pair[0]) + "(?!\\w)", context)
         if hits.contains(where: {
@@ -310,21 +337,17 @@ public final class NativeStress {
         }
       }
       if predictions[i] != nil { continue }
-      if let corrected = NativeIO.object(dictionary["corrections"])[word] as? String {
+      if let corrected = corrections[word] {
         predictions[i] = corrected
         continue
       }
-      if NativeIO.object(dictionary["homographs"])[word] == nil {
-        if let exc = Self.exception(word, NativeIO.object(dictionary["exceptions"])) {
+      if !dictionaryHomographs.contains(word) {
+        if let exc = Self.exception(word, dictionaryExceptions) {
           predictions[i] = exc
           continue
         }
-        let gram = Set(
-          (NativeIO.object(NativeIO.object(dictionary["gram"])[word])).values.compactMap {
-            $0 as? String
-          })
-        if gram.count == 1 {
-          predictions[i] = gram.first!
+        if let variants = gram[word], variants.count == 1 {
+          predictions[i] = variants.first!
           continue
         }
         if let entry = try binary.lookup(word), Self.plain(entry) == Self.plain(word),
@@ -335,7 +358,7 @@ public final class NativeStress {
           continue
         }
       }
-      if let exc = Self.exception(word, NativeIO.object(metadata["exceptions"])) {
+      if let exc = Self.exception(word, sileroExceptions) {
         predictions[i] = exc
         continue
       }
@@ -373,7 +396,7 @@ public final class NativeStress {
     var disputes: [Int: [String]] = [:]
     for (j, i) in homoPositions.enumerated() {
       let original = ns.substring(with: matches[i].range)
-      let variants = homographs[original.lowercased()] as? [String] ?? []
+      let variants = homographs[original.lowercased()] ?? []
       let p = homoPreds[j]
       guard variants.indices.contains(p) else {
         throw StudioError("Нет варианта ударения омографа")

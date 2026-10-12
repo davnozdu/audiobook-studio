@@ -9,7 +9,11 @@ from pathlib import Path
 
 UPSTREAM_SHA = "e0e4ac8efdfb5f63a9e0afc8339b7b2b2a3ac3afe6d749979342f178a70a5df4"
 MARKER = "// Audiobook Studio: official non_streaming_mode=True prefill."
-PREVIOUS_PATCH_SHA = "ccdc11d446514162c90ecef73c8d9a0100eb287d22f066ab72b5626fab486a4f"
+# Earlier audited patch results a cached checkout may still contain.
+PREVIOUS_PATCH_SHAS = {
+    "ccdc11d446514162c90ecef73c8d9a0100eb287d22f066ab72b5626fab486a4f",
+    "a3b3a56865590533a010762797129d7f69cc7526f41faec639a36ca26bb09f80",
+}
 
 
 def patched(source):
@@ -94,6 +98,14 @@ def patched(source):
 
     func extractSpeakerEmbedding(_ refAudio: MLXArray) -> MLXArray? {
 """)
+    # The engine keeps a bounded MLX buffer pool and clears it between models; emptying it
+    # every 50 tokens forces Metal reallocation (absent from the Python ICL loop).
+    replace("""            if step > 0, step % 50 == 0 {
+                Memory.clearCache()
+            }
+""", "")
+    replace("        print(\"Got audio ID: '\\(audioID)'\")\n", "")
+    replace("            print(\"Returning cached context\")\n", "")
     replace("        let stackedMels = stacked(mels, axis: 0)\n",
         "        let stackedMels = stacked(mels, axis: 0).asType(speakerEncoder.fc.weight.dtype)\n")
     replace("            let speakerEmbed = speakerEmbedding.reshaped(1, 1, -1)\n",
@@ -110,7 +122,7 @@ def apply(path):
             raise ValueError("Previously patched Qwen source failed verification")
         result = patched(original)
         if result != source:
-            if hashlib.sha256(source.encode()).hexdigest() != PREVIOUS_PATCH_SHA:
+            if hashlib.sha256(source.encode()).hexdigest() not in PREVIOUS_PATCH_SHAS:
                 raise ValueError("Previously patched Qwen source failed verification")
             path.chmod(path.stat().st_mode | 0o200)
             path.write_text(result)

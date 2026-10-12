@@ -68,13 +68,24 @@ public enum NativeIO {
   public static func synthesisStage(_ message: String, _ fraction: Double) {
     emit("progress", ["message": message, "fraction": fraction, "synthesis": true])
   }
+  private static let regexLock = NSLock()
+  private static var compiledRegex: [String: NSRegularExpression] = [:]
+  /// Patterns are reused per word and per book block, so each is compiled once.
+  static func compiled(_ pattern: String) -> NSRegularExpression? {
+    regexLock.lock()
+    defer { regexLock.unlock() }
+    if let regex = compiledRegex[pattern] { return regex }
+    guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+    if compiledRegex.count >= 4096 { compiledRegex.removeAll() }
+    compiledRegex[pattern] = regex
+    return regex
+  }
   public static func regex(_ pattern: String, _ text: String) -> [NSTextCheckingResult] {
-    (try? NSRegularExpression(pattern: pattern).matches(
-      in: text, range: NSRange(text.startIndex..., in: text))) ?? []
+    compiled(pattern)?.matches(in: text, range: NSRange(text.startIndex..., in: text)) ?? []
   }
   public static func replace(_ pattern: String, _ text: String, _ replacement: String) -> String {
-    (try? NSRegularExpression(pattern: pattern).stringByReplacingMatches(
-      in: text, range: NSRange(text.startIndex..., in: text), withTemplate: replacement)) ?? text
+    compiled(pattern)?.stringByReplacingMatches(
+      in: text, range: NSRange(text.startIndex..., in: text), withTemplate: replacement) ?? text
   }
   public static func scalarSlice(_ text: String, _ start: Int, _ end: Int) throws -> String {
     let scalars = Array(text.unicodeScalars)

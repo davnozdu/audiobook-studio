@@ -25,9 +25,10 @@ import StudioCore
         throw StudioError("В приложении отсутствуют нативные Metal-ядра")
       }
       GPU.metallib = library
-      // Keep reusable buffers during synthesis, with a bounded idle buffer pool.
-      Memory.cacheLimit = Int(min(UInt64(1024 * 1024 * 1024),
-        max(UInt64(256 * 1024 * 1024), ProcessInfo.processInfo.physicalMemory / 32)))
+      // Keep reusable buffers during synthesis (1/8 of RAM, 512 MB–4 GB): a smaller pool
+      // makes Metal reallocate per token. The pool is cleared when each model is released.
+      Memory.cacheLimit = Int(min(UInt64(4096 * 1024 * 1024),
+        max(UInt64(512 * 1024 * 1024), ProcessInfo.processInfo.physicalMemory / 8)))
       if CommandLine.arguments.contains("--self-check") {
         let resources = URL(fileURLWithPath: CommandLine.arguments.last!)
         let helper = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
@@ -384,6 +385,13 @@ final class Engine {
     defer { NativeProject.cleanupBuildIntermediates(project) }
     NativeIO.emit("estimate", ["characters": NativeIO.objects(manifest["segments"]).reduce(0) { $0 + NativeIO.string($1["text"]).count }])
     let director = NativeDirector(request)
+    // Stage durations go to run.log so slow steps can be measured on the user's Mac.
+    var timings: [String] = []
+    var mark = Date()
+    func lap(_ name: String) {
+      timings.append(name + String(format: " %.1f с", Date().timeIntervalSince(mark)))
+      mark = Date()
+    }
     if NativeIO.objects(manifest["segments"]).contains(where: {
       NativeIO.string($0["speaker"]).isEmpty
     }) {
@@ -406,6 +414,7 @@ final class Engine {
       return try custom(voice) == nil
     }
     let designPath = designNeeded ? try models.ensure(design: true) : basePath
+    lap("роли, инструкции и проверка моделей")
     NativeIO.stage("Нормализация текста · словари и нативный Silero")
     var prepared = manifest
     var rows = segments
@@ -444,6 +453,7 @@ final class Engine {
     }
     prepared["segments"] = rows
     try NativeIO.write(project.appendingPathComponent("source/manifest.json"), prepared)
+    lap("текст и ударения")
     var references: [String: (URL, String)] = [:]
     var design: Qwen3TTSModel?
     for voice in voices where used.contains(NativeIO.string(voice["id"])) {
@@ -493,14 +503,17 @@ final class Engine {
     design = nil
     Memory.clearCache()
     memoryLog("VoiceDesign выгружен")
+    lap("голоса VoiceDesign")
     let (timeline, frames) = try await synthesize(rows: rows, voices: voices,
       references: references, basePath: basePath)
     Memory.clearCache()
     memoryLog("Модель чтения выгружена перед нормализацией и упаковкой")
+    lap("озвучка")
     let raw = project.appendingPathComponent("audio")
     try NativeIO.write(raw.appendingPathComponent("timeline.json"), ["segments": timeline])
     NativeIO.stage("Нормализация громкости по ролям")
     var final = try audio.normalize(project: project, segments: rows, timeline: timeline)
+    lap("громкость")
     if request["music_enabled"] as? Bool ?? true {
       let selected = URL(fileURLWithPath: NativeIO.string(request["music"]))
       guard fm.fileExists(atPath: selected.path) else {
@@ -517,6 +530,7 @@ final class Engine {
       final = try audio.mix(
         final, music: music, percent: request["music_volume"] as? Double ?? 5, project: project,
         total: Double(frames) / 24000)
+      lap("музыка")
     }
     NativeIO.stage("Сборка отдельного M4B и EPUB с синхронным аудио")
     let result = try audio.package(
@@ -524,6 +538,8 @@ final class Engine {
     let external = URL(fileURLWithPath: destination)
     NativeIO.stage("Сохранение аудиокниги и EPUB · " + destination)
     try fm.copyItem(at: result, to: external)
+    lap("M4B, EPUB и копирование")
+    NativeIO.emit("log", ["message": "Время этапов: " + timings.joined(separator: " · ")])
     NativeIO.emit("result", ["path": destination])
     done("Аудиокнига и EPUB сохранены: " + destination, path: project)
   }
@@ -629,7 +645,11 @@ final class Engine {
       ])
       let elapsed = max(0.001, Date().timeIntervalSince(start))
       let weight = max(1, NativeIO.string(row["text"]).count)
-      if !reused { measurements.append((Double(samples.count) / 24000, elapsed, weight)) }
+      if !reused {
+        measurements.append((Double(samples.count) / 24000, elapsed, weight))
+        NativeIO.emit("log", ["message": String(format: "Реплика %@ · %.1f с речи за %.1f с · %.2f×",
+          id, Double(samples.count) / 24000, elapsed, Double(samples.count) / 24000 / elapsed)])
+      }
       if measurements.count > 12 { measurements.removeFirst() }
       completed += weight
       if measurements.isEmpty { continue }
