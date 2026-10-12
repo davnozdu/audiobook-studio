@@ -42,23 +42,46 @@ public struct RemoteJob: Codable, Identifiable {
     }
     public var shortID: String { String(id.prefix(8)) }
     public func status(now: Date = Date()) -> String {
-        var lines = ["\(name) · \(shortID)", phase.title]
-        if !stage.isEmpty { lines.append(stage) }
-        if let started { lines.append("С начала: " + Self.duration((finished ?? now).timeIntervalSince(started))) }
-        if total > 0 { lines.append("Реплики: \(completed)/\(total)") }
+        let icon: String
+        switch phase {
+        case .confirmation: icon = "📩"
+        case .queued: icon = "⏳"
+        case .downloading, .preparing, .synthesis, .uploading: icon = "🔄"
+        case .complete: icon = "✅"
+        case .cancelled: icon = "⏹"
+        case .failed: icon = "⚠️"
+        case .paused: icon = "⏸"
+        }
+        var lines = ["📚 <b>\(Self.escapedHTML(name))</b>", "\(icon) \(Self.escapedHTML(phase.title))"]
+        if !stage.isEmpty { lines.append("🧭 \(Self.escapedHTML(stage))") }
+        if total > 0 {
+            let percent = min(100, max(0, Int(Double(completed) / Double(total) * 100)))
+            let filled = percent / 10
+            lines.append("\(String(repeating: "▰", count: filled))\(String(repeating: "▱", count: 10 - filled))  <b>\(percent)%</b>")
+            lines.append("🗣 Реплики: \(completed) из \(total)")
+        }
+        if let started { lines.append("⏱ С начала: " + Self.duration((finished ?? now).timeIntervalSince(started))) }
         if let eta, eta.isFinite, eta >= 0, phase == .synthesis {
             let remaining = max(0, eta - now.timeIntervalSince(measuredAt ?? now))
-            lines.append("Осталось озвучивания ≈ " + Self.duration(remaining))
-            lines.append("Упаковка и загрузка результата займут дополнительное время.")
-        } else if phase.active { lines.append("Оценка остатка появится по замерам этого этапа.") }
-        if let speed, speed.isFinite { lines.append(String(format: "Скорость озвучки: %.2f×", speed)) }
-        if !error.isEmpty { lines.append(error) }
+            lines.append("⌛ Осталось озвучивания ≈ " + Self.duration(remaining))
+            lines.append("📦 Упаковка и загрузка займут дополнительное время.")
+        } else if phase.active { lines.append("⌛ Оценка остатка появится по замерам этого этапа.") }
+        if let speed, speed.isFinite { lines.append(String(format: "⚡ Скорость озвучки: %.2f×", speed)) }
+        if !error.isEmpty { lines.append("⚠️ \(Self.escapedHTML(error))") }
         if phase == .complete {
             for name in uploads.keys.sorted() {
-                if let link = uploads[name]?.link, !link.isEmpty { lines.append("\(name): \(link)") }
+                if let link = uploads[name]?.link, !link.isEmpty {
+                    lines.append("📥 <a href=\"\(Self.escapedHTML(link))\">\(Self.escapedHTML(name))</a>")
+                }
             }
         }
         return lines.joined(separator: "\n")
+    }
+    public static func escapedHTML(_ value: String) -> String {
+        value.replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
     }
     public static func duration(_ seconds: Double) -> String {
         let n = max(0, Int(min(seconds.isFinite ? seconds : 0, 31_536_000)))
@@ -73,8 +96,9 @@ public struct RemoteButton: Codable, Equatable {
 public struct RemoteReply: Codable, Identifiable {
     public var id = UUID().uuidString
     public var chatID: Int64, text: String, buttons: [[RemoteButton]]
-    public init(_ chatID: Int64, _ text: String, _ buttons: [[RemoteButton]] = []) {
-        self.chatID = chatID; self.text = text; self.buttons = buttons
+    public var parseMode: String?
+    public init(_ chatID: Int64, _ text: String, _ buttons: [[RemoteButton]] = [], parseMode: String? = nil) {
+        self.chatID = chatID; self.text = text; self.buttons = buttons; self.parseMode = parseMode
     }
 }
 public struct RemoteState: Codable {

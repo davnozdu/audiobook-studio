@@ -98,6 +98,7 @@ public final class TelegramClient {
     }
     public func send(_ reply: RemoteReply) async throws {
         var body: [String: Any] = ["chat_id": reply.chatID, "text": String(reply.text.prefix(3900)), "link_preview_options": ["is_disabled": true]]
+        if let parseMode = reply.parseMode { body["parse_mode"] = parseMode }
         if !reply.buttons.isEmpty {
             body["reply_markup"] = ["inline_keyboard": reply.buttons.map { $0.map { ["text": $0.text, "callback_data": $0.data] } }]
         }

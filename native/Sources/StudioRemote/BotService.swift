@@ -111,9 +111,11 @@ import Combine
             config.connections[provider.rawValue] = UUID().uuidString; try saveConfig(); message = provider.title + " подключён"
         } catch { message = (error as? RemoteError)?.message ?? "Не удалось подключить хранилище" }
     }
-    func reply(_ text: String, chat: Int64, buttons: [[RemoteButton]] = []) { state.outbox.append(RemoteReply(chat, text, buttons)) }
+    func reply(_ text: String, chat: Int64, buttons: [[RemoteButton]] = [], html: Bool = false) {
+        state.outbox.append(RemoteReply(chat, text, buttons, parseMode: html ? "HTML" : nil))
+    }
     func buttons(_ job: RemoteJob) -> [[RemoteButton]] {
-        [[RemoteButton("Статус", "status:" + job.id), RemoteButton("Отменить", "cancel:" + job.id)]]
+        [[RemoteButton("📊 Статус", "status:" + job.id), RemoteButton("⏹ Отменить", "cancel:" + job.id)]]
     }
     public func handle(_ update: [String: Any]) throws {
         let callback = update["callback_query"] as? [String: Any]
@@ -126,7 +128,7 @@ import Combine
         if state.ownerID == nil {
             guard !pairing.isEmpty, Date() < pairingExpires, text == "/start " + pairing else { return }
             state.ownerID = id; pairing = ""; pairingLink = ""
-            reply("Подключено. Отправьте EPUB до 20 МБ. Я спрошу перед озвучиванием. /status — статус, /queue — очередь, /cancel — отмена.", chat: id)
+            reply("✨ <b>Бот подключён!</b>\n\n📚 Пришлите EPUB до 20 МБ — перед озвучиванием я попрошу подтверждение.\n\n📊 /status · 📋 /queue · ➕ /add · ⏹ /cancel · 🔗 /links", chat: id, html: true)
             return
         }
         guard state.ownerID == id else { return }
@@ -142,7 +144,7 @@ import Combine
                 if state.confirm(job.id, account: account) { reply("«\(job.name)» добавлена в очередь. Хранилище: \(job.provider.title).", chat: id, buttons: buttons(state.jobs[i])) }
             case "reject":
                 if job.phase == .confirmation { state.jobs[i].phase = .cancelled; state.jobs[i].finished = Date(); reply("Книга не будет озвучена.", chat: id) }
-            case "status": reply(job.status(), chat: id, buttons: buttons(job))
+            case "status": reply(job.status(), chat: id, buttons: buttons(job), html: true)
             case "cancel": askCancel(job)
             case "stop": cancel(job.id)
             default: break
@@ -174,8 +176,8 @@ import Combine
             let job = state.receive(chatID: id, messageID: messageID, fileID: fileID, name: String(name.prefix(240)), provider: config.provider)
             let current = state.active ?? state.next
             let queueText = current.map { "Сейчас: «" + $0.name + "» · " + $0.phase.title + ".\nНовая книга будет ждать в очереди. /cancel — остановить текущую.\n" } ?? ""
-            reply(queueText + "«\(job.name)»\nНачать озвучивание в автоматическом режиме?\nРезультат: \(job.provider.title).", chat: id,
-                  buttons: [[RemoteButton("Да", "run:" + job.id), RemoteButton("Нет", "reject:" + job.id)]])
+            reply(queueText + "📚 «\(job.name)»\n\n🎙 Начать озвучивание в автоматическом режиме?\n☁️ Результат: \(job.provider.title).", chat: id,
+                  buttons: [[RemoteButton("✅ Да, начать", "run:" + job.id), RemoteButton("✖️ Нет", "reject:" + job.id)]])
             return
         }
         switch RemoteState.command(text) {
@@ -187,18 +189,18 @@ import Combine
         case "status":
             let waiting = state.jobs.filter { $0.phase == .queued }.count
             reply("Общий статус: " + (state.active == nil ? "озвучивание сейчас не идёт" : "идёт обработка книги") + ".\nВ очереди: \(waiting).\nФайлы в облаке хранятся до вашего ручного удаления. /links — готовые книги со ссылками.", chat: id)
-            if let job = state.active ?? state.next { reply(job.status(), chat: id, buttons: buttons(job)) }
-            else if let job = state.jobs.last, job.phase != .complete { reply(job.status(), chat: id, buttons: buttons(job)) }
-            for job in state.jobs.filter({ $0.phase == .complete }).suffix(3).reversed() { reply(job.status(), chat: id) }
+            if let job = state.active ?? state.next { reply(job.status(), chat: id, buttons: buttons(job), html: true) }
+            else if let job = state.jobs.last, job.phase != .complete { reply(job.status(), chat: id, buttons: buttons(job), html: true) }
+            for job in state.jobs.filter({ $0.phase == .complete }).suffix(3).reversed() { reply(job.status(), chat: id, html: true) }
             if state.jobs.isEmpty { reply("Книг пока нет. Отправьте EPUB.", chat: id) }
         case "links":
             let completed = state.jobs.filter { $0.phase == .complete }
             if completed.isEmpty { reply("Пока нет полностью собранных и загруженных книг. /status — текущая обработка.", chat: id) }
-            for job in completed.suffix(10).reversed() { reply(job.status(), chat: id) }
+            for job in completed.suffix(10).reversed() { reply(job.status(), chat: id, html: true) }
         case "queue":
             let jobs = state.jobs.filter { $0.phase != .complete && $0.phase != .cancelled }
-            reply(jobs.isEmpty ? "Очередь пуста." : jobs.map { "\($0.shortID) · \($0.name) · \($0.phase.title)" }.joined(separator: "\n"), chat: id,
-                  buttons: jobs.prefix(20).map { job in [RemoteButton(String(job.name.prefix(30)), "status:" + job.id), RemoteButton("Отменить", "cancel:" + job.id)] })
+            reply(jobs.isEmpty ? "📭 Очередь пуста." : "📚 <b>Очередь</b>\n\n" + jobs.map { "• \(RemoteJob.escapedHTML($0.name)) · \(RemoteJob.escapedHTML($0.phase.title))" }.joined(separator: "\n"), chat: id,
+                  buttons: jobs.prefix(20).map { job in [RemoteButton(String(job.name.prefix(30)), "status:" + job.id), RemoteButton("⏹ Отменить", "cancel:" + job.id)] }, html: true)
         case "cancel":
             if let job = state.active ?? state.next { askCancel(job) } else { reply("Сейчас нечего отменять.", chat: id) }
         default:
@@ -207,7 +209,7 @@ import Combine
         }
     }
     func askCancel(_ job: RemoteJob) {
-        guard job.phase != .complete && job.phase != .cancelled else { reply(job.status(), chat: job.chatID); return }
+        guard job.phase != .complete && job.phase != .cancelled else { reply(job.status(), chat: job.chatID, html: true); return }
         reply("Отменить обработку «\(job.name)»? Остальные книги останутся в очереди.", chat: job.chatID,
               buttons: [[RemoteButton("Да, отменить", "stop:" + job.id), RemoteButton("Продолжать", "status:" + job.id)]])
     }
@@ -239,14 +241,14 @@ import Combine
                 try await execute(id)
                 try Task.checkCancellation()
                 try mutate(id) { $0.phase = .complete; $0.finished = Date(); $0.stage = "M4B и EPUB загружены и проверены" }
-                let j = try job(id); reply(j.status(), chat: j.chatID); try persist()
+                let j = try job(id); reply(j.status(), chat: j.chatID, html: true); try persist()
             } catch {
                 let cancelled = Task.isCancelled
                 do {
                     try mutate(id) { $0.phase = self.shuttingDown ? .paused : cancelled ? .cancelled : .failed; $0.finished = Date(); $0.eta = nil
                         $0.error = cancelled ? "" : (error as? RemoteError)?.message ?? "Обработка не завершена. Файлы сохранены." }
                     let j = try job(id)
-                    if !shuttingDown { reply(j.status(), chat: j.chatID, buttons: [[RemoteButton("Продолжить", "run:" + id), RemoteButton("Статус", "status:" + id)]]); try persist() }
+                    if !shuttingDown { reply(j.status(), chat: j.chatID, buttons: [[RemoteButton("▶️ Продолжить", "run:" + id), RemoteButton("📊 Статус", "status:" + id)]], html: true); try persist() }
                 } catch { failStorage(error) }
             }
         }
