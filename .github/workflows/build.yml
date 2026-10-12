@@ -43,7 +43,9 @@ jobs:
         with:
           path: .build-tools/native-build
           key: studio-native-macos26-${{ hashFiles('native/Package.swift') }}-${{ github.run_id }}
-          restore-keys: studio-native-macos26-${{ hashFiles('native/Package.swift') }}-
+          restore-keys: |
+            studio-native-macos26-${{ hashFiles('native/Package.swift') }}-
+            studio-native-macos26-
       - name: Build standalone app
         run: bash scripts/package.sh
       - name: Save native compilation cache

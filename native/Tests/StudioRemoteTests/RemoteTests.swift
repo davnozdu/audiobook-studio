@@ -21,7 +21,7 @@ final class MockHTTP: URLProtocol {
     }
     override func stopLoading() {}
 }
-@MainActor final class RemoteTests: XCTestCase {
+final class RemoteTests: XCTestCase {
     func folder() throws -> URL {
         let u = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: u, withIntermediateDirectories: true); return u
@@ -163,6 +163,19 @@ final class MockHTTP: URLProtocol {
         let runner = RemoteEngine(); var events: [String] = []
         try await runner.run(executable: script, request: ["action": "fixture"], temporary: f.appendingPathComponent("temp")) { events.append($0["type"] as? String ?? "") }
         XCTAssertEqual(events, ["result"]); XCTAssertFalse(runner.running); XCTAssertFalse(FileManager.default.fileExists(atPath: f.appendingPathComponent("temp").path))
+    }
+
+    @MainActor func testCancelledEngineTerminatesBeforeReservationRelease() async throws {
+        let f = try folder(); defer { try? FileManager.default.removeItem(at: f) }
+        let script = f.appendingPathComponent("wait.sh")
+        try Data("#!/bin/sh\ncat >/dev/null\nexec /bin/sleep 20\n".utf8).write(to: script)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
+        let runner = RemoteEngine()
+        let task = Task { try await runner.run(executable: script, request: ["fixture": true], temporary: f.appendingPathComponent("temp")) { _ in } }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertTrue(runner.running); task.cancel()
+        do { try await task.value; XCTFail("Cancelled engine must throw") } catch is CancellationError {} catch { XCTFail("Wrong cancellation error") }
+        XCTAssertFalse(runner.running); XCTAssertFalse(FileManager.default.fileExists(atPath: f.appendingPathComponent("temp").path))
     }
 
 }
