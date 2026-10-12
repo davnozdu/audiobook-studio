@@ -1,13 +1,20 @@
 # Short-line batching and large-book assembly
 
 The pinned Qwen Swift source is extended by `scripts/native/Qwen3TTSStudioBatch.swift`.
-One GPU batch contains at most four short, similarly sized lines of one speaker.
+One GPU batch contains at most four short, similarly sized lines; each lane has its
+own voice, so characters may share a batch. Voice-only ICL pieces (reference text and
+codec embeddings, codec prefix with speaker embedding) are built once per character.
 Inputs use the official offline ICL layout, left padding, attention masks and
-per-lane positions. Each lane owns its sampling key, token history, EOS flag and
-codec frames. Finished lanes stop collecting frames; token-limit failures are
-retried independently while accepted neighbours are saved immediately.
-Codec decoding is sequential, using the shared decoder safely. Reference audio
-is cut by its exact codec frame count, including valid zero-valued codec IDs.
+per-lane positions. Token choice is vectorised over [batch, vocab] with the same
+steps as upstream `sampleToken` (suppression, repetition penalty, EOS-preserving
+top-k, temperature); one random key per step serves all lanes. Repetition history
+and EOS flags live on the GPU, so the next step is queued (`asyncEval`) before the
+previous step's tokens are read. Finished lanes stop collecting frames; token-limit
+failures are retried independently while accepted neighbours are saved immediately.
+Codec decoding is sequential, using the shared decoder safely. Each line is decoded
+after the last 25 reference frames (the official `chunked_decode` left context)
+instead of the whole reference; the context audio is cut by its exact frame count,
+including valid zero-valued codec IDs. Every batch logs MLX peak memory and system swap.
 
 References: [Qwen model](https://github.com/QwenLM/Qwen3-TTS/blob/main/qwen_tts/core/models/modeling_qwen3_tts.py),
 [Qwen inference](https://github.com/QwenLM/Qwen3-TTS/blob/main/qwen_tts/inference/qwen3_tts_model.py),

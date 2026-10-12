@@ -1,22 +1,21 @@
 import Foundation
 
 public enum SpeechBatch {
-  /// Only short, similarly sized lines of ONE speaker share a batch. Book order is
-  /// restored by segment ID afterwards; scheduling never joins or rewrites text.
+  /// Only short, similarly sized lines share a batch; each lane carries its own voice,
+  /// so speakers may mix. Book order is restored by segment ID afterwards; scheduling
+  /// never joins or rewrites text.
   public static func plan(_ rows: [Object], pending: Set<Int>, maximum: Int = 4) throws -> [[Int]] {
     guard (1...4).contains(maximum), pending.allSatisfy(rows.indices.contains) else {
       throw StudioError("Некорректный план пакетной озвучки")
     }
     var remaining = pending, jobs: [[Int]] = []
     for first in rows.indices where remaining.contains(first) {
-      let speaker = NativeIO.string(rows[first]["speaker"])
       let count = SpeechRecovery.text(NativeIO.string(rows[first]["tts_text"])).count
       var indices = [first]
       if maximum > 1, count <= 96 {
         for i in (first + 1)..<min(rows.count, first + 65) where remaining.contains(i) {
           let size = SpeechRecovery.text(NativeIO.string(rows[i]["tts_text"])).count
-          if NativeIO.string(rows[i]["speaker"]) == speaker, size <= 96,
-            max(0, size - 1) / 24 == max(0, count - 1) / 24 {
+          if size <= 96, max(0, size - 1) / 24 == max(0, count - 1) / 24 {
             indices.append(i)
             if indices.count == maximum { break }
           }

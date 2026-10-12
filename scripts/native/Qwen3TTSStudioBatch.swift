@@ -64,72 +64,209 @@ public enum StudioQwenBatchLayout {
     }
 }
 
+/// Per-voice ICL pieces that do not depend on the target text. Built once per
+/// character; each line then only embeds its own text tokens.
+public final class StudioQwenSpeaker: @unchecked Sendable {
+    public let conditioning: Qwen3TTSModel.Qwen3TTSReferenceConditioning
+    let referenceText: MLXArray, referenceCodec: MLXArray, prefix: MLXArray
+    let ttsEos: MLXArray, ttsPad: MLXArray, codecPad: MLXArray
+    /// Last reference frames used as decoder context, [1, frames, codebooks].
+    let decoderContext: MLXArray
+    init(conditioning: Qwen3TTSModel.Qwen3TTSReferenceConditioning, referenceText: MLXArray,
+         referenceCodec: MLXArray, prefix: MLXArray, ttsEos: MLXArray, ttsPad: MLXArray,
+         codecPad: MLXArray, decoderContext: MLXArray) {
+        self.conditioning = conditioning; self.referenceText = referenceText
+        self.referenceCodec = referenceCodec; self.prefix = prefix
+        self.ttsEos = ttsEos; self.ttsPad = ttsPad; self.codecPad = codecPad
+        self.decoderContext = decoderContext
+    }
+}
+
+/// Vectorised token choice for all lanes at once: same steps as Qwen3TTSModel.sampleToken
+/// (suppression, repetition penalty, EOS-preserving top-k, temperature) on [batch, vocab].
+public enum StudioQwenSampler {
+    /// [1, vocab] additive mask: 0 for allowed tokens, -inf for suppressed ones.
+    public static func suppression(vocab: Int, tokens: [Int]) -> MLXArray {
+        var values = [Float](repeating: 0, count: vocab)
+        for token in tokens where (0..<vocab).contains(token) { values[token] = -Float.infinity }
+        return MLXArray(values).reshaped(1, vocab)
+    }
+
+    /// logits [batch, time, vocab] -> tokens [batch, 1] (Int32). Finished lanes get `fill`.
+    public static func sample(_ logits: MLXArray, finished: MLXArray, fill: Int32,
+        temperature: Float, topK: Int, suppress: MLXArray? = nil,
+        seen: MLXArray? = nil, repetitionPenalty: Float = 1, eos: Int? = nil,
+        key: MLXArray) -> MLXArray {
+        var scores = logits[0..., (-1)..., 0...].squeezed(axis: 1).asType(.float32)
+        let batch = scores.dim(0), vocab = scores.dim(1)
+        if let suppress { scores = scores + suppress }
+        if let seen, repetitionPenalty != 1 {
+            let penalised = which(scores .< 0, scores * repetitionPenalty, scores / repetitionPenalty)
+            scores = which(seen .> 0, penalised, scores)
+        }
+        var tokens: MLXArray
+        if temperature <= 0 {
+            tokens = argMax(scores, axis: -1)
+        } else {
+            // Keep the EOS logit out of top-k so the utterance can always finish.
+            let eosLogit = eos.map { scores[0..., $0 ..< ($0 + 1)] }
+            if topK > 0, topK < vocab {
+                let dropped = argPartition(-scores, kth: topK - 1, axis: -1)[0..., topK...]
+                scores = putAlong(scores, dropped, values: MLXArray.full(dropped.shape,
+                    values: MLXArray(-Float.infinity), dtype: .float32), axis: -1)
+            }
+            if let eos, let eosLogit {
+                let isEOS = MLXArray(0 ..< Int32(vocab)).reshaped(1, vocab) .== Int32(eos)
+                scores = which(isEOS, eosLogit, scores)
+            }
+            tokens = categorical(scores / temperature, key: key)
+        }
+        tokens = which(finished, MLXArray(fill), tokens.asType(.int32))
+        return tokens.reshaped(batch, 1)
+    }
+
+    /// Mark accepted primary tokens (not EOS, lane still open) for the repetition penalty.
+    public static func remember(_ seen: MLXArray, tokens: MLXArray, finished: MLXArray, eos: Int) -> MLXArray {
+        let vocab = seen.dim(1)
+        let accepted = logicalNot(finished) .&& (tokens.reshaped(-1) .!= Int32(eos))
+        let hit = (MLXArray(0 ..< Int32(vocab)).reshaped(1, vocab) .== tokens.reshaped(-1, 1))
+            .&& accepted.reshaped(-1, 1)
+        return maximum(seen, hit.asType(.float32))
+    }
+}
+
 extension Qwen3TTSModel {
-    /// One shared conditioning object means one speaker in this batch. Each lane
-    /// gets its own random key, repetition history, EOS flag and codec sequence.
-    /// nil is an unfinished lane; completed neighbours can still be saved/reused.
-    public func studioGenerateBatch(texts: [String], conditioning: Qwen3TTSReferenceConditioning,
+    /// Official decoder chunk overlap (chunked_decode left_context_size=25 frames).
+    public static let studioDecoderContextFrames = 25
+
+    public func studioSpeaker(_ conditioning: Qwen3TTSReferenceConditioning) throws -> StudioQwenSpeaker {
+        guard let talkerConfig = config.talkerConfig, conditioning.speakerEmbedding != nil else {
+            throw AudioGenerationError.invalidInput("Unconditioned Qwen voice")
+        }
+        let ttsTokens = MLXArray([Int32(config.ttsBosTokenId), Int32(config.ttsEosTokenId),
+            Int32(config.ttsPadTokenId)]).reshaped(1, 3)
+        let ttsEmbeds = talker.textProjection(talker.getTextEmbeddings()(ttsTokens))
+        let ttsBos = ttsEmbeds[0..., 0 ..< 1, 0...], ttsEos = ttsEmbeds[0..., 1 ..< 2, 0...]
+        let ttsPad = ttsEmbeds[0..., 2 ..< 3, 0...]
+        let referenceText = talker.textProjection(talker.getTextEmbeddings()(conditioning.referenceTextTokenIDs))
+        // Same as the upstream private codecEmbedIcl.
+        let refCodes = conditioning.referenceSpeechCodes
+        var refCodec = talker.getInputEmbeddings()(refCodes[0..., 0, 0...])
+        for i in 0 ..< max(0, talkerConfig.numCodeGroups - 1) where i + 1 < refCodes.dim(1) {
+            refCodec = refCodec + talker.codePredictor.codecEmbedding[i](refCodes[0..., i + 1, 0...])
+        }
+        let codecBos = talker.getInputEmbeddings()(MLXArray([Int32(talkerConfig.codecBosId)]).reshaped(1, 1))
+        refCodec = concatenated([codecBos, refCodec], axis: 1)
+        let referenceCodec = refCodec + broadcast(ttsPad, to: [1, refCodec.dim(1), ttsPad.dim(-1)])
+        let codecPad = talker.getInputEmbeddings()(MLXArray([Int32(talkerConfig.codecPadId)]).reshaped(1, 1))
+        let prefill: [Int32] = if let language = conditioning.codecLanguageID {
+            [Int32(talkerConfig.codecThinkId), Int32(talkerConfig.codecThinkBosId), Int32(language), Int32(talkerConfig.codecThinkEosId)]
+        } else {
+            [Int32(talkerConfig.codecNothinkId), Int32(talkerConfig.codecThinkBosId), Int32(talkerConfig.codecThinkEosId)]
+        }
+        var codecPrefix = talker.getInputEmbeddings()(MLXArray(prefill).reshaped(1, -1))
+        let codecSuffix = talker.getInputEmbeddings()(
+            MLXArray([Int32(talkerConfig.codecPadId), Int32(talkerConfig.codecBosId)]).reshaped(1, 2))
+        let speaker = conditioning.speakerEmbedding!.asType(codecPrefix.dtype).reshaped(1, 1, -1)
+        codecPrefix = concatenated([codecPrefix, speaker, codecSuffix], axis: 1)
+        let padCount = codecPrefix.dim(1) - 2
+        var prefix = concatenated([broadcast(ttsPad, to: [1, padCount, ttsPad.dim(-1)]), ttsBos], axis: 1)
+        prefix = prefix + codecPrefix[0..., 0 ..< (codecPrefix.dim(1) - 1), 0...]
+        let reference = refCodes.transposed(0, 2, 1)
+        let context = min(Self.studioDecoderContextFrames, reference.dim(1))
+        let decoderContext = reference[0..., (reference.dim(1) - context)..., 0...]
+        eval(referenceText, referenceCodec, prefix, ttsEos, ttsPad, codecPad, decoderContext)
+        return StudioQwenSpeaker(conditioning: conditioning, referenceText: referenceText,
+            referenceCodec: referenceCodec, prefix: prefix, ttsEos: ttsEos, ttsPad: ttsPad,
+            codecPad: codecPad, decoderContext: decoderContext)
+    }
+
+    /// Offline ICL layout identical to prepareICLGenerationInputs, reusing cached voice pieces.
+    func studioInput(text: String, speaker: StudioQwenSpeaker) throws -> MLXArray {
+        guard let tokenizer else { throw AudioGenerationError.modelNotInitialized("Text tokenizer not loaded") }
+        let chat = "<|im_start|>assistant\n\(text)<|im_end|>\n<|im_start|>assistant\n"
+        let ids = MLXArray(tokenizer.encode(text: chat).map { Int32($0) }).reshaped(1, -1)
+        let count = ids.dim(1), start = min(3, count), end = max(start, count - 5)
+        let embed = { (tokens: MLXArray) in self.talker.textProjection(self.talker.getTextEmbeddings()(tokens)) }
+        let textEmbed = concatenated([speaker.referenceText, embed(ids[0..., start ..< end]), speaker.ttsEos], axis: 1)
+        let textWithPad = textEmbed + broadcast(speaker.codecPad, to: [1, textEmbed.dim(1), speaker.codecPad.dim(-1)])
+        return concatenated([embed(ids[0..., 0 ..< 3]), speaker.prefix, textWithPad, speaker.referenceCodec], axis: 1)
+    }
+
+    /// Each lane has its own voice, text, EOS flag and codec sequence; the GPU runs one
+    /// batch dimension. nil is an unfinished lane; completed neighbours stay usable.
+    public func studioGenerateBatch(texts: [String], speakers: [StudioQwenSpeaker],
         seeds: [UInt64], generationParameters: GenerateParameters,
         timing: ((String, Double) -> Void)? = nil) async throws -> [[Float]?] {
-        guard (1...4).contains(texts.count), texts.count == seeds.count,
+        guard (1...4).contains(texts.count), texts.count == seeds.count, texts.count == speakers.count,
               texts.allSatisfy({ !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }),
-              tokenizer != nil, let speechTokenizer, let talkerConfig = config.talkerConfig,
-              conditioning.speakerEmbedding != nil else {
+              tokenizer != nil, speechTokenizer != nil, let talkerConfig = config.talkerConfig else {
             throw AudioGenerationError.invalidInput("Invalid or unconditioned Qwen batch")
         }
-        let maxTokens = generationParameters.maxTokens ?? 4096
+        let parameters = generationParameters
+        guard parameters.topP >= 1, parameters.minP <= 0 else {
+            throw AudioGenerationError.invalidInput("Batch sampler supports top-k and temperature only")
+        }
+        let maxTokens = parameters.maxTokens ?? 4096
         guard maxTokens > 0 else { throw AudioGenerationError.invalidInput("Invalid batch audio token limit") }
         let started = Date()
-        let prepared = try texts.map { try prepareICLGenerationInputs(text: $0, conditioning: conditioning) }
-        let lengths = prepared.map { $0.0.dim(1) }
-        let pad = concatenated(prepared.map { $0.2 }, axis: 0)
-        var input = StudioQwenBatchLayout.inputs(prepared.map { $0.0 })
+        let prepared = try zip(texts, speakers).map { try studioInput(text: $0, speaker: $1) }
+        let lengths = prepared.map { $0.dim(1) }
+        let pad = concatenated(speakers.map { $0.ttsPad }, axis: 0)
+        var input = StudioQwenBatchLayout.inputs(prepared)
         eval(input, pad)
         timing?("input", Date().timeIntervalSince(started))
+
+        let lanes = texts.count, eos = talkerConfig.codecEosTokenId
+        let vocab = talkerConfig.vocabSize
+        let special = (vocab - 1024 ..< vocab).filter { $0 != eos }
+        let suppressMain = StudioQwenSampler.suppression(vocab: vocab, tokens: special)
+        let suppressEarly = StudioQwenSampler.suppression(vocab: vocab, tokens: special + [eos])
+        let cache = talker.makeCache(), codeCache = talker.codePredictor.makeCache()
+        var key = MLX.key(seeds.reduce(UInt64(0x9E37_79B9_7F4A_7C15)) { $0 &* 1_000_003 &+ $1 })
+        var finished = MLXArray.zeros([lanes], type: Bool.self)
+        var seen = MLXArray.zeros([lanes, vocab], type: Float.self)
+        var codes = [[MLXArray]](repeating: [], count: lanes)
+        var stops = StudioQwenBatchStops(count: lanes)
         let generationStart = Date()
         var firstStepTime: Double = 0
-        let cache = talker.makeCache(), codeCache = talker.codePredictor.makeCache()
-        var keys = seeds.map { MLX.key($0) }
-        var histories = [[Int]](repeating: [], count: texts.count)
-        var codes = [[MLXArray]](repeating: [], count: texts.count)
-        var stops = StudioQwenBatchStops(count: texts.count)
-        let eos = talkerConfig.codecEosTokenId
-        let special = (talkerConfig.vocabSize - 1024..<talkerConfig.vocabSize).filter { $0 != eos }
 
-        func sample(_ logits: MLXArray, lane: Int, primary: Bool, step: Int) -> MLXArray {
-            if stops.finished[lane] {
-                return MLXArray([Int32(primary ? talkerConfig.codecPadId : 0)]).reshaped(1, 1)
+        // Read one step's tokens on the CPU; true when every lane has finished.
+        func collect(_ token: MLXArray, _ frame: MLXArray, step: Int) -> Bool {
+            let ids = token.asArray(Int32.self)
+            if step == 0 { firstStepTime = Date().timeIntervalSince(generationStart) }
+            let accept = stops.advance(ids, eos: eos)
+            for lane in 0 ..< lanes where accept[lane] {
+                codes[lane].append(frame[lane ..< (lane + 1)])
             }
-            let (nextKey, drawKey) = MLX.split(key: keys[lane])
-            keys[lane] = nextKey
-            // Official Qwen min_new_tokens=2: EOS is unavailable for the first 2 frames.
-            let blocked = primary ? special + (step < 2 ? [eos] : []) : nil
-            return sampleToken(logits[lane..<(lane + 1)],
-                temperature: generationParameters.temperature,
-                topP: generationParameters.topP, topK: generationParameters.topK,
-                repetitionPenalty: primary ? (generationParameters.repetitionPenalty ?? 1.05) : 1,
-                generatedTokens: primary ? histories[lane] : nil,
-                suppressTokens: blocked, eosTokenId: primary ? eos : nil,
-                minP: generationParameters.minP, randomKey: drawKey)
+            return stops.finished.allSatisfy { $0 }
         }
 
-        for step in 0..<maxTokens {
+        // The next step is queued on the GPU before the previous step's tokens are read,
+        // so CPU bookkeeping overlaps model work. Lane state lives on the GPU.
+        var waiting: (token: MLXArray, frame: MLXArray, step: Int)?
+        var done = false
+        for step in 0 ..< maxTokens {
             try Task.checkCancellation()
             let (logits, hidden) = talker(input,
                 positionIds: StudioQwenBatchLayout.positions(lengths: lengths, step: step),
                 mask: StudioQwenBatchLayout.mask(lengths: lengths, step: step).asType(input.dtype), cache: cache)
-            let nextToken = concatenated(texts.indices.map { sample(logits, lane: $0, primary: true, step: step) }, axis: 0)
+            var draws = MLX.split(key: key, into: talkerConfig.numCodeGroups + 1)
+            key = draws.removeLast()
+            let nextToken = StudioQwenSampler.sample(logits, finished: finished, fill: Int32(talkerConfig.codecPadId),
+                temperature: parameters.temperature, topK: parameters.topK,
+                suppress: step < 2 ? suppressEarly : suppressMain, seen: seen,
+                repetitionPenalty: parameters.repetitionPenalty ?? 1.05, eos: eos, key: draws[0])
             var codeTokens = [nextToken]
             let codeHidden = hidden[0..., (-1)..., 0...]
             for item in codeCache { _ = item.trim(item.offset) }
-            for group in 0..<(talkerConfig.numCodeGroups - 1) {
+            for group in 0 ..< (talkerConfig.numCodeGroups - 1) {
                 let codeInput = group == 0
                     ? concatenated([codeHidden, talker.getInputEmbeddings()(nextToken)], axis: 1)
                     : talker.codePredictor.codecEmbedding[group - 1](codeTokens.last!)
                 let (predicted, _, _) = talker.codePredictor(codeInput, cache: codeCache, generationStep: group)
-                codeTokens.append(concatenated(texts.indices.map {
-                    sample(predicted, lane: $0, primary: false, step: step)
-                }, axis: 0))
+                codeTokens.append(StudioQwenSampler.sample(predicted, finished: finished, fill: 0,
+                    temperature: parameters.temperature, topK: parameters.topK, key: draws[group + 1]))
             }
             let frame = concatenated(codeTokens, axis: 1)
             var embedding = talker.getInputEmbeddings()(nextToken)
@@ -137,33 +274,33 @@ extension Qwen3TTSModel {
                 embedding = embedding + talker.codePredictor.codecEmbedding[i](token)
             }
             input = pad + embedding
-            eval(input, frame, nextToken)
-            if step == 0 { firstStepTime = Date().timeIntervalSince(generationStart) }
-            let ids = nextToken.asArray(Int32.self)
-            let accept = stops.advance(ids, eos: eos)
-            for lane in texts.indices where accept[lane] {
-                histories[lane].append(Int(ids[lane]))
-                codes[lane].append(frame[lane..<(lane + 1)])
+            seen = StudioQwenSampler.remember(seen, tokens: nextToken, finished: finished, eos: eos)
+            finished = finished .|| (nextToken.reshaped(-1) .== Int32(eos))
+            asyncEval(input, frame, nextToken, seen, finished)
+            if let previous = waiting, collect(previous.token, previous.frame, step: previous.step) {
+                done = true; break
             }
-            if stops.finished.allSatisfy({ $0 }) { break }
+            waiting = (nextToken, frame, step)
         }
+        if !done, let previous = waiting { _ = collect(previous.token, previous.frame, step: previous.step) }
         timing?("first_step", firstStepTime)
         timing?("remaining_tokens", max(0, Date().timeIntervalSince(generationStart) - firstStepTime))
         try Task.checkCancellation()
+
         let decodeStart = Date()
-        let reference = conditioning.referenceSpeechCodes.transposed(0, 2, 1)
-        let referenceFrames = reference.dim(1) * speechTokenizer.decodeUpsampleRate
-        var output = [[Float]?](repeating: nil, count: texts.count)
-        for lane in texts.indices where stops.finished[lane] && !codes[lane].isEmpty {
+        let upsample = speechTokenizer!.decodeUpsampleRate
+        var output = [[Float]?](repeating: nil, count: lanes)
+        for lane in 0 ..< lanes where stops.finished[lane] && !codes[lane].isEmpty {
             try Task.checkCancellation()
-            let target = stacked(codes[lane], axis: 1)
-            let joined = concatenated([reference, target], axis: 1)
+            // Decode with a short reference tail as left context, then drop it.
+            let context = speakers[lane].decoderContext
+            let joined = concatenated([context, stacked(codes[lane], axis: 1)], axis: 1)
             let audio = decodeChunk(joined)
-            let expected = joined.dim(1) * speechTokenizer.decodeUpsampleRate
-            guard audio.dim(0) == expected, referenceFrames < expected else {
+            let contextFrames = context.dim(1) * upsample, expected = joined.dim(1) * upsample
+            guard audio.dim(0) == expected, contextFrames < expected else {
                 throw AudioGenerationError.invalidInput("Qwen batch decoder lost codec frames in lane \(lane)")
             }
-            let spoken = audio[referenceFrames...]
+            let spoken = audio[contextFrames...]
             eval(spoken)
             output[lane] = spoken.asArray(Float.self)
         }
@@ -237,6 +374,22 @@ extension Qwen3TTSModel {
         let logits = MLXArray([Float(0.2), 0.7, -0.1, 0.4])
         let a = lengths.indices.map { MLX.categorical(logits, key: MLX.key(UInt64(100 + $0))).item(Int32.self) }
         let b = lengths.indices.reversed().map { MLX.categorical(logits, key: MLX.key(UInt64(100 + $0))).item(Int32.self) }.reversed()
+        // Vectorised sampler: suppression, repetition penalty and finished lanes per row.
+        let rows = MLXArray([Float(0.1), 3.0, 0.2, 2.9, 0.0, 0.0,
+                             Float(2.0), 0.1, 1.95, 0.0, 0.0, 0.0,
+                             Float(0.0), 0.0, 0.0, 0.0, 5.0, 0.0]).reshaped(3, 1, 6)
+        let seenRows = MLXArray([Float](repeating: 0, count: 6) + [1, 0, 0, 0, 0, 0] + [Float](repeating: 0, count: 6)).reshaped(3, 6)
+        let picked = StudioQwenSampler.sample(rows, finished: MLXArray([false, false, true]), fill: 9,
+            temperature: 0, topK: 0, suppress: StudioQwenSampler.suppression(vocab: 6, tokens: [1]),
+            seen: seenRows, repetitionPenalty: 1.05, key: MLX.key(1)).asArray(Int32.self)
+        let sampled = StudioQwenSampler.sample(rows, finished: MLXArray([false, false, false]), fill: 9,
+            temperature: 0.01, topK: 1, key: MLX.key(2)).asArray(Int32.self)
+        let remembered = StudioQwenSampler.remember(MLXArray.zeros([3, 6], type: Float.self),
+            tokens: MLXArray([Int32(2), 5, 4]).reshaped(3, 1), finished: MLXArray([false, false, true]), eos: 5)
+        guard picked == [3, 2, 9], sampled == [1, 0, 4],
+              remembered.asArray(Float.self) == [0, 0, 1, 0, 0, 0] + [Float](repeating: 0, count: 12) else {
+            throw AudioGenerationError.invalidInput("Qwen batch sampler chose a suppressed, penalised or finished-lane token")
+        }
         guard a == Array(b), maxError < 0.002 else {
             throw AudioGenerationError.invalidInput("Qwen batch differs from independent numerical execution: \(maxError)")
         }

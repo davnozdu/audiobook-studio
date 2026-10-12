@@ -106,7 +106,9 @@ final class CoreTests: XCTestCase {
     XCTAssertEqual(Set(jobs.flatMap { $0 }), pending)
     XCTAssertEqual(jobs.flatMap { $0 }.count, pending.count)
     XCTAssertTrue(jobs.allSatisfy { (1...4).contains($0.count) })
-    XCTAssertTrue(jobs.allSatisfy { Set($0.map { NativeIO.string(rows[$0]["speaker"]) }).count == 1 })
+    // Voices may mix within a batch; only similarly sized short lines share one.
+    XCTAssertTrue(jobs.contains { Set($0.map { NativeIO.string(rows[$0]["speaker"]) }).count == 2 })
+    XCTAssertTrue(jobs.filter { $0.count > 1 }.allSatisfy { $0.allSatisfy { SpeechRecovery.text(NativeIO.string(rows[$0]["tts_text"])).count <= 96 } })
     XCTAssertEqual(jobs.first(where: { $0.contains(7) }), [7])
     XCTAssertTrue(try SpeechBatch.plan(rows, pending: pending, maximum: 1).allSatisfy { $0.count == 1 })
     XCTAssertThrowsError(try SpeechBatch.plan(rows, pending: [100]))

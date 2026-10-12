@@ -581,6 +581,18 @@ final class Engine {
     NativeIO.stage("Генерация пробы · \(text.count) знаков · примерно 10 секунд")
     return try await generate(model, text: text, description: description, reference: reference, seed: seed)
   }
+  /// Per-batch memory: MLX peak since the previous batch and system swap, to tell
+  /// memory pressure apart from slow code in speed measurements.
+  func batchMemoryLog(_ batch: Int) {
+    let snapshot = Memory.snapshot()
+    var swap = xsw_usage(), size = MemoryLayout<xsw_usage>.size
+    let swapMB = sysctlbyname("vm.swapusage", &swap, &size, nil, 0) == 0 ? Double(swap.xsu_used) / 1_048_576 : -1
+    NativeIO.emit("log", ["message": String(format:
+      "Память пакета %d: MLX активно %.0f МБ · пик %.0f МБ · кеш %.0f МБ · своп системы %.0f МБ", batch,
+      Double(snapshot.activeMemory) / 1_048_576, Double(snapshot.peakMemory) / 1_048_576,
+      Double(snapshot.cacheMemory) / 1_048_576, swapMB)])
+    Memory.peakMemory = 0
+  }
   func memoryLog(_ message: String) {
     let snapshot = Memory.snapshot()
     NativeIO.emit("log", ["message": message + String(format:
@@ -591,7 +603,7 @@ final class Engine {
     basePath: URL) async throws -> ([Object], Int)
   {
     var base: Qwen3TTSModel?
-    var conditioning: [String: Qwen3TTSModel.Qwen3TTSReferenceConditioning] = [:]
+    var voicesReady: [String: StudioQwenSpeaker] = [:]
     var referenceArrays: [String: MLXArray] = [:]
     defer { withExtendedLifetime(referenceArrays) {} }
     var referenceHashes: [String: String] = [:]
@@ -620,25 +632,28 @@ final class Engine {
     }
     let total = rows.indices.reduce(0) { $0 + weight($1) }
     let jobs = try SpeechBatch.plan(rows, pending: pending)
-    NativeIO.emit("log", ["message": "План озвучки: \(jobs.count) запусков · \(pending.count) новых реплик · \(jobs.filter { $0.count > 1 }.count) пакетов · максимум 4 реплики одного голоса"])
+    NativeIO.emit("log", ["message": "План озвучки: \(jobs.count) запусков · \(pending.count) новых реплик · \(jobs.filter { $0.count > 1 }.count) пакетов · до 4 коротких реплик, голоса могут смешиваться"])
     var measurements: [(Double, Double, Int)] = []
     for (jobNumber, indices) in jobs.enumerated() {
       try Task.checkCancellation()
       let start = Date(), progress = Double(completed) / Double(max(1, total))
-      let speaker = NativeIO.string(rows[indices[0]]["speaker"])
+      let laneSpeakers = indices.map { NativeIO.string(rows[$0]["speaker"]) }
+      var listed = Set<String>()
+      let speakerList = laneSpeakers.filter { listed.insert($0).inserted }
       let ids = indices.map { NativeIO.string(rows[$0]["id"]) }
-      NativeIO.synthesisStage("Пакетная озвучка · \(jobNumber+1)/\(jobs.count) · \(indices.count) реплик · " + speaker, progress)
+      NativeIO.synthesisStage("Пакетная озвучка · \(jobNumber+1)/\(jobs.count) · \(indices.count) реплик · " + speakerList.joined(separator: ", "), progress)
       if base == nil {
         NativeIO.synthesisStage("Загрузка модели озвучки · нативный MLX", progress)
         base = try await Qwen3TTSModel.fromModelDirectory(basePath)
       }
-      guard let base, let reference = references[speaker] else { throw StudioError("Не подготовлена модель или голос " + speaker) }
-      if conditioning[speaker] == nil {
+      guard let base else { throw StudioError("Модель озвучки не загружена") }
+      for speaker in speakerList where voicesReady[speaker] == nil {
+        guard let reference = references[speaker] else { throw StudioError("Не подготовлен голос " + speaker) }
         NativeIO.synthesisStage("Подготовка голоса для озвучки · " + speaker, progress)
         let (_, array) = try loadAudioArray(from: reference.0, sampleRate: 24000)
         referenceArrays[speaker] = array
-        conditioning[speaker] = try base.prepareReferenceConditioning(refAudio: array, refText: reference.1, language: "Russian")
-        guard let identity = conditioning[speaker]?.speakerEmbedding else { throw StudioError("Не извлечена личность голоса · " + speaker) }
+        let conditioning = try base.prepareReferenceConditioning(refAudio: array, refText: reference.1, language: "Russian")
+        guard let identity = conditioning.speakerEmbedding else { throw StudioError("Не извлечена личность голоса · " + speaker) }
         let values = identity.asArray(Float.self)
         guard !values.isEmpty, values.allSatisfy({ $0.isFinite }), values.contains(where: { abs($0) > 0.000001 }) else {
           throw StudioError("Повреждено представление личности голоса · " + speaker)
@@ -646,14 +661,18 @@ final class Engine {
         let hash = values.withUnsafeBytes { NativeIO.hash(Data($0)) }
         NativeIO.emit("log", ["message": "Личность голоса [\(speaker)] · \(values.count) признаков · SHA256 " + hash])
         NativeIO.emit("log", ["message": "Образец для озвучки [\(speaker)] · SHA256 " + (referenceHashes[speaker] ?? "")])
+        voicesReady[speaker] = try base.studioSpeaker(conditioning)
       }
-      guard let ref = conditioning[speaker] else { throw StudioError("Не подготовлен голос " + speaker) }
+      let laneVoices = try laneSpeakers.map { speaker -> StudioQwenSpeaker in
+        guard let voice = voicesReady[speaker] else { throw StudioError("Не подготовлен голос " + speaker) }
+        return voice
+      }
       let texts = indices.map { SpeechRecovery.text(NativeIO.string(rows[$0]["tts_text"])) }
       var timings: [String: Double] = [:]
-      let waves = try await SpeechRecovery.batch(texts: texts, seeds: indices.map { seeds[$0] }, labels: ids.map { $0 + " · " + speaker },
+      let waves = try await SpeechRecovery.batch(texts: texts, seeds: indices.map { seeds[$0] }, labels: indices.indices.map { ids[$0] + " · " + laneSpeakers[$0] },
         operation: { lanes, attemptSeeds in
-          NativeIO.synthesisStage("Пакетная озвучка · \(jobNumber+1)/\(jobs.count) · \(lanes.count) реплик · " + speaker, progress)
-          return try await base.studioGenerateBatch(texts: lanes.map { texts[$0] }, conditioning: ref,
+          NativeIO.synthesisStage("Пакетная озвучка · \(jobNumber+1)/\(jobs.count) · \(lanes.count) реплик · " + speakerList.joined(separator: ", "), progress)
+          return try await base.studioGenerateBatch(texts: lanes.map { texts[$0] }, speakers: lanes.map { laneVoices[$0] },
             seeds: attemptSeeds.map { UInt64($0) },
             generationParameters: GenerateParameters(maxTokens: 4096, temperature: 0.9, topP: 1, topK: 50, repetitionPenalty: 1.05),
             timing: { name, seconds in timings[name, default: 0] += seconds })
@@ -674,6 +693,7 @@ final class Engine {
       NativeIO.emit("log", ["message": String(format: "Расчёт пакета %d: вход %.3f с · первый шаг (контекст + кадр) %.3f с · остальные токены %.3f с · декодер %.3f с",
         jobNumber+1, timings["input"] ?? 0, timings["first_step"] ?? 0,
         timings["remaining_tokens"] ?? 0, timings["decode"] ?? 0)])
+      batchMemoryLog(jobNumber + 1)
       let seconds = measurements.reduce(0) { $0 + $1.1 }
       let characters = measurements.reduce(0) { $0 + $1.2 }
       NativeIO.emit("metrics", ["message": "Озвучивание книги", "speed": measurements.reduce(0) { $0 + $1.0 } / seconds,
