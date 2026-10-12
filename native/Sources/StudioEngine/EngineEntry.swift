@@ -427,6 +427,7 @@ final class Engine {
         uniqueKeysWithValues: NativeIO.objects(source["paragraphs"]).map {
           (NativeIO.string($0["id"]), NativeIO.string($0["text"]))
         })
+      var items: [NativeDirector.StressItem] = []
       for i in rows.indices {
         NativeIO.stage("Подготовка речи · \(i+1)/\(rows.count)", Double(i) / Double(rows.count))
         let normalized = try ru.normalize(NativeIO.string(rows[i]["text"]))
@@ -438,15 +439,31 @@ final class Engine {
         rows[i]["tts_normalized"] = normalized
         let marked = try stress.annotate(normalized, prefix: before, suffix: after)
         rows[i]["tts_text"] = marked.text
-        if request["cloud_stress"] as? Bool == true {
-          // The cloud check is optional: without an answer the dictionary and Silero stay.
+        items.append(NativeDirector.StressItem(text: marked.text, context: full, disputes: marked.disputes))
+      }
+      if request["cloud_stress"] as? Bool == true {
+        // About 4000 characters per request instead of one request per line. The check is
+        // optional: without an answer the dictionary and Silero results stay.
+        var batches: [[Int]] = [[]]
+        var size = 0
+        for i in rows.indices {
+          if size > 4000 || batches[batches.count - 1].count >= 40 {
+            batches.append([])
+            size = 0
+          }
+          batches[batches.count - 1].append(i)
+          size += items[i].text.count
+        }
+        for (number, batch) in batches.enumerated() where !batch.isEmpty {
+          NativeIO.stage("Уточнение спорных ударений · LLM · \(number + 1)/\(batches.count)",
+            Double(number) / Double(batches.count))
           do {
-            rows[i]["tts_text"] = try await director.refineStress(
-              marked.text, context: full, disputes: marked.disputes)
+            let refined = try await director.refineStress(batch.map { items[$0] })
+            for (i, text) in zip(batch, refined) { rows[i]["tts_text"] = text }
           } catch is CancellationError {
             throw CancellationError()
           } catch {
-            NativeIO.emit("log", ["message": "Проверка ударений LLM пропущена · " + NativeIO.string(rows[i]["id"]) + " · " + error.localizedDescription])
+            NativeIO.emit("log", ["message": "Проверка ударений LLM пропущена · пакет \(number + 1) · " + error.localizedDescription])
           }
         }
       }
