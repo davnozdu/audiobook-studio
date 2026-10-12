@@ -10,6 +10,8 @@ import StudioCore
 @main struct StudioEngine {
   static func main() async {
     _ = setpgid(0, 0)
+    // A crashed helper must produce an error event, not kill the engine on a pipe write.
+    signal(SIGPIPE, SIG_IGN)
     // Library diagnostics must not corrupt the JSON event stream.
     _ = NativeIO.eventOutput
     dup2(STDERR_FILENO, STDOUT_FILENO)
@@ -108,6 +110,15 @@ final class Engine {
     guard Set(edits.keys).isSubset(of: ids) else { throw StudioError("Неизвестный фрагмент") }
     for i in segments.indices {
       if let speaker = edits[NativeIO.string(segments[i]["id"])] as? String {
+        // "Not determined" hands the line back to automatic speaker resolution.
+        if speaker.isEmpty {
+          segments[i]["speaker"] = NSNull()
+          segments[i]["voice_id"] = NSNull()
+          segments[i]["needs_review"] = true
+          segments[i]["confidence"] = "low"
+          segments[i]["reason"] = "Пользователь снял назначение"
+          continue
+        }
         guard let voice = voices.first(where: { NativeIO.string($0["id"]) == speaker }) else {
           throw StudioError("Неизвестный персонаж")
         }
@@ -231,11 +242,11 @@ final class Engine {
       guard (3...30).contains(seconds) else {
         throw StudioError("Выберите чистый образец одного голоса длительностью 3–30 секунд")
       }
-      let target = project.appendingPathComponent(
-        "voice-samples/" + NativeIO.string(voices[index]["id"]) + ".wav")
+      let relative = "voice-samples/" + NativeIO.string(voices[index]["id"]) + ".wav"
+      let target = project.appendingPathComponent(relative)
       try NativeWAV.write(target, samples)
       voices[index]["custom_reference"] = [
-        "path": target.path, "text": text, "seconds": seconds,
+        "path": relative, "text": text, "seconds": seconds,
         "sha256": try NativeIO.hashFile(target),
       ]
     }
@@ -245,8 +256,11 @@ final class Engine {
   func custom(_ voice: Object) throws -> (URL, String)? {
     let ref = NativeIO.object(voice["custom_reference"])
     guard !ref.isEmpty else { return nil }
-    let url = URL(fileURLWithPath: NativeIO.string(ref["path"]))
+    let url = NativeProject.sampleURL(NativeIO.string(ref["path"]), project: project)
     let text = NativeIO.string(ref["text"])
+    guard fm.fileExists(atPath: url.path) else {
+      throw StudioError("Не найден собственный образец · " + NativeIO.string(voice["name"]) + " · загрузите его снова")
+    }
     guard !text.isEmpty, try NativeIO.hashFile(url) == NativeIO.string(ref["sha256"]) else {
       throw StudioError("Повреждён собственный образец · " + NativeIO.string(voice["name"]))
     }
@@ -306,9 +320,10 @@ final class Engine {
       } else {
         referenceHash = NativeIO.string(NativeIO.object(voice["custom_reference"])["sha256"])
       }
-    } else if !NativeIO.object(request["casting"]).isEmpty {
-      description = instruction(
-        try await NativeDirector(request).directVoice(NativeIO.object(request["casting"])))
+    } else if VoiceDirection.validEnglish(description) {
+      // An English description is already a VoiceDesign instruction; no LLM request.
+      description = description.trimmingCharacters(in: .whitespacesAndNewlines)
+        + VoiceDirection.readingRules
     } else {
       description = instruction(
         try await NativeDirector(request).directVoice(["voice_description": description]))
@@ -321,8 +336,15 @@ final class Engine {
     let seed = request["seed"] as? Int ?? 17001
     let signature = try VoiceSample.signature(text: text, instruction: description,
       profile: profileSignature, reference: referenceHash, seed: seed)
+    let voiceLab = root.deletingLastPathComponent().appendingPathComponent("VoiceLab")
+    if character.isEmpty {
+      // Only the newest generator sample is shown; saved copies live where the user put them.
+      for old in (try? fm.contentsOfDirectory(at: voiceLab, includingPropertiesForKeys: nil)) ?? [] {
+        try? fm.removeItem(at: old)
+      }
+    }
     let file = character.isEmpty
-      ? root.deletingLastPathComponent().appendingPathComponent("VoiceLab/" + UUID().uuidString + "/sample.wav")
+      ? voiceLab.appendingPathComponent(UUID().uuidString + "/sample.wav")
       : project.appendingPathComponent("preview-samples/" + character + ".wav")
     let meta = file.deletingPathExtension().appendingPathExtension("json")
     if !character.isEmpty, let old = try? NativeIO.load(meta),
@@ -407,12 +429,15 @@ final class Engine {
         rows[i]["tts_normalized"] = normalized
         rows[i]["tts_text"] = try stress.apply(normalized, prefix: before, suffix: after)
         if request["cloud_stress"] as? Bool == true {
-          rows[i]["tts_text"] = try await director.refineStress(
-            NativeIO.string(rows[i]["tts_text"]),
-            context: NativeIO.string(
-              NativeIO.objects(source["paragraphs"]).first(where: {
-                NativeIO.string($0["id"]) == NativeIO.string(rows[i]["paragraph_id"])
-              })?["text"]))
+          // The cloud check is optional: without an answer the dictionary and Silero stay.
+          do {
+            rows[i]["tts_text"] = try await director.refineStress(
+              NativeIO.string(rows[i]["tts_text"]), context: full)
+          } catch is CancellationError {
+            throw CancellationError()
+          } catch {
+            NativeIO.emit("log", ["message": "Проверка ударений LLM пропущена · " + NativeIO.string(rows[i]["id"]) + " · " + error.localizedDescription])
+          }
         }
       }
     }
@@ -530,7 +555,9 @@ final class Engine {
     let raw = project.appendingPathComponent("audio")
     try fm.createDirectory(
       at: raw.appendingPathComponent("segments"), withIntermediateDirectories: true)
-    let montage = try WAVMontage(raw.appendingPathComponent("sample.wav"))
+    // Segments are cached individually; normalization assembles the book from them,
+    // so only the running frame count is needed here.
+    var frames = 0
     var timeline: [Object] = []
     var measurements: [(Double, Double, Int)] = []
     var completed = 0
@@ -543,9 +570,8 @@ final class Engine {
       guard let reference = references[speaker], let referenceHash = referenceHashes[speaker] else {
         throw StudioError("Не подготовлен голос " + speaker)
       }
-      NativeIO.stage(
-        "Озвучивание · \(i+1)/\(rows.count) · " + speaker, Double(completed) / Double(max(1, total))
-      )
+      let progress = Double(completed) / Double(max(1, total))
+      NativeIO.synthesisStage("Озвучивание · \(i+1)/\(rows.count) · " + speaker, progress)
       let seed = max(0, (voices.first(where: { NativeIO.string($0["id"]) == speaker })?["seed"] as? Int ?? 17001) + i)
       let signature = try SpeechCache.signature(text: text, referenceHash: referenceHash,
         referenceText: reference.1, seed: seed)
@@ -554,16 +580,16 @@ final class Engine {
       let reused: Bool
       if let cached = SpeechCache.load(file, signature: signature) {
         samples = cached; reused = true
-        NativeIO.stage("Готовая реплика из кеша · \(i+1)/\(rows.count) · " + speaker)
+        NativeIO.synthesisStage("Готовая реплика из кеша · \(i+1)/\(rows.count) · " + speaker, progress)
       } else {
         reused = false
         if base == nil {
-          NativeIO.stage("Загрузка модели озвучки · нативный MLX")
+          NativeIO.synthesisStage("Загрузка модели озвучки · нативный MLX", progress)
           base = try await Qwen3TTSModel.fromModelDirectory(basePath)
         }
         guard let base else { throw StudioError("Модель озвучки не загружена") }
         if conditioning[speaker] == nil {
-          NativeIO.stage("Подготовка голоса для озвучки · " + speaker)
+          NativeIO.synthesisStage("Подготовка голоса для озвучки · " + speaker, progress)
           let (_, array) = try loadAudioArray(from: reference.0, sampleRate: 24000)
           referenceArrays[speaker] = array
           conditioning[speaker] = try base.prepareReferenceConditioning(
@@ -581,7 +607,7 @@ final class Engine {
           NativeIO.emit("log", ["message": "Образец для озвучки [\(speaker)] · SHA256 " + (referenceHashes[speaker] ?? "")])
         }
         guard let ref = conditioning[speaker] else { throw StudioError("Не подготовлен голос " + speaker) }
-        NativeIO.stage("Озвучивание · \(i+1)/\(rows.count) · " + speaker)
+        NativeIO.synthesisStage("Озвучивание · \(i+1)/\(rows.count) · " + speaker, progress)
         samples = try await SpeechRecovery.generate(text: text, seed: seed, label: id + " · " + speaker) { spoken, attemptSeed in
           MLXRandom.seed(UInt64(attemptSeed))
           let wave = try await base.generate(text: spoken, conditioning: ref,
@@ -591,14 +617,14 @@ final class Engine {
         }
         try SpeechCache.save(file, samples: samples, signature: signature)
       }
-      let begin = Double(montage.frames) / 24000
-      try montage.append(samples)
-      let finish = Double(montage.frames) / 24000
+      let begin = Double(frames) / 24000
+      frames += samples.count
+      let finish = Double(frames) / 24000
       let pause = max(0, min(3000, row["pause_after_ms"] as? Int ?? 450)) * 24
-      try montage.silence(pause)
+      frames += pause
       timeline.append([
         "segment_id": id, "speaker": speaker, "audio_start": begin, "audio_end": finish,
-        "clip_end": Double(montage.frames) / 24000, "pause_frames": pause,
+        "clip_end": Double(frames) / 24000, "pause_frames": pause,
       ])
       let elapsed = max(0.001, Date().timeIntervalSince(start))
       let weight = max(1, NativeIO.string(row["text"]).count)
@@ -619,8 +645,7 @@ final class Engine {
           "fraction": Double(completed) / Double(total), "completed": i + 1, "total": rows.count,
         ])
     }
-    try montage.finish()
-    return (timeline, montage.frames)
+    return (timeline, frames)
   }
 
 }

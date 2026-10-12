@@ -72,7 +72,10 @@ public final class NativeStress {
   public func request(_ value: Object) throws -> Object {
     var data = try JSONSerialization.data(withJSONObject: value)
     data.append(10)
-    try input.fileHandleForWriting.write(contentsOf: data)
+    // The engine ignores SIGPIPE, so a crashed helper surfaces here as a write error.
+    do { try input.fileHandleForWriting.write(contentsOf: data) } catch {
+      throw StudioError("Нативный движок ударений завершился раньше времени")
+    }
     while pending.firstIndex(of: 10) == nil {
       let chunk = output.fileHandleForReading.availableData
       guard !chunk.isEmpty else {

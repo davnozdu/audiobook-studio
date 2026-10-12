@@ -147,6 +147,13 @@ public struct NativeAudio {
     else { throw StudioError("Не удалось измерить громкость роли") }
     return (lufs, peak)
   }
+  static let minimumMeasuredFrames = 3 * 24000
+  /// Common role level: -20 LUFS, lowered for loud peaks but never below -23 LUFS.
+  /// Peaks still above -1.5 dBTP are caught by the limiter while encoding the M4B.
+  static func loudnessTarget(_ measurements: [(Double, Double)]) -> Double {
+    let peakSafe = measurements.map { $0.0 - 1.5 - $0.1 - 0.1 }.min() ?? -20
+    return min(-20, max(-23, peakSafe))
+  }
   public func normalize(project: URL, segments: [Object], timeline: [Object]) throws -> URL {
     let fm = FileManager.default
     let raw = project.appendingPathComponent("audio")
@@ -159,19 +166,26 @@ public struct NativeAudio {
       NativeIO.stage("Измерение громкости · " + speaker)
       let file = roles.appendingPathComponent(speaker + ".wav")
       let montage = try WAVMontage(file)
-      for segment in segments where NativeIO.string(segment["speaker"]) == speaker {
-        try montage.append(
-          NativeWAV.read(
-            raw.appendingPathComponent("segments/" + NativeIO.string(segment["id"]) + ".wav")))
+      let parts = segments.filter { NativeIO.string($0["speaker"]) == speaker }.map {
+        raw.appendingPathComponent("segments/" + NativeIO.string($0["id"]) + ".wav")
       }
+      // EBU R128 integrated loudness is -inf below one 400 ms block. Repeating a short
+      // role keeps its level and peak while giving the meter enough audio.
+      repeat {
+        let before = montage.frames
+        for part in parts { try montage.append(NativeWAV.read(part)) }
+        if montage.frames == before { break }
+      } while montage.frames < Self.minimumMeasuredFrames
       try montage.finish()
-      measurements[speaker] = try measure(file)
+      if let measured = try? measure(file) {
+        measurements[speaker] = measured
+      } else {
+        NativeIO.emit("log", ["message": "Громкость роли не измерена, уровень оставлен без изменений · " + speaker])
+      }
     }
-    let target = min(-20, measurements.values.map { $0.0 - 1.5 - $0.1 - 0.1 }.min() ?? -20)
+    let target = Self.loudnessTarget(Array(measurements.values))
     let gains = measurements.mapValues { target - $0.0 }
     let montage = try WAVMontage(out.appendingPathComponent("sample.wav"))
-    try fm.createDirectory(
-      at: out.appendingPathComponent("segments"), withIntermediateDirectories: true)
     for (segment, row) in zip(segments, timeline) {
       let sid = NativeIO.string(segment["id"])
       let speaker = NativeIO.string(segment["speaker"])
@@ -179,7 +193,6 @@ public struct NativeAudio {
       let samples = try NativeWAV.read(raw.appendingPathComponent("segments/" + sid + ".wav")).map {
         $0 * gain
       }
-      try NativeWAV.write(out.appendingPathComponent("segments/" + sid + ".wav"), samples)
       try montage.append(samples)
       let pause = (row["pause_frames"] as? Int ?? 0)
       try montage.silence(pause)
@@ -189,7 +202,7 @@ public struct NativeAudio {
     try NativeIO.write(
       out.appendingPathComponent("loudness.json"),
       [
-        "method": "role-integrated EBU R128 + constant gain", "actual_lufs": target,
+        "method": "role-integrated EBU R128 + constant gain + output limiter", "actual_lufs": target,
         "true_peak_limit_db": -1.5, "gains_db": gains, "timing_unchanged": true,
       ])
     try fm.removeItem(at: roles)
@@ -237,8 +250,9 @@ public struct NativeAudio {
       for c in ["\\", "=", ";", "#"] { s = s.replacingOccurrences(of: c, with: "\\" + c) }
       return s.replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ")
     }
+    let title = escape(NativeIO.string(book["title"]))
     var metadata =
-      ";FFMETADATA1\ntitle=\(escape(NativeIO.string(book["title"])))\nartist=\(escape(NativeIO.string(book["author"])))\n"
+      ";FFMETADATA1\ntitle=\(title)\nalbum=\(title)\nartist=\(escape(NativeIO.string(book["author"])))\ngenre=Audiobook\n"
     var chapterStarts: [(String, Double)] = []
     for (s, row) in zip(segments, timeline) {
       let cid = NativeIO.string(s["chapter_id"])
@@ -256,10 +270,24 @@ public struct NativeAudio {
     let meta = FileManager.default.temporaryDirectory.appendingPathComponent("chapters-" + UUID().uuidString + ".txt")
     defer { try? fm.removeItem(at: meta) }
     try Data(metadata.utf8).write(to: meta)
-    let m4b = out.appendingPathComponent("audiobook.m4b")
-    try ff([
+    let cover = NativeBook.cover(project.appendingPathComponent("book.epub"))
+    let coverFile = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "cover-" + UUID().uuidString + "." + (cover?.ext ?? "jpg"))
+    defer { try? fm.removeItem(at: coverFile) }
+    var arguments = [
       "-i", audio.appendingPathComponent("sample.wav").path, "-f", "ffmetadata", "-i", meta.path,
-      "-map", "0:a:0", "-map_metadata", "1", "-map_chapters", "1", "-c:a", "aac", "-b:a", "96k",
+    ]
+    var coverMapping: [String] = []
+    if let cover {
+      try cover.data.write(to: coverFile)
+      arguments += ["-i", coverFile.path]
+      coverMapping = ["-map", "2:v:0", "-c:v", "copy", "-disposition:v:0", "attached_pic"]
+    }
+    let m4b = out.appendingPathComponent("audiobook.m4b")
+    // The limiter is delay-compensated, so sentence timing for the EPUB overlay is unchanged.
+    try ff(arguments + ["-map", "0:a:0"] + coverMapping + [
+      "-map_metadata", "1", "-map_chapters", "1",
+      "-af", "alimiter=limit=0.84:level=0:latency=1", "-c:a", "aac", "-b:a", "96k",
       "-movflags", "+faststart", m4b.path,
     ])
     guard abs(try duration(m4b) - total) < 0.15 else {
@@ -267,7 +295,7 @@ public struct NativeAudio {
     }
     try NativeBook.epub(
       manifest, source: source, timeline: timeline, audio: m4b,
-      output: out.appendingPathComponent("audiobook.epub"))
+      output: out.appendingPathComponent("audiobook.epub"), cover: cover)
     try NativeIO.write(
       out.appendingPathComponent("package-report.json"),
       [

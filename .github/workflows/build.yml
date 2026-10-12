@@ -23,9 +23,7 @@ jobs:
         with:
           xcode-version: latest-stable
       - name: Unit tests
-        run: |
-          python3 -m unittest discover -s tests -v
-          STUDIO_CORE_ONLY=1 swift test --package-path native
+        run: STUDIO_CORE_ONLY=1 swift test --package-path native
       - name: Version
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then

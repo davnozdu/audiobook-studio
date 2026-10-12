@@ -47,6 +47,9 @@ final class CoreTests: XCTestCase {
     XCTAssertThrowsError(try VoiceDirection.compose(invalid))
     invalid["delivery"] = "Говори тихо, с заискивающей интонацией."
     XCTAssertThrowsError(try VoiceDirection.compose(invalid))
+    var prohibition = description
+    prohibition["delivery"] = "Soft, tired and eager to please. Do not add extra words or sounds."
+    XCTAssertNoThrow(try VoiceDirection.compose(prohibition))
     var voice: Object = ["voice_gender": "male", "voice_description": description["voice"]!]
     voice["tts_instruction"] = result
     voice["tts_profile_sha256"] = NativeIO.hash(try NativeIO.json(["version": 1, "profile": VoiceDirection.input(voice)]))
@@ -367,6 +370,113 @@ final class CoreTests: XCTestCase {
     try Data("SACC".utf8).write(to: file)
     XCTAssertThrowsError(try AccentDictionary(file))
   }
+  func testRoleLevelStaysInAudiobookRange() {
+    XCTAssertEqual(NativeAudio.loudnessTarget([(-24, -12), (-19, -8)]), -20)
+    XCTAssertEqual(NativeAudio.loudnessTarget([(-20, -0.2)]), -21.4, accuracy: 0.0001)
+    // One transient peak must not pull the whole book far below -20 LUFS.
+    XCTAssertEqual(NativeAudio.loudnessTarget([(-24, -0.2)]), -23)
+    XCTAssertEqual(NativeAudio.loudnessTarget([]), -20)
+  }
+  func testCastMergeKeepsIdentityAcrossChunks() throws {
+    let first = try NativeDirector.mergeCast([], [
+      ["id": "myshkin", "name": "Князь Мышкин", "gender": "unknown", "aliases": ["Князь"]],
+    ])
+    let merged = try NativeDirector.mergeCast(first, [
+      ["id": "myshkin", "name": "Мышкин", "gender": "male", "aliases": ["Лев Николаевич"]],
+      ["id": "rogozhin", "name": "Рогожин", "gender": "male"],
+    ])
+    XCTAssertEqual(merged.count, 2)
+    XCTAssertEqual(NativeIO.string(merged[0]["name"]), "Князь Мышкин")
+    XCTAssertEqual(NativeIO.string(merged[0]["gender"]), "male")
+    XCTAssertEqual(merged[0]["aliases"] as? [String], ["Князь", "Лев Николаевич", "Мышкин"])
+    let fixed = try NativeDirector.mergeCast(merged, [["id": "myshkin", "name": "Мышкин", "gender": "female"]])
+    XCTAssertEqual(NativeIO.string(fixed[0]["gender"]), "male")
+    XCTAssertThrowsError(try NativeDirector.mergeCast(merged, []))
+    XCTAssertThrowsError(try NativeDirector.mergeCast(merged, [["id": "Князь", "name": "Князь"]]))
+  }
+  func testProfileKeepsOnlyVerifiableEvidence() throws {
+    var card: Object = [
+      "id": "hero", "age": "30", "personality": "Смелый", "habits": "Пауза",
+      "speaking_style": "Быстро", "voice_description": "Bright tenor", "certainty": "medium",
+      "assumptions": ["Возраст примерный"],
+      "evidence": [
+        ["kind": "book", "reference": "p00001", "note": "Реплика"],
+        ["kind": "book", "reference": "p99999", "note": "Выдумано"],
+        ["kind": "web", "reference": "https://unknown.example", "note": "Нет в поиске"],
+      ],
+    ]
+    let profile = try NativeDirector.validateProfile(
+      card, id: "hero", paragraphIDs: ["p00001"], urls: [])
+    XCTAssertEqual(NativeIO.objects(profile["evidence"]).count, 1)
+    card["evidence"] = [["kind": "book", "reference": "p99999"]]
+    XCTAssertThrowsError(try NativeDirector.validateProfile(card, id: "hero", paragraphIDs: ["p00001"], urls: []))
+    card["evidence"] = [["kind": "book", "reference": "p00001"]]
+    XCTAssertThrowsError(try NativeDirector.validateProfile(card, id: "villain", paragraphIDs: ["p00001"], urls: []))
+  }
+  func testSpeakerAnswersKeepValidRowsOnly() {
+    let rows: [Object] = [
+      ["id": "seg1", "speaker": "hero"], ["id": "seg2", "speaker": "ghost"],
+      ["id": "seg3", "speaker": NSNull()], ["id": "seg9", "speaker": "hero"],
+    ]
+    let result = NativeDirector.acceptAssignments(
+      rows, ids: ["seg1", "seg2", "seg3"], allowed: ["hero", "narrator"])
+    XCTAssertEqual(result, ["seg1": "hero", "seg3": ""])
+  }
+  func testCloudStressAppliesOnlyValidWords() {
+    let text = "Мама мыла раму."
+    // Word IDs follow regex order: 0 "Мама", 1 "мыла", 2 "раму".
+    let rows: [Object] = [
+      ["id": 0, "word": "Ма\u{301}ма"], ["id": 1, "word": "мы\u{301}лла"],
+      ["id": "2", "word": "р\u{301}аму"],
+    ]
+    XCTAssertEqual(NativeDirector.applyStress(text, rows: rows), "Ма\u{301}ма мыла раму.")
+    XCTAssertEqual(NativeDirector.applyStress(text, rows: []), text)
+  }
+  func testLLMHTTPFailuresAreClassified() {
+    let body = Data("{\"error\":\"model overloaded\"}".utf8)
+    XCTAssertTrue(NativeDirector.httpError(503, body) is TransientLLMError)
+    XCTAssertTrue(NativeDirector.httpError(429, Data()) is TransientLLMError)
+    let rejected = NativeDirector.httpError(401, Data("{\"error\":\"bad key secret\"}".utf8), key: "secret")
+    XCTAssertTrue(rejected is StudioError)
+    XCTAssertTrue(rejected.localizedDescription.contains("ключ"))
+    XCTAssertFalse(rejected.localizedDescription.contains("secret"))
+  }
+  func testOwnSampleSurvivesMovedProject() throws {
+    let folder = temporary()
+    defer { try? fm.removeItem(at: folder) }
+    let sample = folder.appendingPathComponent("voice-samples/hero.wav")
+    try fm.createDirectory(at: sample.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try Data("wav".utf8).write(to: sample)
+    XCTAssertEqual(NativeProject.sampleURL("voice-samples/hero.wav", project: folder).path, sample.path)
+    XCTAssertEqual(NativeProject.sampleURL("/old/place/voice-samples/hero.wav", project: folder).path, sample.path)
+    XCTAssertEqual(NativeProject.sampleURL("../../etc/hero.wav", project: folder).path,
+      folder.appendingPathComponent("etc/hero.wav").path)
+  }
+  func testEPUBDivTextDuplicateIDsAndCover() throws {
+    let folder = temporary()
+    defer { try? fm.removeItem(at: folder) }
+    let book = folder.appendingPathComponent("book")
+    try fm.createDirectory(at: book.appendingPathComponent("META-INF"), withIntermediateDirectories: true)
+    try fm.createDirectory(at: book.appendingPathComponent("OEBPS"), withIntermediateDirectories: true)
+    try Data("application/epub+zip".utf8).write(to: book.appendingPathComponent("mimetype"))
+    try Data("<?xml version=\"1.0\"?><container version=\"1.0\" xmlns=\"urn:oasis:names:tc:opendocument:xmlns:container\"><rootfiles><rootfile full-path=\"OEBPS/content.opf\" media-type=\"application/oebps-package+xml\"/></rootfiles></container>".utf8)
+      .write(to: book.appendingPathComponent("META-INF/container.xml"))
+    try Data("<?xml version=\"1.0\"?><package xmlns=\"http://www.idpf.org/2007/opf\" version=\"2.0\"><metadata xmlns:dc=\"http://purl.org/dc/elements/1.1/\"><dc:title>Книга</dc:title><meta name=\"cover\" content=\"img\"/></metadata><manifest><item id=\"c1\" href=\"c1.xhtml\" media-type=\"application/xhtml+xml\"/><item id=\"c1\" href=\"other.xhtml\" media-type=\"application/xhtml+xml\"/><item id=\"img\" href=\"cover.jpg\" media-type=\"image/jpeg\"/></manifest><spine><itemref idref=\"c1\"/></spine></package>".utf8)
+      .write(to: book.appendingPathComponent("OEBPS/content.opf"))
+    try Data("<?xml version=\"1.0\" encoding=\"UTF-8\"?><html xmlns=\"http://www.w3.org/1999/xhtml\"><body><div class=\"chapter\"><h1>Глава</h1><div>Текст прямо в блоке.</div></div></body></html>".utf8)
+      .write(to: book.appendingPathComponent("OEBPS/c1.xhtml"))
+    let image = Data([0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3])
+    try image.write(to: book.appendingPathComponent("OEBPS/cover.jpg"))
+    let epub = folder.appendingPathComponent("book.epub")
+    try NativeIO.zip(book, to: epub, epub: true)
+    let parsed = try NativeBook.read(epub)
+    XCTAssertEqual(
+      NativeIO.objects(parsed["paragraphs"]).map { NativeIO.string($0["text"]) },
+      ["Глава", "Текст прямо в блоке."])
+    let cover = try XCTUnwrap(NativeBook.cover(epub))
+    XCTAssertEqual(cover.data, image)
+    XCTAssertEqual(cover.ext, "jpg")
+  }
   func testEPUBReadAlongPreservesText() throws {
     let folder = temporary()
     defer { try? fm.removeItem(at: folder) }
@@ -391,11 +501,12 @@ final class CoreTests: XCTestCase {
     try NativeBook.epub(
       manifest, source: source,
       timeline: [["segment_id": id, "audio_start": 0.0, "clip_end": 1.0]], audio: audio,
-      output: output)
+      output: output, cover: (Data([0x89, 0x50, 0x4E, 0x47]), "png"))
     let parsed = try NativeBook.read(output)
     XCTAssertEqual(
       NativeIO.objects(parsed["paragraphs"]).map { NativeIO.string($0["text"]) }, [text])
     XCTAssertEqual(NativeIO.string(parsed["title"]), "Тест")
+    XCTAssertEqual(NativeBook.cover(output)?.ext, "png")
   }
 
 }

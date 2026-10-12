@@ -1,8 +1,11 @@
 import Foundation
 
 public enum NativeBook {
+  // A container is read as one paragraph only when no other block is nested inside it;
+  // text mixed with nested blocks still stops extraction instead of being lost.
   static let blocks: Set<String> = [
     "p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "blockquote", "dt", "dd",
+    "div", "section", "article", "td", "th", "caption", "figcaption", "pre", "address",
   ]
   static func elements(_ node: XMLNode) -> [XMLElement] {
     var result: [XMLElement] = []
@@ -14,10 +17,7 @@ public enum NativeBook {
     }
     return result
   }
-  public static func read(_ epub: URL) throws -> Object {
-    let temp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-    defer { try? FileManager.default.removeItem(at: temp) }
-    try NativeIO.unpack(epub, to: temp)
+  static func package(_ temp: URL) throws -> (URL, [XMLElement], [String: XMLElement]) {
     let container = try XMLDocument(
       contentsOf: temp.appendingPathComponent("META-INF/container.xml"))
     guard
@@ -26,18 +26,49 @@ public enum NativeBook {
     else { throw StudioError("В EPUB нет OPF") }
     let opfURL = temp.appendingPathComponent(file).standardizedFileURL
     guard opfURL.path.hasPrefix(temp.path + "/") else { throw StudioError("Некорректный путь OPF") }
-    let opf = try XMLDocument(contentsOf: opfURL)
-    let nodes = elements(opf)
+    let nodes = elements(try XMLDocument(contentsOf: opfURL))
+    // Malformed books may repeat manifest IDs; the first declaration wins.
+    let items = Dictionary(
+      nodes.filter { $0.localName == "item" }.compactMap { node -> (String, XMLElement)? in
+        guard let id = node.attribute(forName: "id")?.stringValue else { return nil }
+        return (id, node)
+      }, uniquingKeysWith: { first, _ in first })
+    return (opfURL, nodes, items)
+  }
+  /// The EPUB cover (EPUB 3 cover-image or EPUB 2 meta cover), when it is JPEG or PNG.
+  public static func cover(_ epub: URL) -> (data: Data, ext: String)? {
+    let temp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: temp) }
+    guard (try? NativeIO.unpack(epub, to: temp)) != nil,
+      let (opfURL, nodes, items) = try? package(temp)
+    else { return nil }
+    let metaID = nodes.first(where: {
+      $0.localName == "meta" && $0.attribute(forName: "name")?.stringValue == "cover"
+    })?.attribute(forName: "content")?.stringValue
+    let item =
+      items.values.first(where: {
+        ($0.attribute(forName: "properties")?.stringValue ?? "").split(separator: " ")
+          .contains("cover-image")
+      }) ?? items[metaID ?? ""]
+    let types = ["image/jpeg": "jpg", "image/png": "png"]
+    guard let item, let ext = types[item.attribute(forName: "media-type")?.stringValue ?? ""],
+      let href = item.attribute(forName: "href")?.stringValue?.removingPercentEncoding
+    else { return nil }
+    let url = opfURL.deletingLastPathComponent().appendingPathComponent(href).standardizedFileURL
+    guard url.path.hasPrefix(temp.path + "/"), let data = try? Data(contentsOf: url),
+      !data.isEmpty, data.count < 20_000_000
+    else { return nil }
+    return (data, ext)
+  }
+  public static func read(_ epub: URL) throws -> Object {
+    let temp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: temp) }
+    try NativeIO.unpack(epub, to: temp)
+    let (opfURL, nodes, items) = try package(temp)
     let title =
       nodes.first(where: { $0.localName == "title" })?.stringValue
       ?? epub.deletingPathExtension().lastPathComponent
     let author = nodes.first(where: { $0.localName == "creator" })?.stringValue ?? ""
-    let items = Dictionary(
-      uniqueKeysWithValues: nodes.filter { $0.localName == "item" }.compactMap {
-        node -> (String, XMLElement)? in
-        guard let id = node.attribute(forName: "id")?.stringValue else { return nil }
-        return (id, node)
-      })
     var paragraphs: [Object] = []
     var chapters: [Object] = []
     for ref in nodes.filter({ $0.localName == "itemref" }) {
@@ -127,7 +158,8 @@ public enum NativeBook {
     return result
   }
   public static func epub(
-    _ manifest: Object, source: Object, timeline: [Object], audio: URL, output: URL
+    _ manifest: Object, source: Object, timeline: [Object], audio: URL, output: URL,
+    cover: (data: Data, ext: String)? = nil
   ) throws {
     let temp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: temp) }
@@ -154,6 +186,11 @@ public enum NativeBook {
       uniqueKeysWithValues: timeline.map { (NativeIO.string($0["segment_id"]), $0) })
     var items =
       "<item id=\"audio\" href=\"audio/book.m4a\" media-type=\"audio/mp4\"/><item id=\"nav\" href=\"nav.xhtml\" media-type=\"application/xhtml+xml\" properties=\"nav\"/><item id=\"style\" href=\"style.css\" media-type=\"text/css\"/>"
+    if let cover {
+      try cover.data.write(to: temp.appendingPathComponent("EPUB/cover." + cover.ext))
+      items +=
+        "<item id=\"cover-image\" href=\"cover.\(cover.ext)\" media-type=\"image/\(cover.ext == "png" ? "png" : "jpeg")\" properties=\"cover-image\"/>"
+    }
     var spine = ""
     var nav = ""
     var durations = ""
@@ -188,7 +225,7 @@ public enum NativeBook {
           let finish = row["clip_end"] as? Double
         else { throw StudioError("Нет времени для реплики \(sid)") }
         overlay +=
-          "<par id=\"par-\(sid)\"><text src=\"\(cid).xhtml#\(sid)\"/><audio src=\"audio/book.m4a\" clipBegin=\"\(begin)s\" clipEnd=\"\(finish)s\"/></par>"
+          "<par id=\"par-\(sid)\"><text src=\"\(cid).xhtml#\(sid)\"/><audio src=\"audio/book.m4a\" clipBegin=\"\(String(format: "%.3f", begin))s\" clipEnd=\"\(String(format: "%.3f", finish))s\"/></par>"
       }
       body += "</p>"
       let html =
@@ -207,7 +244,7 @@ public enum NativeBook {
         "<meta property=\"media:duration\" refines=\"#overlay-\(cid)\">\(last-first)s</meta>"
     }
     let opf =
-      "<?xml version=\"1.0\"?><package xmlns=\"http://www.idpf.org/2007/opf\" version=\"3.0\" unique-identifier=\"book-id\" prefix=\"media: http://www.idpf.org/epub/vocab/overlays/#\"><metadata xmlns:dc=\"http://purl.org/dc/elements/1.1/\"><dc:identifier id=\"book-id\">urn:uuid:\(UUID().uuidString)</dc:identifier><dc:title>\(title)</dc:title><dc:creator>\(NativeIO.xml(NativeIO.string(book["author"])))</dc:creator><dc:language>ru</dc:language><meta property=\"dcterms:modified\">\(ISO8601DateFormatter().string(from: Date()))</meta><meta property=\"media:duration\">\(total)s</meta><meta property=\"media:active-class\">tts-active</meta>\(durations)</metadata><manifest>\(items)</manifest><spine>\(spine)</spine></package>"
+      "<?xml version=\"1.0\"?><package xmlns=\"http://www.idpf.org/2007/opf\" version=\"3.0\" unique-identifier=\"book-id\" prefix=\"media: http://www.idpf.org/epub/vocab/overlays/#\"><metadata xmlns:dc=\"http://purl.org/dc/elements/1.1/\"><dc:identifier id=\"book-id\">urn:uuid:\(UUID().uuidString)</dc:identifier><dc:title>\(title)</dc:title><dc:creator>\(NativeIO.xml(NativeIO.string(book["author"])))</dc:creator><dc:language>ru</dc:language><meta property=\"dcterms:modified\">\(ISO8601DateFormatter().string(from: Date()))</meta><meta property=\"media:duration\">\(total)s</meta><meta property=\"media:active-class\">tts-active</meta>\(cover == nil ? "" : "<meta name=\"cover\" content=\"cover-image\"/>")\(durations)</metadata><manifest>\(items)</manifest><spine>\(spine)</spine></package>"
     try Data(opf.utf8).write(to: temp.appendingPathComponent("EPUB/package.opf"))
     let navigation =
       "<?xml version=\"1.0\"?><html xmlns=\"http://www.w3.org/1999/xhtml\" xmlns:epub=\"http://www.idpf.org/2007/ops\"><head><title>\(title)</title></head><body><nav epub:type=\"toc\"><ol>\(nav)</ol></nav></body></html>"

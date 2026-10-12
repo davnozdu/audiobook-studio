@@ -29,10 +29,19 @@ public enum VoiceDirection {
     }
     let result = voice + " " + delivery
     guard result.split(whereSeparator: { $0.isWhitespace }).count <= 120,
-      result.range(of: "(?i)\\b(add|insert|repeat|invent)\\b.{0,50}\\b(words?|interjections?|particles?|sounds?|laughs?)\\b", options: .regularExpression) == nil else {
+      !requestsExtraSounds(result) else {
       throw StudioError("Инструкция голоса содержит лишние слова или звуки вместо манеры речи")
     }
     return result + readingRules
+  }
+
+  /// True when a sentence asks to add words or sounds; prohibitions such as
+  /// "Do not add extra sounds" repeat the reading rules and are allowed.
+  static func requestsExtraSounds(_ text: String) -> Bool {
+    text.components(separatedBy: CharacterSet(charactersIn: ".!?;\n")).contains { sentence in
+      sentence.range(of: "(?i)\\b(add|insert|repeat|invent)\\b.{0,50}\\b(words?|interjections?|particles?|sounds?|laughs?)\\b", options: .regularExpression) != nil
+        && sentence.range(of: "(?i)\\b(no|not|never|without|avoid|don't|doesn't|nor)\\b", options: .regularExpression) == nil
+    }
   }
 
   public static func validEnglish(_ text: String) -> Bool {

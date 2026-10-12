@@ -195,7 +195,7 @@ struct RoleSegment: Identifiable {
     var needsReview: Bool
 }
 
-struct Character: Identifiable {
+struct StoryCharacter: Identifiable {
     var id: String
     var name: String
     var age: String
@@ -226,7 +226,7 @@ struct Character: Identifiable {
     @Published var output = UserDefaults.standard.string(forKey: "outputFolder") ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Documents/Audiobook Studio").path {
         didSet { UserDefaults.standard.set(output, forKey: "outputFolder") }
     }
-    @Published var characters: [Character] = []
+    @Published var characters: [StoryCharacter] = []
     @Published var selected: String?
     @Published var busy = false
     @Published var status = "Выберите книгу, чтобы начать" { didSet { updateMenuBar() } }
@@ -516,11 +516,16 @@ struct Character: Identifiable {
 
     func loadProject() throws {
         let url = URL(fileURLWithPath: project).appendingPathComponent("roles/manifest.json")
-        let data = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as! [String: Any]
-        characters = (data["voices"] as! [[String: Any]]).map { v in
+        let invalid = NSError(domain: "AudiobookStudio.Project", code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "Файл ролей проекта повреждён"])
+        guard let data = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any],
+              let voices = data["voices"] as? [[String: Any]], let roleRows = data["segments"] as? [[String: Any]],
+              voices.allSatisfy({ $0["id"] is String && $0["name"] is String }),
+              roleRows.allSatisfy({ $0["id"] is String && $0["text"] is String }) else { throw invalid }
+        characters = voices.map { v in
             let p = v["character_profile"] as? [String: Any] ?? [:]
             let sample = v["custom_reference"] as? [String: Any] ?? [:]
-            return Character(id: v["id"] as! String, name: v["name"] as! String,
+            return StoryCharacter(id: v["id"] as! String, name: v["name"] as! String,
                 age: v["age"] as? String ?? "unknown", personality: p["personality"] as? String ?? "",
                 habits: p["habits"] as? String ?? "", speakingStyle: p["speaking_style"] as? String ?? "",
                 voice: v["voice_description"] as? String ?? "", certainty: p["certainty"] as? String ?? "low",
@@ -528,7 +533,6 @@ struct Character: Identifiable {
                 sample: sample["path"] as? String ?? "", sampleText: sample["text"] as? String ?? "",
                 voiceGender: v["voice_gender"] as? String ?? "male", seed: v["seed"] as? Int ?? 17001)
         }
-        let roleRows = data["segments"] as! [[String: Any]]
         bookCharacterCount = roleRows.reduce(0) { $0 + ( $1["text"] as? String ?? "").count }
         segments = roleRows.map { s in
             RoleSegment(id: s["id"] as! String, text: s["text"] as! String,
@@ -644,10 +648,7 @@ struct Character: Identifiable {
         r["description"] = description ?? voiceDescription
         r["text"] = text ?? voiceTestText
         r["character"] = character; r["seed"] = voiceSeed
-        if let c = characters.first(where: { $0.id == character }) {
-            r["seed"] = c.seed
-            r["casting"] = ["id": c.id, "age": c.age, "voice_gender": c.voiceGender, "voice_description": description ?? c.voice]
-        }
+        if let c = characters.first(where: { $0.id == character }) { r["seed"] = c.seed }
         launch(r, after: autoplay ? { [weak self] in self?.listenGenerated() } : nil)
     }
 
@@ -816,7 +817,10 @@ struct Character: Identifiable {
                 if let cid = event["character"] as? String, !cid.isEmpty { previewByCharacter[cid] = generatedSample }
             case "child": childPID = (event["pid"] as? NSNumber)?.int32Value ?? 0; applyPriority()
             case "project": project = event["path"] as? String ?? project
-            case "progress": status = event["message"] as? String ?? status; fraction = event["fraction"] as? Double ?? 0; speed = nil; eta = nil
+            case "progress":
+                status = event["message"] as? String ?? status; fraction = event["fraction"] as? Double ?? 0
+                // Synthesis steps keep the last measured speed and remaining time on screen.
+                if event["synthesis"] as? Bool != true { speed = nil; eta = nil }
             case "estimate":
                 bookCharacterCount = event["characters"] as? Int ?? bookCharacterCount
             case "metrics":
@@ -977,7 +981,7 @@ struct ContentView: View {
                     step("1", "Книга", done: !studio.book.isEmpty)
                     step("2", "Персонажи и роли", done: !studio.characters.isEmpty)
                     step("3", "Характеры и голоса", done: studio.characters.contains { !$0.personality.isEmpty })
-                    step("4", "Аудиокнига и EPUB", done: FileManager.default.fileExists(atPath: studio.project + "/result/book.m4b"))
+                    step("4", "Аудиокнига и EPUB", done: FileManager.default.fileExists(atPath: studio.project + "/result/audiobook.m4b"))
                 }
                 Divider()
                 Text(studio.characters.isEmpty ? "Персонажи появятся после анализа книги" : "\(studio.characters.count) персонажей · карточки в основном списке")
@@ -1210,11 +1214,11 @@ struct VoiceLabView: View {
                 Spacer()
                 Button("Закрыть") { studio.voiceLabOpen = false }
             }
-            Text("Создайте голос отдельно от книги. Опишите возраст, тембр, высоту и манеру говорить, затем введите свой текст.").foregroundStyle(.secondary)
+            Text("Создайте голос отдельно от книги. Опишите возраст, тембр, высоту и манеру говорить, затем введите свой текст. Английское описание передаётся модели напрямую; русское сначала переводится через LLM.").foregroundStyle(.secondary)
             Text("Описание голоса").font(.headline)
             TextEditor(text: $studio.voiceDescription).font(.body).frame(height: 110).padding(8)
                 .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 10)).disabled(studio.busy)
-            Text("Тестовый текст · 20–250 символов").font(.headline)
+            Text("Тестовый текст · 20–1000 символов").font(.headline)
             TextEditor(text: $studio.voiceTestText).font(.body).frame(height: 90).padding(8)
                 .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 10)).disabled(studio.busy)
             HStack {

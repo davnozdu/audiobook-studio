@@ -6,6 +6,17 @@ public enum NativeProject {
       try? FileManager.default.removeItem(at: project.appendingPathComponent(name))
     }
   }
+  /// Own voice samples are stored relative to the project, so a moved project keeps them.
+  /// Older projects stored absolute paths; a missing absolute file is looked up in voice-samples.
+  public static func sampleURL(_ path: String, project: URL) -> URL {
+    if path.hasPrefix("/") {
+      let absolute = URL(fileURLWithPath: path)
+      if FileManager.default.fileExists(atPath: absolute.path) { return absolute }
+      return project.appendingPathComponent("voice-samples/" + absolute.lastPathComponent)
+    }
+    let parts = path.split(separator: "/").filter { $0 != "." && $0 != ".." }
+    return project.appendingPathComponent(parts.joined(separator: "/"))
+  }
   public static func verify(_ folder: URL) throws -> (Object, Object) {
     let manifest = try NativeIO.load(folder.appendingPathComponent("roles/manifest.json"))
     let source = try NativeIO.load(folder.appendingPathComponent("roles/source.json"))
@@ -105,7 +116,7 @@ public enum NativeProject {
     for index in voices.indices {
       var ref = NativeIO.object(voices[index]["custom_reference"])
       guard !ref.isEmpty else { continue }
-      let source = URL(fileURLWithPath: NativeIO.string(ref["path"]))
+      let source = sampleURL(NativeIO.string(ref["path"]), project: project)
       let relative =
         "voice-samples/" + NativeIO.string(voices[index]["id"]) + "." + source.pathExtension
       let file = temporary.appendingPathComponent(relative)
@@ -115,7 +126,7 @@ public enum NativeProject {
         try FileManager.default.removeItem(at: file)
       }
       try FileManager.default.copyItem(at: source, to: file)
-      ref["path"] = "studio-project://" + relative
+      ref["path"] = relative
       voices[index]["custom_reference"] = ref
     }
     manifest["voices"] = voices

@@ -64,6 +64,10 @@ public enum NativeIO {
   public static func stage(_ message: String, _ fraction: Double = 0) {
     emit("progress", ["message": message, "fraction": fraction])
   }
+  /// A step inside book synthesis: the GUI keeps the measured speed and remaining time.
+  public static func synthesisStage(_ message: String, _ fraction: Double) {
+    emit("progress", ["message": message, "fraction": fraction, "synthesis": true])
+  }
   public static func regex(_ pattern: String, _ text: String) -> [NSTextCheckingResult] {
     (try? NSRegularExpression(pattern: pattern).matches(
       in: text, range: NSRange(text.startIndex..., in: text))) ?? []
@@ -84,19 +88,17 @@ public enum NativeIO {
       .replacingOccurrences(of: ">", with: "&gt;").replacingOccurrences(of: "\"", with: "&quot;")
   }
   public static func capture(
-    _ executable: URL, _ arguments: [String], cwd: URL? = nil, input: Data? = nil,
-    events: Bool = true
+    _ executable: URL, _ arguments: [String], cwd: URL? = nil, events: Bool = true
   ) throws -> (Data, Data) {
     let process = Process()
     let output = Pipe()
     let errors = Pipe()
-    let stdin = Pipe()
     process.executableURL = executable
     process.arguments = arguments
     process.currentDirectoryURL = cwd
     process.standardOutput = output
     process.standardError = errors
-    if input != nil { process.standardInput = stdin }
+    process.standardInput = FileHandle.nullDevice
     let lock = NSLock()
     var capturedError = Data()
     errors.fileHandleForReading.readabilityHandler = { handle in
@@ -109,10 +111,6 @@ public enum NativeIO {
     }
     try process.run()
     if events { emit("child", ["pid": process.processIdentifier]) }
-    if let input {
-      try stdin.fileHandleForWriting.write(contentsOf: input)
-      try stdin.fileHandleForWriting.close()
-    }
     let data = output.fileHandleForReading.readDataToEndOfFile()
     process.waitUntilExit()
     lock.lock()
@@ -127,9 +125,8 @@ public enum NativeIO {
     return (data, capturedError)
   }
   @discardableResult public static func run(
-    _ executable: URL, _ arguments: [String], cwd: URL? = nil, input: Data? = nil,
-    events: Bool = true
-  ) throws -> Data { try capture(executable, arguments, cwd: cwd, input: input, events: events).0 }
+    _ executable: URL, _ arguments: [String], cwd: URL? = nil, events: Bool = true
+  ) throws -> Data { try capture(executable, arguments, cwd: cwd, events: events).0 }
   public static func archiveMembers(_ url: URL) throws -> [String] {
     let text =
       String(
