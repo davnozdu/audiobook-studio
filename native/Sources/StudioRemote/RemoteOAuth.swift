@@ -15,20 +15,32 @@ public enum RemoteRegistration {
 public struct RemoteConfig: Codable {
     public var enabled = false, provider = RemoteProvider.dropbox
     public var dropboxID = "", googleID = "", connections: [String: String] = [:]
+    // Optional fields preserve existing installations and their Keychain entries.
+    public var customDropboxID: String?, customGoogleID: String?
     public init() { dropboxID = RemoteRegistration.values["dropboxID"] ?? ""; googleID = RemoteRegistration.values["googleID"] ?? "" }
-    public func clientID(_ p: RemoteProvider) -> String { p == .dropbox ? dropboxID : googleID }
+    public func customClientID(_ p: RemoteProvider) -> String? { p == .dropbox ? customDropboxID : customGoogleID }
+    public func clientID(_ p: RemoteProvider) -> String { customClientID(p) ?? (p == .dropbox ? dropboxID : googleID) }
+    public func credentialKey(_ p: RemoteProvider, suffix: String) -> String {
+        guard let id = customClientID(p) else { return p.rawValue + suffix }
+        return p.rawValue + ".custom." + RemoteJSON.base64(Data(SHA256.hash(data: Data(id.utf8)))) + suffix
+    }
 }
 @MainActor public final class RemoteOAuth {
     let secrets: RemoteSecrets, http: RemoteHTTP
     public init(secrets: RemoteSecrets, http: RemoteHTTP = RemoteHTTP()) { self.secrets = secrets; self.http = http }
     public func token(_ provider: RemoteProvider, config: RemoteConfig) async throws -> String {
-        let refresh = try secrets.read(provider.rawValue + "Refresh")
+        let refresh = try secrets.read(config.credentialKey(provider, suffix: "Refresh"))
         guard !refresh.isEmpty else { throw RemoteError("Подключите " + provider.title + " в настройках приложения") }
         var fields = ["grant_type": "refresh_token", "refresh_token": refresh, "client_id": config.clientID(provider)]
-        if provider == .googleDrive { fields["client_secret"] = try googleSecret() }
+        if provider == .googleDrive { fields["client_secret"] = try googleSecret(config) }
         return try await exchange(provider, fields)["access_token"] as? String ?? ""
     }
-    func googleSecret() throws -> String {
+    func googleSecret(_ config: RemoteConfig) throws -> String {
+        if config.customGoogleID != nil {
+            let value = try secrets.read(config.credentialKey(.googleDrive, suffix: "Secret"))
+            guard !value.isEmpty else { throw RemoteError("Укажите Client Secret собственного Google Desktop-приложения") }
+            return value
+        }
         let saved = try secrets.read("googleSecret")
         return saved.isEmpty ? RemoteRegistration.values["googleSecret"] ?? "" : saved
     }
@@ -55,10 +67,10 @@ public struct RemoteConfig: Codable {
         let receiver = OAuthLoopback()
         let code = try await receiver.receive(authorization: components.url!, state: state)
         var tokenFields = ["grant_type": "authorization_code", "code": code, "client_id": config.clientID(p), "redirect_uri": redirect, "code_verifier": verifier]
-        if p == .googleDrive { tokenFields["client_secret"] = try googleSecret() }
+        if p == .googleDrive { tokenFields["client_secret"] = try googleSecret(config) }
         let result = try await exchange(p, tokenFields)
         guard let refresh = result["refresh_token"] as? String, !refresh.isEmpty else { throw RemoteError("Сервис не выдал постоянное подключение. Повторите вход с разрешением доступа.") }
-        try secrets.write(p.rawValue + "Refresh", refresh)
+        try secrets.write(config.credentialKey(p, suffix: "Refresh"), refresh)
     }
 }
 // Listener is confined to loopback. Invalid requests never consume the authorization attempt.

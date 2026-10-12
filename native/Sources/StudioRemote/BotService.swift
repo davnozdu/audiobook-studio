@@ -127,6 +127,37 @@ import Combine
     func reply(_ text: String, chat: Int64, buttons: [[RemoteButton]] = [], html: Bool = false) {
         state.outbox.append(RemoteReply(chat, text, buttons, parseMode: html ? "HTML" : nil))
     }
+    public func configureCloud(_ provider: RemoteProvider, customID: String?, googleSecret: String = "") {
+        guard !connecting, !running else { message = "Дождитесь завершения текущей обработки"; return }
+        guard !state.jobs.contains(where: { ![.complete, .cancelled].contains($0.phase) }) else {
+            message = "Перед сменой OAuth-проекта завершите или отмените книги в очереди"; return
+        }
+        do {
+            var updated = config
+            let id = customID?.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let id {
+                guard !id.isEmpty, !id.contains(where: { $0.isWhitespace }) else { throw RemoteError("Укажите корректный Client ID / App key") }
+                if provider == .googleDrive {
+                    guard id.hasSuffix(".apps.googleusercontent.com") else { throw RemoteError("Нужен Client ID Google типа Desktop app") }
+                }
+            }
+            if provider == .dropbox { updated.customDropboxID = id } else { updated.customGoogleID = id }
+            if provider == .googleDrive, id != nil {
+                let value = googleSecret.trimmingCharacters(in: .whitespacesAndNewlines)
+                let key = updated.credentialKey(provider, suffix: "Secret")
+                let saved = try secrets.read(key)
+                guard !value.isEmpty || !saved.isEmpty else { throw RemoteError("Укажите Google Client Secret") }
+                if !value.isEmpty { try secrets.write(key, value) }
+            }
+            if (try secrets.read(updated.credentialKey(provider, suffix: "Refresh"))).isEmpty {
+                updated.connections.removeValue(forKey: provider.rawValue)
+            } else { updated.connections[provider.rawValue] = UUID().uuidString }
+            let previous = config
+            config = updated
+            do { try saveConfig() } catch { config = previous; throw error }
+            message = provider.title + (id == nil ? ": встроенный проект восстановлен" : ": собственный проект сохранён. Нажмите «Подключить» для входа")
+        } catch { message = (error as? RemoteError)?.message ?? "Не удалось сохранить настройки проекта" }
+    }
     func buttons(_ job: RemoteJob) -> [[RemoteButton]] {
         [[RemoteButton("📊 Статус", "status:" + job.id), RemoteButton("⏹ Отменить", "cancel:" + job.id)]]
     }

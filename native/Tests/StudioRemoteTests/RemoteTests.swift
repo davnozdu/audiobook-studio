@@ -22,6 +22,46 @@ final class MockHTTP: URLProtocol {
     override func stopLoading() {}
 }
 final class RemoteTests: XCTestCase {
+    func testLegacyCloudConfigPreservesCredentialKeys() throws {
+        let data = Data(#"{"enabled":true,"provider":"googleDrive","dropboxID":"old-dropbox","googleID":"old-google","connections":{"googleDrive":"existing"}}"#.utf8)
+        let config = try JSONDecoder().decode(RemoteConfig.self, from: data)
+        XCTAssertNil(config.customGoogleID)
+        XCTAssertEqual(config.clientID(.googleDrive), "old-google")
+        XCTAssertEqual(config.credentialKey(.googleDrive, suffix: "Refresh"), "googleDriveRefresh")
+        XCTAssertEqual(config.connections["googleDrive"], "existing")
+    }
+    @MainActor func testCustomCloudSwitchPreservesAndRestoresExistingTokens() throws {
+        let f = try folder(); defer { try? FileManager.default.removeItem(at: f) }
+        let secrets = MemorySecrets()
+        secrets.values["googleDriveRefresh"] = "original-refresh"
+        let bot = BotService(folder: f, secrets: secrets)
+        bot.config.googleID = "original.apps.googleusercontent.com"
+        bot.config.connections["googleDrive"] = "original-connection"
+        bot.configureCloud(.googleDrive, customID: "personal.apps.googleusercontent.com", googleSecret: "personal-secret")
+        let key = bot.config.credentialKey(.googleDrive, suffix: "Refresh")
+        XCTAssertNil(bot.config.connections["googleDrive"])
+        XCTAssertEqual(secrets.values["googleDriveRefresh"], "original-refresh")
+        XCTAssertEqual(try RemoteOAuth(secrets: secrets).googleSecret(bot.config), "personal-secret")
+        secrets.values[key] = "personal-refresh"
+        bot.configureCloud(.googleDrive, customID: nil)
+        XCTAssertEqual(bot.config.clientID(.googleDrive), "original.apps.googleusercontent.com")
+        XCTAssertNotNil(bot.config.connections["googleDrive"])
+        XCTAssertEqual(secrets.values[key], "personal-refresh")
+        bot.configureCloud(.googleDrive, customID: "personal.apps.googleusercontent.com")
+        XCTAssertNotNil(bot.config.connections["googleDrive"])
+        XCTAssertEqual(try RemoteOAuth(secrets: secrets).googleSecret(bot.config), "personal-secret")
+        let loaded = BotService(folder: f, secrets: secrets)
+        XCTAssertEqual(loaded.config.customGoogleID, bot.config.customGoogleID)
+        XCTAssertEqual(loaded.config.credentialKey(.googleDrive, suffix: "Refresh"), key)
+    }
+    @MainActor func testQueuedBookBlocksProjectChange() throws {
+        let f = try folder(); defer { try? FileManager.default.removeItem(at: f) }
+        let bot = BotService(folder: f, secrets: MemorySecrets())
+        _ = bot.state.receive(chatID: 1, messageID: 1, fileID: "book", name: "book.epub", provider: .dropbox)
+        bot.configureCloud(.dropbox, customID: "personal-app")
+        XCTAssertNil(bot.config.customDropboxID)
+        XCTAssertTrue(bot.message.contains("очереди"))
+    }
     func folder() throws -> URL {
         let u = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: u, withIntermediateDirectories: true); return u
