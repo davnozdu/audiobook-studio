@@ -3,6 +3,36 @@ import XCTest
 @testable import StudioCore
 
 final class CoreTests: XCTestCase {
+  func testPCMStreamPreservesExactOrderPausesAndFinalSamples() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let rows: [Object] = [
+      ["id": "first", "speaker": "v", "text": "Первая.", "pause_after_ms": 100],
+      ["id": "last", "speaker": "v", "text": "Последняя.", "pause_after_ms": 0]]
+    let first: [Float] = [0.1, -0.2, 0.3], last: [Float] = [0.4, -0.5, 0.625, 0.00001]
+    for (id, samples) in [("last", last), ("first", first)] {
+      try SpeechCache.save(root.appendingPathComponent("audio/segments/" + id + ".spcm"), samples: samples, signature: id)
+    }
+    let (timeline, frames) = try SpeechBatch.timeline(rows, frameCounts: ["first": first.count, "last": last.count])
+    var bytes = Data()
+    let written = try NativeAudio.streamMontage(project: root, segments: rows, timeline: timeline, gains: [:]) { bytes += $0 }
+    XCTAssertEqual(written, frames)
+    XCTAssertEqual(bytes, NativeWAV.bytes(first) + Data(repeating: 0, count: 2400 * 4) + NativeWAV.bytes(last))
+    XCTAssertThrowsError(try NativeAudio.streamMontage(project: root, segments: rows, timeline: timeline, gains: [:]) { _ in throw StudioError("consumer failed") })
+    var broken = timeline; broken[0]["pause_frames"] = 0
+    XCTAssertThrowsError(try NativeAudio.streamMontage(project: root, segments: rows, timeline: broken, gains: [:]) { _ in })
+  }
+  func testStreamProcessHandlesBackpressureProducerAndConsumerFailure() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let data = Data(repeating: 37, count: 1024 * 1024)
+    let out = root.appendingPathComponent("out")
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    _ = try NativeIO.stream(URL(fileURLWithPath: "/usr/bin/tee"), [out.path]) { try $0.write(contentsOf: data) }
+    XCTAssertEqual(try Data(contentsOf: out), data)
+    XCTAssertThrowsError(try NativeIO.stream(URL(fileURLWithPath: "/usr/bin/false"), []) { try $0.write(contentsOf: data) })
+    XCTAssertThrowsError(try NativeIO.stream(URL(fileURLWithPath: "/usr/bin/tee"), [out.path]) { _ in throw StudioError("producer failed") })
+  }
   func testTenAndTwentyHourBooksKeepAllSegmentsAnd64BitSizes() throws {
     for hours in [10, 20] {
       let rows: [Object] = (0..<(hours * 720)).map { i in

@@ -244,7 +244,8 @@ public struct NativeAudio {
     return out
   }
   public func package(
-    project: URL, manifest: Object, source: Object, timeline: [Object], audio: URL
+    project: URL, manifest: Object, source: Object, timeline: [Object], audio: URL? = nil,
+    gains: [String: Double] = [:], music: URL? = nil, musicPercent: Double = 0
   ) throws -> URL {
     let out = project.appendingPathComponent("result")
     let fm = FileManager.default
@@ -283,28 +284,49 @@ public struct NativeAudio {
     let coverFile = FileManager.default.temporaryDirectory.appendingPathComponent(
       "cover-" + UUID().uuidString + "." + (cover?.ext ?? "jpg"))
     defer { try? fm.removeItem(at: coverFile) }
-    var arguments = [
-      "-i", audio.appendingPathComponent("sample.wav").path, "-f", "ffmetadata", "-i", meta.path,
-    ]
+    guard musicPercent.isFinite, (0...50).contains(musicPercent) else { throw StudioError("Некорректная громкость музыки") }
+    var arguments = audio.map { ["-i", $0.appendingPathComponent("sample.wav").path] }
+      ?? ["-f", "f32le", "-ar", "24000", "-ac", "1", "-i", "pipe:0"]
+    arguments += ["-f", "ffmetadata", "-i", meta.path]
+    var coverIndex = 2
+    if let music {
+      arguments += ["-stream_loop", "-1", "-i", music.path]
+      coverIndex += 1
+    }
     var coverMapping: [String] = []
     if let cover {
       try cover.data.write(to: coverFile)
       arguments += ["-i", coverFile.path]
-      coverMapping = ["-map", "2:v:0", "-c:v", "copy", "-disposition:v:0", "attached_pic"]
+      coverMapping = ["-map", "\(coverIndex):v:0", "-c:v", "copy", "-disposition:v:0", "attached_pic"]
     }
     let m4b = out.appendingPathComponent("audiobook.m4b")
     // The limiter is delay-compensated, so sentence timing for the EPUB overlay is unchanged.
-    try ff(arguments + ["-map", "0:a:0"] + coverMapping + [
+    var filter = ["-map", "0:a:0", "-af", "alimiter=limit=0.84:level=0:latency=1"]
+    if music != nil {
+      filter = ["-filter_complex",
+        "[2:a]aresample=24000,aformat=channel_layouts=mono,volume=\(musicPercent/100)[music];[0:a][music]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.84:level=0:latency=1[out]",
+        "-map", "[out]"]
+    }
+    arguments += filter + coverMapping + [
       "-map_metadata", "1", "-map_chapters", "1",
-      "-af", "alimiter=limit=0.84:level=0:latency=1", "-c:a", "aac", "-b:a", "96k",
+      "-ac", "1", "-ar", "24000", "-c:a", "aac", "-b:a", "96k",
       "-movflags", "+faststart", m4b.path,
-    ])
+    ]
+    if audio != nil { try ff(arguments) }
+    else {
+      _ = try NativeIO.stream(ffmpeg, ["-hide_banner", "-nostats", "-loglevel", "error", "-y"] + arguments) { sink in
+        try Self.streamMontage(project: project, segments: segments, timeline: timeline, gains: gains) {
+          try sink.write(contentsOf: $0)
+        }
+      }
+    }
     guard abs(try duration(m4b) - total) < 0.15 else {
       throw StudioError("Длительность M4B не соответствует разметке")
     }
     try NativeBook.epub(
       manifest, source: source, timeline: timeline, audio: m4b,
       output: out.appendingPathComponent("audiobook.epub"), cover: cover)
+    try NativeIO.run(URL(fileURLWithPath: "/usr/bin/unzip"), ["-tqq", out.appendingPathComponent("audiobook.epub").path])
     try NativeIO.write(
       out.appendingPathComponent("package-report.json"),
       [

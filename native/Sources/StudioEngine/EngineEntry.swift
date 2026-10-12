@@ -38,6 +38,9 @@ import StudioCore
         else { throw StudioError("Декодер обрезает допустимые нулевые аудиотокены") }
         NativeIO.emit("log", ["message": "Qwen codec: нулевые аудиотокены сохраняют полную длину"])
         let resources = URL(fileURLWithPath: CommandLine.arguments.last!)
+        let binaries = resources.deletingLastPathComponent().appendingPathComponent("runtime/bin")
+        try NativeAudio(ffmpeg: binaries.appendingPathComponent("ffmpeg"), ffprobe: binaries.appendingPathComponent("ffprobe")).streamingSelfCheck()
+        NativeIO.emit("log", ["message": "Потоковая сборка: AAC, музыка, EPUB и очистка проверены без полных WAV-копий"])
         let helper = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
           .appendingPathComponent("StudioStress")
         let values = (MLXArray([Float(1), Float(4)]) + 1).asArray(Float.self)
@@ -529,16 +532,17 @@ final class Engine {
     Memory.clearCache()
     memoryLog("VoiceDesign выгружен")
     lap("голоса VoiceDesign")
-    let (timeline, frames) = try await synthesize(rows: rows, voices: voices,
+    let (timeline, _) = try await synthesize(rows: rows, voices: voices,
       references: references, basePath: basePath)
     Memory.clearCache()
     memoryLog("Модель чтения выгружена перед нормализацией и упаковкой")
     lap("озвучка")
     let raw = project.appendingPathComponent("audio")
     try NativeIO.write(raw.appendingPathComponent("timeline.json"), ["segments": timeline])
-    NativeIO.stage("Нормализация громкости по ролям")
-    var final = try audio.normalize(project: project, segments: rows, timeline: timeline)
+    NativeIO.stage("Потоковая нормализация громкости по ролям")
+    let gains = try audio.streamingGains(project: project, segments: rows)
     lap("громкость")
+    var selectedMusic: URL?
     if request["music_enabled"] as? Bool ?? true {
       let selected = URL(fileURLWithPath: NativeIO.string(request["music"]))
       guard fm.fileExists(atPath: selected.path) else {
@@ -551,17 +555,12 @@ final class Engine {
         if fm.fileExists(atPath: music.path) { try fm.removeItem(at: music) }
         try fm.copyItem(at: selected, to: music)
       }
-      NativeIO.stage("Зацикливание и наложение фоновой музыки")
-      let unmixed = final
-      final = try audio.mix(
-        final, music: music, percent: request["music_volume"] as? Double ?? 5, project: project,
-        total: Double(frames) / 24000)
-      try fm.removeItem(at: unmixed)
-      lap("музыка")
+      selectedMusic = music
     }
     NativeIO.stage("Сборка отдельного M4B и EPUB с синхронным аудио")
     let result = try audio.package(
-      project: project, manifest: prepared, source: source, timeline: timeline, audio: final)
+      project: project, manifest: prepared, source: source, timeline: timeline,
+      gains: gains, music: selectedMusic, musicPercent: request["music_volume"] as? Double ?? 5)
     let external = URL(fileURLWithPath: destination)
     NativeIO.stage("Сохранение аудиокниги и EPUB · " + destination)
     try fm.copyItem(at: result, to: external)

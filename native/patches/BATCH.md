@@ -27,10 +27,18 @@ uses 64-bit RF64 headers. Every segment is checked before packaging, and the
 completed M4B duration must match the timeline.
 
 Per-line cache uses exact Float32 PCM compressed by native macOS LZFSE in `.spcm`
-containers; incompressible data falls back to raw PCM. No sample conversion or
+containers with reversible byte-plane transposition; incompressible data falls
+back to raw PCM. No sample conversion or
 lossy encoding is performed. SHA256, frame count and cache signatures protect
 against stale or incomplete data. Source: [Apple Compression](https://developer.apple.com/documentation/compression).
-Each speaker's loudness-measurement WAV is deleted as soon as measured.
+Role loudness is measured through a bounded PCM stdin pipe. Final montage reads
+one utterance at a time, applies per-role gain and writes exact samples/pauses
+directly to FFmpeg. Music mixing, limiting and AAC encoding run in that same
+process. No full measurement, normalized or music WAV is created. Pipe failures
+abort packaging and retain the resumable cache. The bundle self-check packages
+deterministic small signal fixtures with and without music, checks decoded AAC
+duration, EPUB text/CRC and verified cleanup. It does not synthesize speech.
+Reference: [FFmpeg pipe protocol](https://ffmpeg.org/ffmpeg-protocols.html#pipe).
 
 Only after M4B/EPUB packaging and SHA256 verification of the external copies are
 all cached utterances deleted. Source EPUB, roles, voice references, logs,
@@ -42,6 +50,10 @@ speech because the completed-book cache has intentionally been reclaimed.
 At 24 kHz mono Float32, 10 hours is 3.456 GB PCM; 20 hours is 6.912 GB.
 96 kb/s AAC is approximately 432/864 MB per final M4B; the EPUB contains another
 copy. Project and external result folders both retain these compressed outputs.
-Allow roughly 15 GB free for 10 hours and 30 GB for 20 hours, excluding first-time
+Allow roughly 7 GB free for 10 hours and 12 GB for 20 hours, excluding first-time
 model downloads, existing projects, archives and source music. Actual lossless
 compression ratio depends on the waveform; estimates assume no saving from it.
+With both internal/external M4B+EPUB copies, the PCM+final-file bound is roughly
+5.2/10.4 GB plus metadata and transient packaging. AAC faststart and EPUB packaging
+may add one extra compressed copy temporarily. Model downloads total about
+7.6 GB independently of book length and remain available for subsequent books.
