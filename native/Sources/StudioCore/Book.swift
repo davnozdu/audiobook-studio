@@ -127,7 +127,16 @@ public enum NativeBook {
     ]
   }
   public static func split(_ text: String, maximum: Int = 240) -> [(Int, Int)] {
+    precondition(maximum > 0)
     let scalars = Array(text.unicodeScalars)
+    let whitespace = CharacterSet.whitespacesAndNewlines
+    let closers = CharacterSet(charactersIn: "»”\"')]")
+    func sentenceEnd(_ index: Int) -> Int? {
+      guard ".!?…".unicodeScalars.contains(scalars[index]) else { return nil }
+      var end = index + 1
+      while end < scalars.count, closers.contains(scalars[end]) { end += 1 }
+      return end == scalars.count || whitespace.contains(scalars[end]) ? end : nil
+    }
     var start = 0
     var result: [(Int, Int)] = []
     while start < scalars.count {
@@ -136,12 +145,15 @@ public enum NativeBook {
       }
       guard start < scalars.count else { break }
       var end = min(start + maximum, scalars.count)
-      let sentence = (start..<end).filter {
-        ".!?…".unicodeScalars.contains(scalars[$0])
-          && ($0 + 1 == scalars.count
-            || CharacterSet.whitespacesAndNewlines.contains(scalars[$0 + 1]))
-      }
+      let sentence = (start..<end).compactMap(sentenceEnd).filter { $0 <= end }
       if end < scalars.count, let cut = sentence.last {
+        end = cut
+      } else if end < scalars.count,
+        let cut = (end..<min(start + maximum * 2, scalars.count)).compactMap(sentenceEnd).first {
+        // 240 is a target, not a reason to cut a sentence just before its ending.
+        end = cut
+      } else if end < scalars.count,
+        let cut = (start..<end).last(where: { ",;:".unicodeScalars.contains(scalars[$0]) }) {
         end = cut + 1
       } else if end < scalars.count,
         let cut = (start..<end).last(where: {
@@ -156,6 +168,11 @@ public enum NativeBook {
       start = end
     }
     return result
+  }
+  public static func sentenceFinished(_ text: String) -> Bool {
+    let ending = text.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines
+      .union(CharacterSet(charactersIn: "»”\"')]-—–")))
+    return ending.last.map { ".!?…".contains($0) } ?? false
   }
   public static func epub(
     _ manifest: Object, source: Object, timeline: [Object], audio: URL, output: URL,

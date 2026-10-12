@@ -3,6 +3,68 @@ import XCTest
 @testable import StudioCore
 
 final class CoreTests: XCTestCase {
+  func testTrimPreservesQuietFinalConsonants() throws {
+    let silence = [Float](repeating: 0, count: 12000)
+    let speech = [Float](repeating: 0.1, count: 2400)
+    let consonant = [Float](repeating: 0.0005, count: 3600)
+    let result = NativeWAV.trim(silence + speech + consonant + silence)
+    XCTAssertEqual(result, Array(silence.suffix(2400)) + speech + consonant + Array(silence.prefix(4800)))
+    XCTAssertTrue(NativeWAV.trim(silence).isEmpty)
+    XCTAssertEqual(NativeWAV.trim(speech + consonant), speech + consonant)
+  }
+  func testStrongUnfinishedTailRetriesWithoutFading() async throws {
+    let active = [Float](repeating: 0.1, count: 4800)
+    let complete = active + [Float](repeating: 0, count: 2400)
+    XCTAssertTrue(SpeechRecovery.activeTail(active))
+    XCTAssertFalse(SpeechRecovery.activeTail(complete))
+    XCTAssertFalse(SpeechRecovery.activeTail(active + [Float](repeating: 0.0005, count: 2400)))
+    var attempts = 0
+    let output = try await SpeechRecovery.generate(text: "Конец.", seed: 10, label: "tail-test") { _, _ in
+      attempts += 1; return attempts == 1 ? active : complete
+    }
+    XCTAssertEqual(attempts, 2)
+    XCTAssertEqual(output, complete)
+    attempts = 0
+    do {
+      _ = try await SpeechRecovery.generate(text: "Конец.", seed: 10, label: "tail-test") { _, _ in
+        attempts += 1; return active
+      }
+      XCTFail("Suspect output must not be saved as complete")
+    } catch { XCTAssertTrue(error.localizedDescription.contains("tail-test")) }
+    XCTAssertEqual(attempts, 3)
+  }
+  func testSentenceCanExtendPastTargetWithoutLosingText() throws {
+    let first = String(repeating: "слово ", count: 48) + "конец.»"
+    let text = first + " Далее совсем другая мысль."
+    let spans = NativeBook.split(text)
+    XCTAssertEqual(try NativeIO.scalarSlice(text, spans[0].0, spans[0].1), first)
+    XCTAssertEqual(try spans.map { try NativeIO.scalarSlice(text, $0.0, $0.1) }.joined(separator: " "), text)
+    XCTAssertTrue(NativeBook.sentenceFinished(first))
+    XCTAssertFalse(NativeBook.sentenceFinished("хотя в"))
+  }
+  func testOldSpeechBlocksRejoinOnlyWithinOneRole() throws {
+    let text = String(repeating: "слово ", count: 40) + "конец. Реплика другого."
+    let split = 239, boundary = 246
+    let rows: [Object] = try [(0, split, "narrator"), (split, boundary, "narrator"), (boundary, text.unicodeScalars.count, "hero")].enumerated().map { i, span in
+      ["id": "old\(i)", "speaker": span.2, "paragraph_id": "p1", "chapter_id": "ch1",
+       "source": ["char_start": span.0, "char_end": span.1],
+       "text": try NativeIO.scalarSlice(text, span.0, span.1), "pause_after_ms": 450,
+       "tts_text": "Устаревший текст"]
+    }
+    let migrated = try NativeProject.speechBlocks(["segments": rows], source: ["paragraphs": [["id": "p1", "text": text]]])
+    let result = NativeIO.objects(migrated["segments"])
+    XCTAssertEqual(result.count, 2)
+    XCTAssertEqual(result.map { NativeIO.string($0["speaker"]) }, ["narrator", "hero"])
+    XCTAssertEqual(result.map { NativeIO.string($0["text"]) }.joined(separator: " "), text)
+    XCTAssertNil(result[0]["tts_text"])
+    let again = try NativeProject.speechBlocks(migrated, source: ["paragraphs": [["id": "p1", "text": text]]])
+    XCTAssertEqual(try NativeIO.json(again), try NativeIO.json(migrated))
+  }
+  func testReferenceExcerptEndsAtCompleteSentence() throws {
+    let text = "Это законченная первая мысль. " + String(repeating: "продолжение ", count: 25)
+    let excerpt = try NativeProject.excerpt(["segments": [["speaker": "hero", "text": text]]], character: "hero")
+    XCTAssertEqual(excerpt, "Это законченная первая мысль.")
+  }
   func testLoudnessJSONWithFFmpegSummaryAfterIt() throws {
     let report = """
       [Parsed_loudnorm_0 @ 0x123]

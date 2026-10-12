@@ -11,6 +11,7 @@ UPSTREAM_SHA = "e0e4ac8efdfb5f63a9e0afc8339b7b2b2a3ac3afe6d749979342f178a70a5df4
 MARKER = "// Audiobook Studio: official non_streaming_mode=True prefill."
 # Earlier audited patch results a cached checkout may still contain.
 PREVIOUS_PATCH_SHAS = {
+    "0ce467d5d27d75d1f54579f3e2abbb7a792f2bf38d55365a6052700e0585d92c",
     "ccdc11d446514162c90ecef73c8d9a0100eb287d22f066ab72b5626fab486a4f",
     "a3b3a56865590533a010762797129d7f69cc7526f41faec639a36ca26bb09f80",
 }
@@ -23,6 +24,20 @@ def patched(source):
             raise ValueError("Pinned Qwen patch anchor changed")
         source = source.replace(old, new)
 
+    replace("    // MARK: - Decode chunk helper\n", """    // Audiobook Studio: zero is a real codec ID; only negative padding is invalid.
+    public static func studioDecodedFrameCount(_ firstCodebook: MLXArray, upsampleRate: Int) -> Int {
+        Int((firstCodebook .>= 0).sum().item(Int32.self)) * upsampleRate
+    }
+
+    // MARK: - Decode chunk helper
+""")
+    replace("""        let validLen = Int((codes[0..., 0..., 0] .> 0).sum().item(Int32.self))
+            * speechTokenizer.decodeUpsampleRate
+        if validLen > 0, validLen < audio.dim(0) {
+""", """        let validLen = Self.studioDecodedFrameCount(codes[0..., 0..., 0],
+            upsampleRate: speechTokenizer.decodeUpsampleRate)
+        if validLen < audio.dim(0) {
+""")
     replace("                speaker: speaker\n", "                speaker: speaker,\n                nonStreaming: onAudioChunk == nil\n")
     replace("        speaker: String? = nil\n", "        speaker: String? = nil,\n        nonStreaming: Bool = false\n")
     replace("        // Add first text token (index 3) + last codec embed\n", """        // Audiobook Studio: official non_streaming_mode=True prefill.
@@ -136,5 +151,18 @@ def apply(path):
 
 
 if __name__ == "__main__":
-    apply(Path(sys.argv[1]) / "Sources/MLXAudioTTS/Models/Qwen3TTS/Qwen3TTS.swift")
-    print("Qwen Swift: verified offline input, speaker identity and audio limit fixes")
+    directory = Path(sys.argv[1]) / "Sources/MLXAudioTTS/Models/Qwen3TTS"
+    apply(directory / "Qwen3TTS.swift")
+    tokenizer = directory / "Qwen3TTSSpeechTokenizer.swift"
+    source = tokenizer.read_text()
+    original_sha = "e4569db0be3c6c41eb7a4a5a9feb3b73ce89a8d8b7bb704d9a5cb1c3aca4d695"
+    old = "(audioCodes[0..., 0..., 0] .> 0)"
+    new = "(audioCodes[0..., 0..., 0] .>= 0)"
+    original = source.replace(new, old)
+    if hashlib.sha256(original.encode()).hexdigest() != original_sha or original.count(old) != 1:
+        raise ValueError("Unexpected Qwen speech tokenizer source; audit the new revision before building")
+    result = original.replace(old, new)
+    if source != result:
+        tokenizer.chmod(tokenizer.stat().st_mode | 0o200)
+        tokenizer.write_text(result)
+    print("Qwen Swift: verified offline input, speaker identity, codec-zero length and audio limit fixes")

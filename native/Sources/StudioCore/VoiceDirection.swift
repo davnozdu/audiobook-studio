@@ -5,7 +5,7 @@ public enum VoiceDirection {
     "age", "personality", "habits", "speaking_style", "voice_description",
   ]
   public static let readingRules =
-    " Speak Russian clearly. Keep one consistent voice. Say only the supplied text. No extra utterances or background sounds."
+    " Speak Russian clearly. Keep one consistent voice. Say only the supplied text. Finish every word, including quiet final syllables and consonants. Complete phrase endings naturally. No extra utterances or background sounds."
 
   public static func input(_ voice: Object) -> Object {
     let profile = NativeIO.object(voice["character_profile"])
@@ -17,7 +17,7 @@ public enum VoiceDirection {
   }
 
   public static func signature(_ voice: Object) throws -> String {
-    try NativeIO.hash(NativeIO.json(["version": 2, "rules": readingRules, "profile": input(voice)]))
+    try NativeIO.hash(NativeIO.json(["version": 3, "rules": readingRules, "profile": input(voice)]))
   }
 
   public static func compose(_ reply: Object) throws -> String {
@@ -69,6 +69,7 @@ extension NativeDirector {
       Return exactly {"voice":"2-3 short sentences, 20-350 characters","delivery":"2-4 short sentences, 20-500 characters"}.
       voice: perceived voice age, gender only if known, pitch, timbre and resonance. Distinguish youthful and worn older voices through audible texture, not just age numbers. Character age is a fact; an explicitly requested older-sounding or tired voice is a vocal interpretation, not a changed biography.
       delivery: one dominant tone, pace, articulation, phrase endings and pauses. Base the tone on the character's habitual behaviour. Choose the best-supported dominant manner when the profile lists conflicting scene emotions; do not request switches between anger, warmth, fear and confidence in one sample. Prefer concrete cues over psychological labels.
+      Roughness, age and energy are voice texture, never missing phonemes. Do not request clipped or cut-off endings, swallowed syllables, unfinished words, fading-away words or inaudible phrase endings. Translate abruptness as firm consonants, brisk rhythm and decisive but fully pronounced endings. Translate softness as lower energy with all syllables still intelligible. When an older or creaky voice is explicitly requested, preserve its rasp, grain and vocal texture; do not smooth it into a generic warm baritone.
       Examples of translating manner, only when relevant: eager-to-please = soft deferential delivery, small upward pitch turns, hesitant phrase endings, quick attentive phrasing; tired/worn = thin slightly rough timbre, restrained energy, short breath groups; stern = firm articulation, steady low pitch, deliberate endings. Preserve intelligibility and the requested natural voice. Do not default all males to the same baritone or all females to the same gentle voice. Do not invent accents, ages or traits without evidence or explicit preferences.
       Habits involving particles, repetitions, laughter or interjections are TEXT CONTENT, not directions to add them. Describe their vocal tone only. Never ask for extra words, syllables, laughs, coughs, gasps, singing or sounds. No biographies, changing roles, scene summaries, metaphors, alternatives, slash-separated traits, or contradictory directions. Do not include reading rules; the app adds them.
       """ + String(data: try NativeIO.json(payload), encoding: .utf8)!

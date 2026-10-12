@@ -5,6 +5,16 @@ The build applies `scripts/patch_qwen_native.py` after resolving packages.
 The script verifies the entire original source SHA256 and is idempotent only for
 the exact original/modified pair. Unexpected source fails the build.
 
+Codec ID zero is valid. The pinned Swift `decodeChunk` and tokenizer length
+calculation incorrectly count only IDs greater than zero, then crop the tail of
+the decoded waveform. Official Qwen counts IDs greater than -1 (negative IDs
+are padding). Both Swift calculations are patched to include zero. At 24 kHz
+with 1920 samples per codec frame, each ignored zero removes 80 ms from the end;
+ICL includes reference codes, so zeros in the reference can also shorten output.
+The offline bundle self-check exercises the actual patched MLX length function
+on zero/nonzero/padding IDs without loading a TTS model or generating speech.
+The tokenizer source is pinned by its own full-source SHA256 as well.
+
 Reference: [official inference wrapper](https://github.com/QwenLM/Qwen3-TTS/blob/main/qwen_tts/inference/qwen3_tts_model.py)
 and [model input assembly](https://github.com/QwenLM/Qwen3-TTS/blob/main/qwen_tts/core/models/modeling_qwen3_tts.py).
 VoiceDesign defaults to `non_streaming_mode=True`: instruction, role, language

@@ -1,7 +1,7 @@
 name: macOS ARM app
 on:
   push:
-    branches: [main]
+    branches: [main, fix/speech-endings-voices]
     tags: ['v*']
   workflow_dispatch:
 permissions:
@@ -23,11 +23,14 @@ jobs:
         with:
           xcode-version: latest-stable
       - name: Unit tests
-        run: STUDIO_CORE_ONLY=1 swift test --package-path native
+        run: |
+          STUDIO_CORE_ONLY=1 swift test --package-path native
       - name: Version
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          elif [[ "$GITHUB_REF_NAME" == fix/speech-endings-voices ]]; then
+            echo "VERSION=0.5.16-test.1" >> "$GITHUB_ENV"
           else
             echo "VERSION=0.1.0" >> "$GITHUB_ENV"
           fi

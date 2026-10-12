@@ -76,10 +76,12 @@ public enum NativeWAV {
     try data.write(to: file, options: .atomic)
   }
   public static func trim(_ samples: [Float]) -> [Float] {
-    guard let first = samples.firstIndex(where: { abs($0) > 0.003 }),
-      let last = samples.lastIndex(where: { abs($0) > 0.003 })
+    // Remove only near-silence. Quiet final consonants must not be mistaken for padding.
+    // Keep 100 ms before speech and 200 ms after it; never fade or shorten audible speech.
+    guard let first = samples.firstIndex(where: { abs($0) > 0.0001 }),
+      let last = samples.lastIndex(where: { abs($0) > 0.0001 })
     else { return [] }
-    return Array(samples[max(0, first - 1200)..<min(samples.count, last + 1201)])
+    return Array(samples[max(0, first - 2400)..<min(samples.count, last + 4801)])
   }
 }
 public final class WAVMontage {

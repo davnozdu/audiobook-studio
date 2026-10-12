@@ -30,6 +30,11 @@ import StudioCore
       Memory.cacheLimit = Int(min(UInt64(4096 * 1024 * 1024),
         max(UInt64(512 * 1024 * 1024), ProcessInfo.processInfo.physicalMemory / 8)))
       if CommandLine.arguments.contains("--self-check") {
+        let codecIDs = MLXArray([Int32(14), 0, 23, 0, 7, -1])
+        guard Qwen3TTSModel.studioDecodedFrameCount(codecIDs, upsampleRate: 1920) == 9600,
+          Qwen3TTSModel.studioDecodedFrameCount(MLXArray([Int32(-1), -1]), upsampleRate: 1920) == 0
+        else { throw StudioError("Декодер обрезает допустимые нулевые аудиотокены") }
+        NativeIO.emit("log", ["message": "Qwen codec: нулевые аудиотокены сохраняют полную длину"])
         let resources = URL(fileURLWithPath: CommandLine.arguments.last!)
         let helper = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
           .appendingPathComponent("StudioStress")
@@ -398,6 +403,7 @@ final class Engine {
       manifest = try await director.resolve(manifest, source: source)
       try writeManifest(manifest, at: project)
     }
+    manifest = try NativeProject.speechBlocks(manifest, source: source)
     let basePath = try models.ensure(design: false)
     var voices = NativeIO.objects(manifest["voices"])
     let segments = NativeIO.objects(manifest["segments"])
@@ -654,7 +660,14 @@ final class Engine {
       let begin = Double(frames) / 24000
       frames += samples.count
       let finish = Double(frames) / 24000
-      let pause = max(0, min(3000, row["pause_after_ms"] as? Int ?? 450)) * 24
+      let requestedPause = row["pause_after_ms"] as? Int ?? 450
+      let next = i + 1 < rows.count ? rows[i + 1] : [:]
+      let sameParagraph = NativeIO.string(next["paragraph_id"]) == NativeIO.string(row["paragraph_id"])
+      // Author asides interrupt a grammatical sentence, not its audible completion.
+      let pauseMS = sameParagraph && !NativeBook.sentenceFinished(NativeIO.string(row["text"]))
+        && requestedPause == 450
+        ? (NativeIO.string(next["speaker"]) == speaker ? 100 : 180) : requestedPause
+      let pause = max(0, min(3000, pauseMS)) * 24
       frames += pause
       timeline.append([
         "segment_id": id, "speaker": speaker, "audio_start": begin, "audio_end": finish,

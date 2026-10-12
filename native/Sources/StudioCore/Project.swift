@@ -1,6 +1,61 @@
 import Foundation
 
 public enum NativeProject {
+  /// Rebuild speech blocks inside contiguous spans of the same speaker and paragraph.
+  /// Use source offsets, never concatenated/rewritten LLM text; role changes remain boundaries.
+  public static func speechBlocks(_ manifest: Object, source: Object) throws -> Object {
+    let paragraphs = Dictionary(uniqueKeysWithValues: NativeIO.objects(source["paragraphs"]).map {
+      (NativeIO.string($0["id"]), NativeIO.string($0["text"]))
+    })
+    var groups: [Object] = []
+    for row in NativeIO.objects(manifest["segments"]) {
+      if var previous = groups.last,
+        NativeIO.string(previous["speaker"]) == NativeIO.string(row["speaker"]),
+        NativeIO.string(previous["paragraph_id"]) == NativeIO.string(row["paragraph_id"]),
+        NativeIO.string(previous["chapter_id"]) == NativeIO.string(row["chapter_id"]) {
+        var anchor = NativeIO.object(previous["source"])
+        let next = NativeIO.object(row["source"])
+        let full = paragraphs[NativeIO.string(row["paragraph_id"])] ?? ""
+        let end = anchor["char_end"] as! Int, start = next["char_start"] as! Int
+        if end <= start,
+          try NativeIO.scalarSlice(full, end, start).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+          anchor["char_end"] = next["char_end"]
+          previous["source"] = anchor
+          previous["pause_after_ms"] = row["pause_after_ms"]
+          previous["needs_review"] = (previous["needs_review"] as? Bool ?? false)
+            || (row["needs_review"] as? Bool ?? false)
+          if NativeIO.string(row["confidence"]) != "high" { previous["confidence"] = row["confidence"] }
+          groups[groups.count - 1] = previous
+          continue
+        }
+      }
+      groups.append(row)
+    }
+    var rows: [Object] = []
+    for group in groups {
+      let originalAnchor = NativeIO.object(group["source"])
+      let start = originalAnchor["char_start"] as! Int
+      let full = paragraphs[NativeIO.string(group["paragraph_id"])] ?? ""
+      let text = try NativeIO.scalarSlice(full, start, originalAnchor["char_end"] as! Int)
+      let chunks = NativeBook.split(text)
+      for (i, span) in chunks.enumerated() {
+        var row = group, anchor = originalAnchor
+        row["id"] = String(format: "seg%06d", rows.count + 1)
+        row["order"] = rows.count
+        row["text"] = try NativeIO.scalarSlice(text, span.0, span.1)
+        anchor["char_start"] = start + span.0; anchor["char_end"] = start + span.1
+        row["source"] = anchor
+        for field in ["tts_text", "tts_normalized"] { row.removeValue(forKey: field) }
+        if i + 1 < chunks.count {
+          row["pause_after_ms"] = NativeBook.sentenceFinished(NativeIO.string(row["text"])) ? 450 : 100
+        }
+        rows.append(row)
+      }
+    }
+    var result = manifest
+    result["segments"] = rows
+    return result
+  }
   public static func cleanupBuildIntermediates(_ project: URL) {
     for name in ["audio-normalized", "audio-music", "audio/sample.wav", "result/chapters.txt"] {
       try? FileManager.default.removeItem(at: project.appendingPathComponent(name))
@@ -83,16 +138,16 @@ public enum NativeProject {
     }
     guard text.count >= 20 else { throw StudioError("У персонажа недостаточно реплик для пробы") }
     guard text.count > target else { return text }
-    let prefix = String(text.prefix(151))
+    let prefix = String(text.prefix(241))
     let ends = NativeIO.regex("[.!?…](?:[»”\"])?(?=\\s|$)", prefix).map {
       ($0.range.location + $0.range.length)
-    }.filter { (110...150).contains($0) }
+    }.filter { (20...240).contains($0) }
     if let end = ends.min(by: { abs($0 - target) < abs($1 - target) }) {
       return (prefix as NSString).substring(to: end)
     }
     let words = String(text.prefix(target)).split(separator: " ")
     return words.dropLast().joined(separator: " ").trimmingCharacters(
-      in: CharacterSet(charactersIn: " ,;:—–")) + "…"
+      in: CharacterSet(charactersIn: " ,;:—–")) + "."
   }
   static func transform(_ value: Any, _ change: (String) throws -> String) rethrows -> Any {
     if let string = value as? String { return try change(string) }
