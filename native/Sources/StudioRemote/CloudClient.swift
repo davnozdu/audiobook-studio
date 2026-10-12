@@ -117,6 +117,108 @@ import CryptoKit
               let links = object["links"] as? [[String: Any]], let raw = links.first?["url"] as? String else { return nil }
         return raw.replacingOccurrences(of: "dl=0", with: "dl=1")
     }
+    public func migrateLegacy(jobID: String, title: String, author: String, sourceFolder: String,
+                              uploads: [String: RemoteUpload]) async throws -> (folder: String, uploads: [String: RemoteUpload])? {
+        let base = Self.bookBase(title: title, author: author).isEmpty ? "Книга " + jobID : Self.bookBase(title: title, author: author)
+        if provider == .googleDrive {
+            var components = URLComponents(string: "https://www.googleapis.com/drive/v3/files/" + sourceFolder)!
+            components.queryItems = [.init(name: "fields", value: "id,name,mimeType,parents")]
+            let (data, status) = try await request(components.url!, method: "GET")
+            guard status.statusCode == 200 else { return nil }
+            let legacy = try RemoteJSON.object(data)
+            let (rootData, rootStatus) = try await request(URL(string: "https://www.googleapis.com/drive/v3/files/root?fields=id")!, method: "GET")
+            guard rootStatus.statusCode == 200 else { return nil }
+            let rootID = RemoteJSON.string(try RemoteJSON.object(rootData), "id")
+            guard legacy["name"] as? String == "Audiobook Studio " + jobID,
+                  legacy["mimeType"] as? String == "application/vnd.google-apps.folder",
+                  (legacy["parents"] as? [String] ?? []).contains(where: { $0 == "root" || $0 == rootID }) else { return nil }
+            let children = try await googleChildren(sourceFolder)
+            let media = children.filter { file in
+                let ext = URL(fileURLWithPath: file["name"] as? String ?? "").pathExtension.lowercased()
+                return ext == "m4b" || ext == "epub"
+            }
+            guard !media.isEmpty else { return nil }
+            let root = try await googleRoot(create: true)
+            var destinationBase = base, target = "", attempt = 1
+            while true {
+                target = try await googleFolder(name: destinationBase, parent: root)
+                let existing = try await googleChildren(target)
+                if media.allSatisfy({ file in
+                    let ext = URL(fileURLWithPath: file["name"] as? String ?? "").pathExtension.lowercased()
+                    let expectedName = destinationBase + ext, fileID = file["id"] as? String ?? ""
+                    return !existing.contains { ($0["name"] as? String) == expectedName && ($0["id"] as? String) != fileID }
+                }) { break }
+                attempt += 1; destinationBase = base + " (версия \(attempt))"
+            }
+            var updated = uploads
+            for file in media {
+                guard let fileID = file["id"] as? String else { continue }
+                let ext = URL(fileURLWithPath: file["name"] as? String ?? "").pathExtension.lowercased()
+                let remoteName = destinationBase + ext
+                let current = try await googleChildren(target)
+                if !current.contains(where: { ($0["name"] as? String) == remoteName && ($0["id"] as? String) == fileID }) {
+                    var url = URLComponents(string: "https://www.googleapis.com/drive/v3/files/" + fileID)!
+                    url.queryItems = [.init(name: "addParents", value: target), .init(name: "removeParents", value: sourceFolder), .init(name: "fields", value: "id,name")]
+                    let (moved, response) = try await request(url.url!, method: "PATCH", data: RemoteJSON.data(["name": remoteName]), headers: ["Content-Type": "application/json"])
+                    guard response.statusCode == 200 else { throw RemoteError("Не удалось перенести прежнюю книгу в медиатеку Google Drive") }
+                    _ = moved
+                }
+                let key = ext == ".m4b" ? "audiobook.m4b" : "audiobook.epub"
+                var record = updated[key] ?? RemoteUpload(); record.fileID = fileID; record.link = googleDownloadURL(fileID: fileID); updated[key] = record
+            }
+            if try await googleChildren(sourceFolder).isEmpty {
+                _ = try await request(URL(string: "https://www.googleapis.com/drive/v3/files/" + sourceFolder)!, method: "DELETE")
+            }
+            return (target, updated)
+        }
+        let expected = "/Audiobook-" + jobID
+        guard sourceFolder == expected else { return nil }
+        let old = try await api("files/get_metadata", ["path": sourceFolder])
+        guard old[".tag"] as? String == "folder" else { return nil }
+        let listing = try await api("files/list_folder", ["path": sourceFolder, "recursive": false, "include_deleted": false])
+        let entries = listing["entries"] as? [[String: Any]] ?? []
+        let media = entries.filter { entry in
+            guard entry[".tag"] as? String == "file" else { return false }
+            let ext = URL(fileURLWithPath: entry["name"] as? String ?? "").pathExtension.lowercased()
+            return ext == "m4b" || ext == "epub"
+        }
+        guard !media.isEmpty else { return nil }
+        let root = "/Audiobook Studio"
+        try await dropboxCreateFolder(root)
+        var destinationBase = base, target = "", attempt = 1
+        while true {
+            target = root + "/" + destinationBase
+            try await dropboxCreateFolder(target)
+            let existing = try await api("files/list_folder", ["path": target, "recursive": false, "include_deleted": false])
+            let existingEntries = existing["entries"] as? [[String: Any]] ?? []
+            if media.allSatisfy({ entry in
+                let ext = URL(fileURLWithPath: entry["name"] as? String ?? "").pathExtension.lowercased()
+                let expectedName = destinationBase + "." + ext, fileID = entry["id"] as? String ?? ""
+                return !existingEntries.contains { ($0["name"] as? String) == expectedName && ($0["id"] as? String) != fileID }
+            }) { break }
+            attempt += 1; destinationBase = base + " (версия \(attempt))"
+        }
+        var updated = uploads
+        for file in media {
+            guard let path = file["path_display"] as? String else { continue }
+            let ext = URL(fileURLWithPath: path).pathExtension.lowercased()
+            let destination = target + "/" + destinationBase + "." + ext
+            let existing = try await api("files/list_folder", ["path": target, "recursive": false, "include_deleted": false])["entries"] as? [[String: Any]] ?? []
+            if !existing.contains(where: { ($0["path_display"] as? String) == destination && ($0["id"] as? String) == (file["id"] as? String) }) {
+                let _ = try await api("files/move_v2", ["from_path": path, "to_path": destination, "autorename": false])
+            }
+            let key = ext == "m4b" ? "audiobook.m4b" : "audiobook.epub"
+            var record = updated[key] ?? RemoteUpload(); record.fileID = file["id"] as? String ?? ""
+            record.link = try await dropboxSharedURL(destination) ?? record.link
+            if record.link.isEmpty, let created = try? await api("sharing/create_shared_link_with_settings", ["path": destination]) {
+                record.link = (created["url"] as? String ?? "").replacingOccurrences(of: "dl=0", with: "dl=1")
+            }
+            updated[key] = record
+        }
+        let remaining = try await api("files/list_folder", ["path": sourceFolder, "recursive": false, "include_deleted": false])
+        if (remaining["entries"] as? [[String: Any]] ?? []).isEmpty { _ = try await api("files/delete_v2", ["path": sourceFolder]) }
+        return (target, updated)
+    }
     public func deleteGoogleBook(folderID: String) async throws {
         let root = try await googleRoot(create: false)
         guard !root.isEmpty else { throw RemoteError("Папка Audiobook Studio не найдена") }
