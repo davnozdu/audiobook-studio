@@ -228,28 +228,45 @@ final class CoreTests: XCTestCase {
     XCTAssertEqual(try NativeIO.scalarSlice("A😀Б", 1, 2), "😀")
     XCTAssertThrowsError(try NativeIO.scalarSlice("A", 0, 2))
   }
-  func testRolesPreserveAllText() throws {
-    let paragraph: Object = ["id": "p00001", "text": "— Да! 😀 — сказал он."]
-    let answer: Object = [
-      "paragraphs": [
-        [
-          "id": "p00001",
-          "segments": [
-            ["text": "— Да! 😀", "speaker": "hero"],
-            ["text": "— сказал он.", "speaker": "narrator"],
-          ],
-        ]
-      ]
-    ]
-    let rows = try NativeDirector.validateRoles(
-      answer, chunk: [paragraph], allowed: ["hero", "narrator"])
+  func testDialogueFragmentsSeparateAuthorRemarks() throws {
+    func parts(_ text: String) throws -> [String] {
+      try NativeDirector.fragments(text).map { try NativeIO.scalarSlice(text, $0.0, $0.1) }
+    }
+    XCTAssertEqual(
+      try parts("— А позвольте, с кем имею честь… — обратился вдруг угреватый господин к белокурому молодому человеку."),
+      ["— А позвольте, с кем имею честь…", "— обратился вдруг угреватый господин к белокурому молодому человеку."])
+    XCTAssertEqual(
+      try parts("— Тьфу тебя! — сплюнул черномазый. — Пять недель назад я, вот как и вы, — обратился он к князю, — с одним узелком."),
+      ["— Тьфу тебя!", "— сплюнул черномазый.", "— Пять недель назад я, вот как и вы,",
+       "— обратился он к князю,", "— с одним узелком."])
+    // A dash inside speech without preceding punctuation is not a boundary.
+    XCTAssertEqual(try parts("— Это — правда."), ["— Это — правда."])
+    XCTAssertEqual(try parts("Он сказал: «Пойдём». Все встали."), ["Он сказал:", "«Пойдём».", "Все встали."])
+    XCTAssertEqual(try parts("«Да», — ответил он."), ["«Да»,", "— ответил он."])
+  }
+  func testSpeakerFragmentsRebuildParagraphExactly() throws {
+    let text = "— Да 😀! — сказал он. — Идём, — и ничего больше!"
+    let paragraph: Object = ["id": "p00001", "text": text]
+    let split = [NativeDirector.fragments(text)]
+    XCTAssertEqual(split[0].count, 4)
+    let answer: Object = ["paragraphs": [[
+      "id": "p00001", "speakers": ["hero", "narrator", "hero", "hero"], "confidence": "high",
+    ]]]
+    let rows = try NativeDirector.validateSpeakers(
+      answer, chunk: [paragraph], fragments: split, allowed: ["hero", "narrator"])
     let spans = NativeIO.objects(rows[0]["spans"])
-    XCTAssertEqual(spans[1]["start"] as? Int, 8)
-    let bad: Object = [
-      "paragraphs": [["id": "p00001", "segments": [["text": "— Да! 😀", "speaker": "hero"]]]]
-    ]
-    XCTAssertThrowsError(
-      try NativeDirector.validateRoles(bad, chunk: [paragraph], allowed: ["hero"]))
+    XCTAssertEqual(spans.map { NativeIO.string($0["speaker"]) }, ["hero", "narrator", "hero"])
+    XCTAssertEqual(
+      try spans.map { try NativeIO.scalarSlice(text, $0["start"] as! Int, $0["end"] as! Int) },
+      ["— Да 😀!", "— сказал он.", "— Идём, — и ничего больше!"])
+    for bad: Object in [
+      ["paragraphs": [["id": "p00001", "speakers": ["hero"]]]],
+      ["paragraphs": [["id": "p00001", "speakers": ["hero", "ghost", "hero", "hero"]]]],
+      ["paragraphs": [["id": "p00002", "speakers": ["hero", "narrator", "hero", "hero"]]]],
+    ] {
+      XCTAssertThrowsError(try NativeDirector.validateSpeakers(
+        bad, chunk: [paragraph], fragments: split, allowed: ["hero", "narrator"]))
+    }
   }
   func testExcerptNeverBorrowsAnotherRole() throws {
     let own =
