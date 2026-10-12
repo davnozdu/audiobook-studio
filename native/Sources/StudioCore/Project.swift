@@ -61,6 +61,28 @@ public enum NativeProject {
       try? FileManager.default.removeItem(at: project.appendingPathComponent(name))
     }
   }
+  /// Delete resumable speech only AFTER the final export has been verified.
+  /// Return failures instead of hiding an incomplete cleanup from the user.
+  public static func cleanupCompletedSpeech(_ project: URL, exported: URL) throws -> [String] {
+    let fm = FileManager.default, result = project.appendingPathComponent("result")
+    let report = try NativeIO.load(result.appendingPathComponent("package-report.json"))
+    guard NativeIO.string(report["state"]) == "complete" else {
+      throw StudioError("Очистка запрещена: сборка книги не завершена")
+    }
+    for name in ["audiobook.m4b", "audiobook.epub", "package-report.json"] {
+      guard try NativeIO.hashFile(result.appendingPathComponent(name))
+        == NativeIO.hashFile(exported.appendingPathComponent(name)) else {
+        throw StudioError("Очистка запрещена: копия результата не проверена · " + name)
+      }
+    }
+    var failures: [String] = []
+    for name in ["audio/segments", "audio-normalized", "audio-music", "audio/sample.wav", "result/chapters.txt"] {
+      let file = project.appendingPathComponent(name)
+      guard fm.fileExists(atPath: file.path) else { continue }
+      do { try fm.removeItem(at: file) } catch { failures.append(name) }
+    }
+    return failures
+  }
   /// Own voice samples are stored relative to the project, so a moved project keeps them.
   /// Older projects stored absolute paths; a missing absolute file is looked up in voice-samples.
   public static func sampleURL(_ path: String, project: URL) -> URL {

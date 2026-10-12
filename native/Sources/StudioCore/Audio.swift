@@ -157,8 +157,8 @@ public struct NativeAudio {
     return min(-20, max(-23, peakSafe))
   }
   public func normalize(project: URL, segments: [Object], timeline: [Object]) throws -> URL {
+    try SpeechBatch.verifyOrder(segments, timeline: timeline)
     let fm = FileManager.default
-    let raw = project.appendingPathComponent("audio")
     let out = project.appendingPathComponent("audio-normalized")
     let roles = out.appendingPathComponent("measurements")
     try fm.createDirectory(at: roles, withIntermediateDirectories: true)
@@ -169,13 +169,13 @@ public struct NativeAudio {
       let file = roles.appendingPathComponent(speaker + ".wav")
       let montage = try WAVMontage(file)
       let parts = segments.filter { NativeIO.string($0["speaker"]) == speaker }.map {
-        raw.appendingPathComponent("segments/" + NativeIO.string($0["id"]) + ".wav")
+        SpeechCache.segmentURL(project, id: NativeIO.string($0["id"]))
       }
       // EBU R128 integrated loudness is -inf below one 400 ms block. Repeating a short
       // role keeps its level and peak while giving the meter enough audio.
       repeat {
         let before = montage.frames
-        for part in parts { try montage.append(NativeWAV.read(part)) }
+        for part in parts { try montage.append(SpeechCache.readAudio(part)) }
         if montage.frames == before { break }
       } while montage.frames < Self.minimumMeasuredFrames
       try montage.finish()
@@ -184,6 +184,8 @@ public struct NativeAudio {
       } else {
         NativeIO.emit("log", ["message": "Громкость роли не измерена, уровень оставлен без изменений · " + speaker])
       }
+      // Only the current role's measurement WAV is needed at any one time.
+      try fm.removeItem(at: file)
     }
     let target = Self.loudnessTarget(Array(measurements.values))
     let gains = measurements.mapValues { target - $0.0 }
@@ -192,8 +194,12 @@ public struct NativeAudio {
       let sid = NativeIO.string(segment["id"])
       let speaker = NativeIO.string(segment["speaker"])
       let gain = Float(pow(10, (gains[speaker] ?? 0) / 20))
-      let samples = try NativeWAV.read(raw.appendingPathComponent("segments/" + sid + ".wav")).map {
+      let samples = try SpeechCache.readAudio(SpeechCache.segmentURL(project, id: sid)).map {
         $0 * gain
+      }
+      let expected = (row["audio_end"] as! Double) - (row["audio_start"] as! Double)
+      guard abs(Double(samples.count) / 24000 - expected) < 0.00001 else {
+        throw StudioError("Длина WAV не соответствует реплике · " + sid)
       }
       try montage.append(samples)
       let pause = (row["pause_frames"] as? Int ?? 0)
@@ -245,6 +251,7 @@ public struct NativeAudio {
     try fm.createDirectory(at: out, withIntermediateDirectories: true)
     let book = NativeIO.object(manifest["book"])
     let segments = NativeIO.objects(manifest["segments"])
+    try SpeechBatch.verifyOrder(segments, timeline: timeline)
     let chapters = NativeIO.objects(source["chapters"])
     let total = timeline.last?["clip_end"] as? Double ?? 0
     func escape(_ text: String) -> String {

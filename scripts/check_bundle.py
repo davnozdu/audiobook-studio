@@ -4,7 +4,9 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from check_rf64 import check_rf64
 app = Path(sys.argv[1]).resolve()
+check_rf64(app / 'Contents/Resources/runtime/bin/ffprobe')
 for path in app.rglob('*'):
     if path.is_symlink(): path.resolve().relative_to(app)
     if path.suffix in {'.py', '.pyc'} or path.name.startswith(('python', 'libpython')):

@@ -1,5 +1,7 @@
 # Qwen Swift inference audit
 
+See [batching, storage and large-book checks](BATCH.md) for the test.2 pipeline.
+
 Pinned library revision: `244458d7b61e54ff135073ddc9ed76782bb20758`.
 The build applies `scripts/patch_qwen_native.py` after resolving packages.
 The script verifies the entire original source SHA256 and is idempotent only for

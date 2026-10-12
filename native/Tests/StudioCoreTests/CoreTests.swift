@@ -3,6 +3,147 @@ import XCTest
 @testable import StudioCore
 
 final class CoreTests: XCTestCase {
+  func testTenAndTwentyHourBooksKeepAllSegmentsAnd64BitSizes() throws {
+    for hours in [10, 20] {
+      let rows: [Object] = (0..<(hours * 720)).map { i in
+        ["id": "s\(i)", "speaker": "v\(i % 7)", "text": "Реплика.", "tts_text": "Реплика.", "pause_after_ms": 0]
+      }
+      let jobs = try SpeechBatch.plan(rows, pending: Set(rows.indices))
+      XCTAssertEqual(jobs.flatMap { $0 }.sorted(), Array(rows.indices))
+      let counts = Dictionary(uniqueKeysWithValues: rows.map { (NativeIO.string($0["id"]), 120000) })
+      let (timeline, frames) = try SpeechBatch.timeline(rows, frameCounts: counts)
+      try SpeechBatch.verifyOrder(rows, timeline: timeline)
+      XCTAssertEqual(frames, hours * 3600 * 24000)
+      XCTAssertEqual(timeline.last?["audio_end"] as? Double, Double(hours * 3600))
+      let header = NativeWAV.header64(frames: frames)
+      XCTAssertEqual(header.count, 80)
+      let size = header.withUnsafeBytes { UInt64(littleEndian: $0.loadUnaligned(fromByteOffset: 28, as: UInt64.self)) }
+      XCTAssertEqual(size, UInt64(hours) * 3600 * 24000 * 4)
+      if hours == 20 { XCTAssertTrue(size > UInt64(UInt32.max)) }
+    }
+  }
+  func testCompressedSpeechIsBitExactAndCorruptionIsRejected() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let file = root.appendingPathComponent("segment.spcm")
+    let samples = [Float](repeating: 0.03125, count: 24000) + [0, -0.0, Float.leastNonzeroMagnitude, -0.125, 1.25]
+    try SpeechCache.save(file, samples: samples, signature: "test")
+    let restored = try SpeechPCM.read(file)
+    XCTAssertEqual(NativeWAV.bytes(restored), NativeWAV.bytes(samples))
+    XCTAssertEqual(SpeechCache.load(file, signature: "test"), samples)
+    XCTAssertTrue(try Data(contentsOf: file).count < samples.count * 4)
+    try Data("truncated".utf8).write(to: file)
+    XCTAssertNil(SpeechCache.load(file, signature: "test"))
+    XCTAssertThrowsError(try SpeechPCM.read(file))
+  }
+  func testSuccessfulCleanupRequiresVerifiedExportAndKeepsSources() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let project = root.appendingPathComponent("project"), exported = root.appendingPathComponent("export")
+    let speech = project.appendingPathComponent("audio/segments/s1.spcm")
+    let keep = ["book.epub", "roles/manifest.json", "voices/narrator.wav", "audio/timeline.json", "run.log"]
+    for name in keep + ["audio/segments/s1.spcm", "audio/segments/s1.json", "audio-normalized/sample.wav"] {
+      let file = project.appendingPathComponent(name)
+      try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+      try Data("keep".utf8).write(to: file)
+    }
+    XCTAssertThrowsError(try NativeProject.cleanupCompletedSpeech(project, exported: exported))
+    XCTAssertTrue(FileManager.default.fileExists(atPath: speech.path))
+    let result = project.appendingPathComponent("result")
+    try FileManager.default.createDirectory(at: result, withIntermediateDirectories: true)
+    for name in ["audiobook.m4b", "audiobook.epub"] { try Data("result".utf8).write(to: result.appendingPathComponent(name)) }
+    try NativeIO.write(result.appendingPathComponent("package-report.json"), ["state": "complete"])
+    try FileManager.default.copyItem(at: result, to: exported)
+    let m4b = exported.appendingPathComponent("audiobook.m4b")
+    try Data("broken".utf8).write(to: m4b)
+    XCTAssertThrowsError(try NativeProject.cleanupCompletedSpeech(project, exported: exported))
+    XCTAssertTrue(FileManager.default.fileExists(atPath: speech.path))
+    try Data("result".utf8).write(to: m4b)
+    XCTAssertTrue(try NativeProject.cleanupCompletedSpeech(project, exported: exported).isEmpty)
+    XCTAssertFalse(FileManager.default.fileExists(atPath: speech.path))
+    XCTAssertFalse(FileManager.default.fileExists(atPath: project.appendingPathComponent("audio-normalized").path))
+    for name in keep { XCTAssertTrue(FileManager.default.fileExists(atPath: project.appendingPathComponent(name).path)) }
+    XCTAssertTrue(FileManager.default.fileExists(atPath: m4b.path))
+    XCTAssertTrue(try NativeProject.cleanupCompletedSpeech(project, exported: exported).isEmpty)
+  }
+  func testBatchPlannerKeepsEveryIDAndSpeaker() throws {
+    let rows: [Object] = (0..<15).map { i in
+      ["id": "s\(i)", "speaker": i % 2 == 0 ? "hero" : "narrator",
+       "tts_text": i == 7 ? String(repeating: "длинная ", count: 50) : "Короткая реплика."]
+    }
+    let pending = Set(rows.indices).subtracting([3, 9])
+    let jobs = try SpeechBatch.plan(rows, pending: pending)
+    XCTAssertEqual(Set(jobs.flatMap { $0 }), pending)
+    XCTAssertEqual(jobs.flatMap { $0 }.count, pending.count)
+    XCTAssertTrue(jobs.allSatisfy { (1...4).contains($0.count) })
+    XCTAssertTrue(jobs.allSatisfy { Set($0.map { NativeIO.string(rows[$0]["speaker"]) }).count == 1 })
+    XCTAssertEqual(jobs.first(where: { $0.contains(7) }), [7])
+    XCTAssertTrue(try SpeechBatch.plan(rows, pending: pending, maximum: 1).allSatisfy { $0.count == 1 })
+    XCTAssertThrowsError(try SpeechBatch.plan(rows, pending: [100]))
+  }
+  func testBatchRecoveryRetriesOnlyUnfinishedLane() async throws {
+    let complete = [Float](repeating: 0.1, count: 4800) + [Float](repeating: 0, count: 2400)
+    var calls: [[Int]] = [], attemptSeeds: [[Int]] = [], saved: [Int] = []
+    let output = try await SpeechRecovery.batch(texts: ["Один.", "Два.", "Три."], seeds: [10, 20, 30],
+      labels: ["s0", "s1", "s2"], operation: { indices, seeds in
+        calls.append(indices); attemptSeeds.append(seeds)
+        return calls.count == 1 ? [complete, nil, complete] : [complete]
+      }, accepted: { i, _ in saved.append(i) })
+    XCTAssertEqual(calls, [[0, 1, 2], [1]])
+    XCTAssertEqual(attemptSeeds, [[10, 20, 30], [104749]])
+    XCTAssertEqual(saved, [0, 2, 1])
+    XCTAssertEqual(output, [complete, complete, complete])
+  }
+  func testBatchFailureRetainsCompletedNeighbours() async throws {
+    let complete: [Float] = [0.1, -0.1]
+    var calls: [[Int]] = [], saved: [Int] = []
+    do {
+      _ = try await SpeechRecovery.batch(texts: ["Один.", "Два."], seeds: [1, 2], labels: ["s0", "s1"],
+        operation: { indices, _ in calls.append(indices); return indices.map { $0 == 0 ? complete : nil } },
+        accepted: { i, _ in saved.append(i) })
+      XCTFail("An unfinished lane must stop packaging")
+    } catch { XCTAssertTrue(error.localizedDescription.contains("s1")) }
+    XCTAssertEqual(calls, [[0, 1], [1], [1]])
+    XCTAssertEqual(saved, [0])
+  }
+  func testBatchRejectsLostLaneAndSilentAudio() async throws {
+    var saved = 0
+    do {
+      _ = try await SpeechRecovery.batch(texts: ["Один.", "Два."], seeds: [1, 2], labels: ["s0", "s1"],
+        operation: { _, _ in [[0.1]] }, accepted: { _, _ in saved += 1 })
+      XCTFail("A mismatched result count must fail")
+    } catch { XCTAssertTrue(error.localizedDescription.contains("потеряла")) }
+    XCTAssertEqual(saved, 0)
+    var attempts = 0
+    do {
+      _ = try await SpeechRecovery.batch(texts: ["Один."], seeds: [1], labels: ["silent"],
+        operation: { _, _ in attempts += 1; return [[0, 0]] }, accepted: { _, _ in saved += 1 })
+      XCTFail("Silent batch audio must fail")
+    } catch { XCTAssertTrue(error.localizedDescription.contains("silent")) }
+    XCTAssertEqual(attempts, 3)
+    XCTAssertEqual(saved, 0)
+  }
+  func testBatchMontageRestoresBookOrderAndFullFinalSegment() throws {
+    let rows: [Object] = [
+      ["id": "s0", "speaker": "hero", "paragraph_id": "p1", "text": "Да,", "pause_after_ms": 450],
+      ["id": "s1", "speaker": "narrator", "paragraph_id": "p1", "text": "сказал он.", "pause_after_ms": 450],
+      ["id": "s2", "speaker": "hero", "paragraph_id": "p2", "text": "Конец!", "pause_after_ms": 800],
+    ]
+    let counts = ["s2": 48000, "s0": 24000, "s1": 12000] // completion order differs from book
+    let (timeline, frames) = try SpeechBatch.timeline(rows, frameCounts: counts)
+    XCTAssertEqual(timeline.map { NativeIO.string($0["segment_id"]) }, ["s0", "s1", "s2"])
+    XCTAssertEqual(timeline.map { NativeIO.string($0["speaker"]) }, ["hero", "narrator", "hero"])
+    XCTAssertEqual(frames, 84000 + (180 + 450 + 800) * 24)
+    XCTAssertEqual(timeline[2]["audio_end"] as? Double,
+      (timeline[2]["audio_start"] as! Double) + 2)
+    XCTAssertNoThrow(try SpeechBatch.verifyOrder(rows, timeline: timeline))
+    XCTAssertThrowsError(try SpeechBatch.verifyOrder(rows, timeline: Array(timeline.reversed())))
+    XCTAssertThrowsError(try SpeechBatch.verifyOrder(rows, timeline: Array(timeline.dropLast())))
+    XCTAssertThrowsError(try SpeechBatch.timeline(rows, frameCounts: ["s0": 24000, "s1": 12000]))
+    XCTAssertThrowsError(try SpeechBatch.timeline(rows, frameCounts: counts.merging(["extra": 1]) { $1 }))
+    XCTAssertThrowsError(try SpeechBatch.timeline(rows + [rows[0]], frameCounts: counts))
+    XCTAssertThrowsError(try SpeechBatch.timeline(rows, frameCounts: ["s0": 24000, "s1": 12000, "s2": 0]))
+  }
   func testTrimPreservesQuietFinalConsonants() throws {
     let silence = [Float](repeating: 0, count: 12000)
     let speech = [Float](repeating: 0.1, count: 2400)

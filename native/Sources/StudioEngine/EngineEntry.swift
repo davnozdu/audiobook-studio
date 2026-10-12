@@ -30,6 +30,8 @@ import StudioCore
       Memory.cacheLimit = Int(min(UInt64(4096 * 1024 * 1024),
         max(UInt64(512 * 1024 * 1024), ProcessInfo.processInfo.physicalMemory / 8)))
       if CommandLine.arguments.contains("--self-check") {
+        let batchError = try Qwen3TTSModel.studioBatchSelfCheck()
+        NativeIO.emit("log", ["message": "Qwen batch B=4: padding, позиции и независимые потоки совпадают с одиночным расчётом · ошибка " + String(batchError)])
         let codecIDs = MLXArray([Int32(14), 0, 23, 0, 7, -1])
         guard Qwen3TTSModel.studioDecodedFrameCount(codecIDs, upsampleRate: 1920) == 9600,
           Qwen3TTSModel.studioDecodedFrameCount(MLXArray([Int32(-1), -1]), upsampleRate: 1920) == 0
@@ -550,9 +552,11 @@ final class Engine {
         try fm.copyItem(at: selected, to: music)
       }
       NativeIO.stage("Зацикливание и наложение фоновой музыки")
+      let unmixed = final
       final = try audio.mix(
         final, music: music, percent: request["music_volume"] as? Double ?? 5, project: project,
         total: Double(frames) / 24000)
+      try fm.removeItem(at: unmixed)
       lap("музыка")
     }
     NativeIO.stage("Сборка отдельного M4B и EPUB с синхронным аудио")
@@ -561,6 +565,11 @@ final class Engine {
     let external = URL(fileURLWithPath: destination)
     NativeIO.stage("Сохранение аудиокниги и EPUB · " + destination)
     try fm.copyItem(at: result, to: external)
+    NativeIO.stage("Проверка сохранённой книги и очистка временного аудио")
+    let cleanupFailures = try NativeProject.cleanupCompletedSpeech(project, exported: external)
+    NativeIO.emit("log", ["message": cleanupFailures.isEmpty
+      ? "Результат проверен; временное аудио и кеш реплик удалены. Книга, разметка и образцы голосов сохранены."
+      : "Результат проверен, но не удалось удалить временные файлы: " + cleanupFailures.joined(separator: ", ")])
     lap("M4B, EPUB и копирование")
     NativeIO.emit("log", ["message": "Время этапов: " + timings.joined(separator: " · ")])
     NativeIO.emit("result", ["path": destination])
@@ -584,119 +593,108 @@ final class Engine {
   {
     var base: Qwen3TTSModel?
     var conditioning: [String: Qwen3TTSModel.Qwen3TTSReferenceConditioning] = [:]
-    // Upstream caches by ObjectIdentifier(refAudio), without retaining refAudio.
-    // Retain each input so another character cannot reuse its object address.
     var referenceArrays: [String: MLXArray] = [:]
     defer { withExtendedLifetime(referenceArrays) {} }
     var referenceHashes: [String: String] = [:]
-    for (id, ref) in references {
-      referenceHashes[id] = try NativeIO.hashFile(ref.0)
-    }
-    let raw = project.appendingPathComponent("audio")
-    try fm.createDirectory(
-      at: raw.appendingPathComponent("segments"), withIntermediateDirectories: true)
-    // Segments are cached individually; normalization assembles the book from them,
-    // so only the running frame count is needed here.
-    var frames = 0
-    var timeline: [Object] = []
-    var measurements: [(Double, Double, Int)] = []
+    for (id, ref) in references { referenceHashes[id] = try NativeIO.hashFile(ref.0) }
+    let raw = project.appendingPathComponent("audio/segments")
+    try fm.createDirectory(at: raw, withIntermediateDirectories: true)
+    var files: [URL] = [], signatures: [String] = [], seeds: [Int] = []
+    var framesByID: [String: Int] = [:]
+    var pending: Set<Int> = []
     var completed = 0
-    let total = rows.reduce(0) { $0 + max(1, NativeIO.string($1["text"]).count) }
+    func weight(_ i: Int) -> Int { max(1, NativeIO.string(rows[i]["text"]).count) }
     for (i, row) in rows.enumerated() {
-      let id = NativeIO.string(row["id"])
-      let speaker = NativeIO.string(row["speaker"])
-      let text = SpeechRecovery.text(NativeIO.string(row["tts_text"]))
-      let start = Date()
-      guard let reference = references[speaker], let referenceHash = referenceHashes[speaker] else {
+      try Task.checkCancellation()
+      let id = NativeIO.string(row["id"]), speaker = NativeIO.string(row["speaker"])
+      guard let reference = references[speaker], let hash = referenceHashes[speaker] else {
         throw StudioError("Не подготовлен голос " + speaker)
       }
-      let progress = Double(completed) / Double(max(1, total))
-      NativeIO.synthesisStage("Озвучивание · \(i+1)/\(rows.count) · " + speaker, progress)
       let seed = max(0, (voices.first(where: { NativeIO.string($0["id"]) == speaker })?["seed"] as? Int ?? 17001) + i)
-      let signature = try SpeechCache.signature(text: text, referenceHash: referenceHash,
-        referenceText: reference.1, seed: seed)
-      let file = raw.appendingPathComponent("segments/" + id + ".wav")
-      let samples: [Float]
-      let reused: Bool
-      if let cached = SpeechCache.load(file, signature: signature) {
-        samples = cached; reused = true
-        NativeIO.synthesisStage("Готовая реплика из кеша · \(i+1)/\(rows.count) · " + speaker, progress)
-      } else {
-        reused = false
-        if base == nil {
-          NativeIO.synthesisStage("Загрузка модели озвучки · нативный MLX", progress)
-          base = try await Qwen3TTSModel.fromModelDirectory(basePath)
-        }
-        guard let base else { throw StudioError("Модель озвучки не загружена") }
-        if conditioning[speaker] == nil {
-          NativeIO.synthesisStage("Подготовка голоса для озвучки · " + speaker, progress)
-          let (_, array) = try loadAudioArray(from: reference.0, sampleRate: 24000)
-          referenceArrays[speaker] = array
-          conditioning[speaker] = try base.prepareReferenceConditioning(
-            refAudio: array, refText: reference.1, language: "Russian")
-          guard let identity = conditioning[speaker]?.speakerEmbedding else {
-            throw StudioError("Не извлечена личность голоса · " + speaker)
-          }
-          let identityValues = identity.asArray(Float.self)
-          guard !identityValues.isEmpty, identityValues.allSatisfy({ $0.isFinite }),
-            identityValues.contains(where: { abs($0) > 0.000001 }) else {
-            throw StudioError("Повреждено представление личности голоса · " + speaker)
-          }
-          let identityHash = identityValues.withUnsafeBytes { NativeIO.hash(Data($0)) }
-          NativeIO.emit("log", ["message": "Личность голоса [\(speaker)] · \(identityValues.count) признаков · SHA256 " + identityHash])
-          NativeIO.emit("log", ["message": "Образец для озвучки [\(speaker)] · SHA256 " + (referenceHashes[speaker] ?? "")])
-        }
-        guard let ref = conditioning[speaker] else { throw StudioError("Не подготовлен голос " + speaker) }
-        NativeIO.synthesisStage("Озвучивание · \(i+1)/\(rows.count) · " + speaker, progress)
-        samples = try await SpeechRecovery.generate(text: text, seed: seed, label: id + " · " + speaker) { spoken, attemptSeed in
-          MLXRandom.seed(UInt64(attemptSeed))
-          let wave = try await base.generate(text: spoken, conditioning: ref,
-            generationParameters: GenerateParameters(
-              maxTokens: 4096, temperature: 0.9, topP: 1, topK: 50, repetitionPenalty: 1.05))
-          return wave.asArray(Float.self)
-        }
-        try SpeechCache.save(file, samples: samples, signature: signature)
-      }
-      let begin = Double(frames) / 24000
-      frames += samples.count
-      let finish = Double(frames) / 24000
-      let requestedPause = row["pause_after_ms"] as? Int ?? 450
-      let next = i + 1 < rows.count ? rows[i + 1] : [:]
-      let sameParagraph = NativeIO.string(next["paragraph_id"]) == NativeIO.string(row["paragraph_id"])
-      // Author asides interrupt a grammatical sentence, not its audible completion.
-      let pauseMS = sameParagraph && !NativeBook.sentenceFinished(NativeIO.string(row["text"]))
-        && requestedPause == 450
-        ? (NativeIO.string(next["speaker"]) == speaker ? 100 : 180) : requestedPause
-      let pause = max(0, min(3000, pauseMS)) * 24
-      frames += pause
-      timeline.append([
-        "segment_id": id, "speaker": speaker, "audio_start": begin, "audio_end": finish,
-        "clip_end": Double(frames) / 24000, "pause_frames": pause,
-      ])
-      let elapsed = max(0.001, Date().timeIntervalSince(start))
-      let weight = max(1, NativeIO.string(row["text"]).count)
-      if !reused {
-        measurements.append((Double(samples.count) / 24000, elapsed, weight))
-        NativeIO.emit("log", ["message": String(format: "Реплика %@ · %.1f с речи за %.1f с · %.2f×",
-          id, Double(samples.count) / 24000, elapsed, Double(samples.count) / 24000 / elapsed)])
-      }
-      if measurements.count > 12 { measurements.removeFirst() }
-      completed += weight
-      if measurements.isEmpty { continue }
-      let recent = measurements.suffix(12)
-      let seconds = recent.reduce(0) { $0 + $1.1 }
-      let chars = recent.reduce(0) { $0 + $1.2 }
-      let speed = recent.reduce(0) { $0 + $1.0 } / seconds
-      NativeIO.emit(
-        "metrics",
-        [
-          "message": "Озвучивание книги", "speed": speed,
-          "eta": Double(total - completed) * seconds / Double(chars),
-          "seconds_per_character": seconds / Double(chars),
-          "fraction": Double(completed) / Double(total), "completed": i + 1, "total": rows.count,
-        ])
+      let signature = try SpeechCache.signature(text: SpeechRecovery.text(NativeIO.string(row["tts_text"])),
+        referenceHash: hash, referenceText: reference.1, seed: seed)
+      let file = raw.appendingPathComponent(id + ".spcm")
+      files.append(file); signatures.append(signature); seeds.append(seed)
+      if let samples = SpeechCache.load(file, signature: signature) {
+        framesByID[id] = samples.count; completed += weight(i)
+      } else { pending.insert(i) }
     }
-    return (timeline, frames)
+    let total = rows.indices.reduce(0) { $0 + weight($1) }
+    let jobs = try SpeechBatch.plan(rows, pending: pending)
+    NativeIO.emit("log", ["message": "План озвучки: \(jobs.count) запусков · \(pending.count) новых реплик · \(jobs.filter { $0.count > 1 }.count) пакетов · максимум 4 реплики одного голоса"])
+    var measurements: [(Double, Double, Int)] = []
+    for (jobNumber, indices) in jobs.enumerated() {
+      try Task.checkCancellation()
+      let start = Date(), progress = Double(completed) / Double(max(1, total))
+      let speaker = NativeIO.string(rows[indices[0]]["speaker"])
+      let ids = indices.map { NativeIO.string(rows[$0]["id"]) }
+      NativeIO.synthesisStage("Пакетная озвучка · \(jobNumber+1)/\(jobs.count) · \(indices.count) реплик · " + speaker, progress)
+      if base == nil {
+        NativeIO.synthesisStage("Загрузка модели озвучки · нативный MLX", progress)
+        base = try await Qwen3TTSModel.fromModelDirectory(basePath)
+      }
+      guard let base, let reference = references[speaker] else { throw StudioError("Не подготовлена модель или голос " + speaker) }
+      if conditioning[speaker] == nil {
+        NativeIO.synthesisStage("Подготовка голоса для озвучки · " + speaker, progress)
+        let (_, array) = try loadAudioArray(from: reference.0, sampleRate: 24000)
+        referenceArrays[speaker] = array
+        conditioning[speaker] = try base.prepareReferenceConditioning(refAudio: array, refText: reference.1, language: "Russian")
+        guard let identity = conditioning[speaker]?.speakerEmbedding else { throw StudioError("Не извлечена личность голоса · " + speaker) }
+        let values = identity.asArray(Float.self)
+        guard !values.isEmpty, values.allSatisfy({ $0.isFinite }), values.contains(where: { abs($0) > 0.000001 }) else {
+          throw StudioError("Повреждено представление личности голоса · " + speaker)
+        }
+        let hash = values.withUnsafeBytes { NativeIO.hash(Data($0)) }
+        NativeIO.emit("log", ["message": "Личность голоса [\(speaker)] · \(values.count) признаков · SHA256 " + hash])
+        NativeIO.emit("log", ["message": "Образец для озвучки [\(speaker)] · SHA256 " + (referenceHashes[speaker] ?? "")])
+      }
+      guard let ref = conditioning[speaker] else { throw StudioError("Не подготовлен голос " + speaker) }
+      let texts = indices.map { SpeechRecovery.text(NativeIO.string(rows[$0]["tts_text"])) }
+      var timings: [String: Double] = [:]
+      let waves = try await SpeechRecovery.batch(texts: texts, seeds: indices.map { seeds[$0] }, labels: ids.map { $0 + " · " + speaker },
+        operation: { lanes, attemptSeeds in
+          NativeIO.synthesisStage("Пакетная озвучка · \(jobNumber+1)/\(jobs.count) · \(lanes.count) реплик · " + speaker, progress)
+          return try await base.studioGenerateBatch(texts: lanes.map { texts[$0] }, conditioning: ref,
+            seeds: attemptSeeds.map { UInt64($0) },
+            generationParameters: GenerateParameters(maxTokens: 4096, temperature: 0.9, topP: 1, topK: 50, repetitionPenalty: 1.05),
+            timing: { name, seconds in timings[name, default: 0] += seconds })
+        }, accepted: { lane, samples in
+          let i = indices[lane]
+          try SpeechCache.save(files[i], samples: samples, signature: signatures[i])
+          framesByID[ids[lane]] = samples.count
+          NativeIO.emit("log", ["message": String(format: "Реплика %@ · %.1f с речи · пакет %d", ids[lane], Double(samples.count) / 24000, jobNumber+1)])
+        })
+      let duration = waves.reduce(0) { $0 + Double($1.count) / 24000 }
+      let elapsed = max(0.001, Date().timeIntervalSince(start))
+      let chars = indices.reduce(0) { $0 + weight($1) }
+      completed += chars
+      measurements.append((duration, elapsed, chars))
+      if measurements.count > 12 { measurements.removeFirst() }
+      NativeIO.emit("log", ["message": String(format: "Пакет %d · %d реплик · %.1f с речи за %.1f с · %.2f× · %@",
+        jobNumber+1, indices.count, duration, elapsed, duration / elapsed, ids.joined(separator: ", "))])
+      NativeIO.emit("log", ["message": String(format: "Расчёт пакета %d: вход %.3f с · первый шаг (контекст + кадр) %.3f с · остальные токены %.3f с · декодер %.3f с",
+        jobNumber+1, timings["input"] ?? 0, timings["first_step"] ?? 0,
+        timings["remaining_tokens"] ?? 0, timings["decode"] ?? 0)])
+      let seconds = measurements.reduce(0) { $0 + $1.1 }
+      let characters = measurements.reduce(0) { $0 + $1.2 }
+      NativeIO.emit("metrics", ["message": "Озвучивание книги", "speed": measurements.reduce(0) { $0 + $1.0 } / seconds,
+        "eta": Double(max(0, total - completed)) * seconds / Double(max(1, characters)),
+        "seconds_per_character": seconds / Double(max(1, characters)),
+        "fraction": Double(completed) / Double(max(1, total)), "completed": framesByID.count, "total": rows.count])
+    }
+    // Verify each saved file, including cache hits, BEFORE deriving any montage timings.
+    NativeIO.synthesisStage("Проверка всех реплик перед монтажом", 1)
+    for (i, row) in rows.enumerated() {
+      try Task.checkCancellation()
+      guard let samples = SpeechCache.load(files[i], signature: signatures[i]) else {
+        throw StudioError("Отсутствует или повреждена готовая реплика · " + NativeIO.string(row["id"]))
+      }
+      framesByID[NativeIO.string(row["id"])] = samples.count
+    }
+    let result = try SpeechBatch.timeline(rows, frameCounts: framesByID)
+    try SpeechBatch.verifyOrder(rows, timeline: result.0)
+    NativeIO.emit("log", ["message": "Полнота озвучки проверена: \(rows.count)/\(rows.count) реплик · исходный порядок и голоса сохранены"])
+    return result
   }
 
 }

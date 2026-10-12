@@ -11,6 +11,7 @@ UPSTREAM_SHA = "e0e4ac8efdfb5f63a9e0afc8339b7b2b2a3ac3afe6d749979342f178a70a5df4
 MARKER = "// Audiobook Studio: official non_streaming_mode=True prefill."
 # Earlier audited patch results a cached checkout may still contain.
 PREVIOUS_PATCH_SHAS = {
+    "bffaab7df74c9efba4c18613ae21ef2a254cdc5570b47b4cda20350fc7828324",
     "0ce467d5d27d75d1f54579f3e2abbb7a792f2bf38d55365a6052700e0585d92c",
     "ccdc11d446514162c90ecef73c8d9a0100eb287d22f066ab72b5626fab486a4f",
     "a3b3a56865590533a010762797129d7f69cc7526f41faec639a36ca26bb09f80",
@@ -31,6 +32,11 @@ def patched(source):
 
     // MARK: - Decode chunk helper
 """)
+    replace("    private func decodeChunk(", "    func decodeChunk(")
+    replace("        minP: Float = 0.0\n    ) -> MLXArray {",
+        "        minP: Float = 0.0,\n        randomKey: MLXArray? = nil\n    ) -> MLXArray {")
+    replace("        let token = categorical(filteredLogits / temperature)\n",
+        "        let token = categorical(filteredLogits / temperature, key: randomKey)\n")
     replace("""        let validLen = Int((codes[0..., 0..., 0] .> 0).sum().item(Int32.self))
             * speechTokenizer.decodeUpsampleRate
         if validLen > 0, validLen < audio.dim(0) {
@@ -159,10 +165,19 @@ if __name__ == "__main__":
     old = "(audioCodes[0..., 0..., 0] .> 0)"
     new = "(audioCodes[0..., 0..., 0] .>= 0)"
     original = source.replace(new, old)
+    cache_anchor = "            chunks.append(wavChunk)\n            startIndex = endIndex\n"
+    if "            Memory.clearCache()\n" not in original:
+        original = original.replace(cache_anchor,
+            "            chunks.append(wavChunk)\n            Memory.clearCache()\n            startIndex = endIndex\n")
     if hashlib.sha256(original.encode()).hexdigest() != original_sha or original.count(old) != 1:
         raise ValueError("Unexpected Qwen speech tokenizer source; audit the new revision before building")
-    result = original.replace(old, new)
+    result = original.replace(old, new).replace("            Memory.clearCache()\n", "")
     if source != result:
         tokenizer.chmod(tokenizer.stat().st_mode | 0o200)
         tokenizer.write_text(result)
+    helper = directory / "Qwen3TTSStudioBatch.swift"
+    extension = (Path(__file__).parent / "native/Qwen3TTSStudioBatch.swift").read_text()
+    if not helper.exists() or helper.read_text() != extension:
+        if helper.exists(): helper.chmod(helper.stat().st_mode | 0o200)
+        helper.write_text(extension)
     print("Qwen Swift: verified offline input, speaker identity, codec-zero length and audio limit fixes")
