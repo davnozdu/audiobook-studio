@@ -47,6 +47,10 @@ jobs:
             studio-native-macos26-${{ hashFiles('native/Package.swift') }}-
             studio-native-macos26-
       - name: Build standalone app
+        env:
+          DROPBOX_APP_KEY: ${{ vars.DROPBOX_APP_KEY }}
+          GOOGLE_DESKTOP_CLIENT_ID: ${{ vars.GOOGLE_DESKTOP_CLIENT_ID }}
+          GOOGLE_DESKTOP_CLIENT_SECRET: ${{ secrets.GOOGLE_DESKTOP_CLIENT_SECRET }}
         run: bash scripts/package.sh
       - name: Save native compilation cache
         if: always()

@@ -20,6 +20,8 @@ import Combine
         do {
             let file = folder.appendingPathComponent("config.json")
             if FileManager.default.fileExists(atPath: file.path) { config = try JSONDecoder().decode(RemoteConfig.self, from: Data(contentsOf: file)) }
+            if config.dropboxID.isEmpty { config.dropboxID = RemoteRegistration.values["dropboxID"] ?? "" }
+            if config.googleID.isEmpty { config.googleID = RemoteRegistration.values["googleID"] ?? "" }
             state = try store.load(); state.recover(); try persist()
         } catch { fatal = true; message = "Не удалось прочитать очередь. Файл сохранён; автоматический запуск заблокирован." }
     }
@@ -102,10 +104,9 @@ import Combine
             start(); message = paired ? "Бот подключён" : "Откройте ссылку и нажмите Start в Telegram (10 минут)"
         } catch { message = (error as? RemoteError)?.message ?? "Не удалось подключить Telegram" }
     }
-    public func connectCloud(_ provider: RemoteProvider, googleSecret: String) async {
+    public func connectCloud(_ provider: RemoteProvider) async {
         guard !connecting, !running else { return }; connecting = true; defer { connecting = false }
         do {
-            if provider == .googleDrive && !googleSecret.isEmpty { try secrets.write("googleSecret", googleSecret) }
             try saveConfig(); try await RemoteOAuth(secrets: secrets, http: http).connect(provider, config: config)
             config.connections[provider.rawValue] = UUID().uuidString; try saveConfig(); message = provider.title + " подключён"
         } catch { message = (error as? RemoteError)?.message ?? "Не удалось подключить хранилище" }

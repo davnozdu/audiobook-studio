@@ -14,6 +14,15 @@ fi
 # Always create a clean app: no interpreter or stale Python resources from earlier versions.
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks" "$APP/Contents/Resources/engine/resources" "$APP/Contents/Resources/licenses"
+python3 - <<'PYCLIENTS'
+import json, os
+from pathlib import Path
+Path('dist/Audiobook Studio.app/Contents/Resources/RemoteClients.json').write_text(json.dumps({
+    'dropboxID': os.environ.get('DROPBOX_APP_KEY', ''),
+    'googleID': os.environ.get('GOOGLE_DESKTOP_CLIENT_ID', ''),
+    'googleSecret': os.environ.get('GOOGLE_DESKTOP_CLIENT_SECRET', '')
+}))
+PYCLIENTS
 bash scripts/icon.sh
 cp assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 swiftc -O -swift-version 5 -target arm64-apple-macosx14.0 -parse-as-library Sources/*.swift native/Sources/StudioRemote/*.swift -F .build-tools -framework Sparkle -Xlinker -rpath -Xlinker @executable_path/../Frameworks -o "$APP/Contents/MacOS/AudiobookStudio"

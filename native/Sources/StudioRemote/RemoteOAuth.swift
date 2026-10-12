@@ -3,10 +3,19 @@ import CryptoKit
 import Network
 import AppKit
 
+public enum RemoteRegistration {
+    // Installed-app client identity belongs to the developer, never to the end user.
+    // Google Desktop client_secret is not a confidential server credential; PKCE protects the code exchange.
+    static var values: [String: String] {
+        guard let url = Bundle.main.url(forResource: "RemoteClients", withExtension: "json"),
+              let data = try? Data(contentsOf: url), let values = try? JSONDecoder().decode([String: String].self, from: data) else { return [:] }
+        return values
+    }
+}
 public struct RemoteConfig: Codable {
     public var enabled = false, provider = RemoteProvider.dropbox
     public var dropboxID = "", googleID = "", connections: [String: String] = [:]
-    public init() {}
+    public init() { dropboxID = RemoteRegistration.values["dropboxID"] ?? ""; googleID = RemoteRegistration.values["googleID"] ?? "" }
     public func clientID(_ p: RemoteProvider) -> String { p == .dropbox ? dropboxID : googleID }
 }
 @MainActor public final class RemoteOAuth {
@@ -16,8 +25,12 @@ public struct RemoteConfig: Codable {
         let refresh = try secrets.read(provider.rawValue + "Refresh")
         guard !refresh.isEmpty else { throw RemoteError("Подключите " + provider.title + " в настройках приложения") }
         var fields = ["grant_type": "refresh_token", "refresh_token": refresh, "client_id": config.clientID(provider)]
-        if provider == .googleDrive { fields["client_secret"] = try secrets.read("googleSecret") }
+        if provider == .googleDrive { fields["client_secret"] = try googleSecret() }
         return try await exchange(provider, fields)["access_token"] as? String ?? ""
+    }
+    func googleSecret() throws -> String {
+        let saved = try secrets.read("googleSecret")
+        return saved.isEmpty ? RemoteRegistration.values["googleSecret"] ?? "" : saved
     }
     func exchange(_ p: RemoteProvider, _ fields: [String: String]) async throws -> [String: Any] {
         var request = URLRequest(url: URL(string: p == .dropbox ? "https://api.dropboxapi.com/oauth2/token" : "https://oauth2.googleapis.com/token")!)
@@ -30,7 +43,7 @@ public struct RemoteConfig: Codable {
         return result
     }
     public func connect(_ p: RemoteProvider, config: RemoteConfig) async throws {
-        guard !config.clientID(p).isEmpty else { throw RemoteError("Укажите Client ID для " + p.title) }
+        guard !config.clientID(p).isEmpty else { throw RemoteError("Подключение ещё не настроено в этой сборке: " + p.title) }
         let verifier = try RemoteJSON.random(), state = try RemoteJSON.random()
         let redirect = "http://127.0.0.1:53682/oauth"
         var components = URLComponents(string: p == .dropbox ? "https://www.dropbox.com/oauth2/authorize" : "https://accounts.google.com/o/oauth2/v2/auth")!
@@ -42,7 +55,7 @@ public struct RemoteConfig: Codable {
         let receiver = OAuthLoopback()
         let code = try await receiver.receive(authorization: components.url!, state: state)
         var tokenFields = ["grant_type": "authorization_code", "code": code, "client_id": config.clientID(p), "redirect_uri": redirect, "code_verifier": verifier]
-        if p == .googleDrive { tokenFields["client_secret"] = try secrets.read("googleSecret") }
+        if p == .googleDrive { tokenFields["client_secret"] = try googleSecret() }
         let result = try await exchange(p, tokenFields)
         guard let refresh = result["refresh_token"] as? String, !refresh.isEmpty else { throw RemoteError("Сервис не выдал постоянное подключение. Повторите вход с разрешением доступа.") }
         try secrets.write(p.rawValue + "Refresh", refresh)

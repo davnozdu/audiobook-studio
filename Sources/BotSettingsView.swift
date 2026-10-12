@@ -3,8 +3,6 @@ import AppKit
 
 @MainActor final class BotSettingsForm: ObservableObject {
     @Published var token = ""
-    @Published var googleSecret = ""
-    @Published var setup = false
 }
 struct BotSettingsView: View {
     @ObservedObject var bot: BotService
@@ -29,23 +27,14 @@ struct BotSettingsView: View {
                 HStack {
                     Text(provider.title + (bot.config.connections[provider.rawValue] == nil ? " · не подключён" : " · подключён"))
                     Spacer()
-                    Button("Подключить") { Task { await bot.connectCloud(provider, googleSecret: form.googleSecret); form.googleSecret = "" } }
-                        .disabled(bot.connecting || bot.running)
+                    Button("Подключить") { Task { await bot.connectCloud(provider) } }
+                        .disabled(bot.connecting || bot.running || bot.config.clientID(provider).isEmpty)
                 }
             }
-            DisclosureGroup("Первичная настройка API", isExpanded: $form.setup) {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Один раз создайте приложения API в своих аккаунтах. Пароли Dropbox и Google вводятся только в браузере.").font(.caption)
-                    TextField("Dropbox App key", text: $bot.config.dropboxID).textFieldStyle(.roundedBorder)
-                    Text("Dropbox: Scoped access → App folder. Разрешения: files.metadata.read, files.content.write, sharing.write, sharing.read. Redirect URI: http://127.0.0.1:53682/oauth").font(.caption).textSelection(.enabled)
-                    Link("Dropbox App Console", destination: URL(string: "https://www.dropbox.com/developers/apps")!)
-                    TextField("Google OAuth Client ID (Desktop app)", text: $bot.config.googleID).textFieldStyle(.roundedBorder)
-                    SecureField("Google Client secret (из JSON Desktop client)", text: $form.googleSecret).textFieldStyle(.roundedBorder)
-                    Text("Google: включите Drive API, создайте OAuth client типа Desktop app и добавьте себя в Test users. Доступ — только к файлам приложения (drive.file). В режиме Testing подключение Google может потребовать повторного входа через 7 дней.").font(.caption)
-                    Link("Google Cloud Console", destination: URL(string: "https://console.cloud.google.com/apis/credentials")!)
-                    Text("Ссылки Dropbox доступны получателю ссылки. Google Drive сохраняет файлы закрытыми: скачивание под вашим Google-аккаунтом.").font(.caption)
-                }.padding(.top, 8)
-            }.disabled(bot.running)
+            if RemoteProvider.allCases.contains(where: { bot.config.clientID($0).isEmpty }) {
+                Text("Подключение облака ещё не настроено в этой тестовой сборке. После настройки приложения вход выполняется кнопкой «Подключить» в браузере.").font(.caption).foregroundStyle(.secondary)
+            }
+            Text("Ссылки Dropbox доступны получателю ссылки. Google Drive сохраняет файлы закрытыми: скачивание под вашим Google-аккаунтом.").font(.caption).foregroundStyle(.secondary)
             if !bot.state.jobs.isEmpty {
                 Text("Книги в боте: \(bot.state.jobs.filter { ![.complete, .cancelled].contains($0.phase) }.count)").font(.caption)
                 if let job = bot.state.active ?? bot.state.jobs.last {
