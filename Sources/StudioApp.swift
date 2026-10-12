@@ -6,6 +6,7 @@ import UniformTypeIdentifiers
 import AVFoundation
 import Darwin
 import Security
+import IOKit.ps
 
 enum CredentialStore {
     /// One Keychain item per service: "ollama-api-key" (existing installs) or "deepseek-api-key".
@@ -241,6 +242,7 @@ struct StoryCharacter: Identifiable {
         service.executable = { [weak self] in self?.engine ?? URL(fileURLWithPath: "/nonexistent") }
         service.activity = { [weak self] active, message in
             guard let self else { return }; self.remoteBusy = active; self.busy = active; self.status = message
+            self.syncWake()
             if !active, let continuation = self.afterStop {
                 self.afterStop = nil; self.cancelling = false; continuation()
             }
@@ -361,9 +363,10 @@ struct StoryCharacter: Identifiable {
     private var credentialDirty = false
     private var credentialSave: DispatchWorkItem?
     private var buffer = Data()
-    /// Keeps the Mac awake (display may sleep) while the engine runs: an idle sleep would
-    /// pause an overnight 10–20 hour book until morning.
+    /// Keeps the Mac awake (display may sleep) while a book is processed on mains power: an idle
+    /// sleep would pause an overnight 10–20 hour book. On battery normal sleep stays allowed.
     private var wakeActivity: NSObjectProtocol?
+    private var powerCheck: Timer?
     let updater = UpdateController()
 
     init() {
@@ -758,14 +761,13 @@ struct StoryCharacter: Identifiable {
         childPID = 0; updateMenuBar()
         fraction = 0; speed = nil; eta = nil; completed = ""; buffer = Data()
         if request["action"] as? String == "build" { remainingSynthesisSeconds = nil }
-        wakeActivity = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .idleSystemSleepDisabled],
-                                                             reason: "Audiobook Studio: обработка книги")
+        syncWake()
         status = "Подготовка…"
         let p = Process(), input = Pipe(), output = Pipe(), errors = Pipe()
         let eventReadLock = NSLock()
         let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("AudiobookStudio-" + UUID().uuidString)
         do { try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true) }
-        catch { busy = false; pending = nil; endWakeActivity(); self.error = error.localizedDescription; return }
+        catch { busy = false; pending = nil; syncWake(); self.error = error.localizedDescription; return }
         p.executableURL = engine
         p.qualityOfService = .userInitiated
         p.arguments = []
@@ -803,7 +805,7 @@ struct StoryCharacter: Identifiable {
             DispatchQueue.main.async {
                 self.consume(rest)
                 self.busy = false; self.process = nil; self.childPID = 0; self.updateMenuBar()
-                self.endWakeActivity()
+                self.syncWake()
                 self.appendLog("Движок завершён · память моделей и GPU освобождена")
                 let next = self.pending; self.pending = nil
                 if self.shuttingDown { return }
@@ -841,12 +843,29 @@ struct StoryCharacter: Identifiable {
             try input.fileHandleForWriting.close()
         } catch {
             try? FileManager.default.removeItem(at: temporary)
-            p.terminate(); busy = false; pending = nil; endWakeActivity()
+            p.terminate(); busy = false; pending = nil; syncWake()
             self.error = "Не удалось запустить встроенный движок: \(error.localizedDescription)"
         }
     }
-    func endWakeActivity() {
-        if let activity = wakeActivity { ProcessInfo.processInfo.endActivity(activity); wakeActivity = nil }
+    static func onMainsPower() -> Bool {
+        guard let info = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
+              let source = IOPSGetProvidingPowerSourceType(info)?.takeUnretainedValue() else { return false }
+        return (source as String) == kIOPMACPowerKey
+    }
+    /// Re-evaluated every 30 s while busy, so unplugging releases the assertion and plugging in restores it.
+    func syncWake() {
+        let hold = busy && Self.onMainsPower()
+        if hold, wakeActivity == nil {
+            wakeActivity = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .idleSystemSleepDisabled],
+                                                                 reason: "Audiobook Studio: обработка книги от сети")
+        } else if !hold, let activity = wakeActivity {
+            ProcessInfo.processInfo.endActivity(activity); wakeActivity = nil
+        }
+        if busy, powerCheck == nil {
+            powerCheck = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+                Task { @MainActor in self?.syncWake() }
+            }
+        } else if !busy { powerCheck?.invalidate(); powerCheck = nil }
     }
 
     func consume(_ data: Data) {

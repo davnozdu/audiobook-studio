@@ -395,7 +395,8 @@ import Combine
         activity(true, "Telegram: " + next.name)
         worker = Task { [weak self] in
             guard let self else { return }
-            let wake = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .idleSystemSleepDisabled], reason: "Telegram audiobook")
+            // Sleep prevention is the app's job (mains power only); this keeps App Nap away.
+            let wake = ProcessInfo.processInfo.beginActivity(options: [.userInitiated], reason: "Telegram audiobook")
             defer { ProcessInfo.processInfo.endActivity(wake); worker = nil; activity(false, "Telegram: обработка завершена"); kick() }
             do {
                 try await execute(id)
