@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
-VERSION="${VERSION:-0.5.16-test.2}"
+VERSION="${VERSION:-0.5.17-test.1}"
 BUILD_NUMBER="${BUILD_NUMBER:-1}"
 APP="dist/Audiobook Studio.app"
 SPARKLE_VERSION=2.9.6
@@ -16,7 +16,7 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks" "$APP/Contents/Resources/engine/resources" "$APP/Contents/Resources/licenses"
 bash scripts/icon.sh
 cp assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
-swiftc -O -swift-version 5 -target arm64-apple-macosx14.0 -parse-as-library Sources/StudioApp.swift -F .build-tools -framework Sparkle -Xlinker -rpath -Xlinker @executable_path/../Frameworks -o "$APP/Contents/MacOS/AudiobookStudio"
+swiftc -O -swift-version 5 -target arm64-apple-macosx14.0 -parse-as-library Sources/*.swift native/Sources/StudioRemote/*.swift -F .build-tools -framework Sparkle -Xlinker -rpath -Xlinker @executable_path/../Frameworks -o "$APP/Contents/MacOS/AudiobookStudio"
 ditto .build-tools/Sparkle.framework "$APP/Contents/Frameworks/Sparkle.framework"
 xcodebuild -downloadComponent MetalToolchain
 (cd native && xcodebuild -list -json) > .build-tools/native-schemes.json

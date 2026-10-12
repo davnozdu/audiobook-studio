@@ -229,6 +229,17 @@ struct StoryCharacter: Identifiable {
     @Published var characters: [StoryCharacter] = []
     @Published var selected: String?
     @Published var busy = false
+    var remoteBusy = false
+    lazy var bot: BotService = {
+        let service = BotService(folder: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Audiobook Studio/Remote"))
+        service.canStart = { [weak self] in self.map { !$0.busy && !$0.shuttingDown && !$0.key.isEmpty } ?? false }
+        service.makeRequest = { [weak self] action in self?.request(action) ?? [:] }
+        service.executable = { [weak self] in self?.engine ?? URL(fileURLWithPath: "/nonexistent") }
+        service.activity = { [weak self] active, message in
+            guard let self else { return }; self.remoteBusy = active; self.busy = active; self.status = message
+        }
+        return service
+    }()
     @Published var status = "Выберите книгу, чтобы начать" { didSet { updateMenuBar() } }
     @Published var fraction = 0.0
     @Published var speed: Double?
@@ -353,6 +364,7 @@ struct StoryCharacter: Identifiable {
             }
             self.updatePresence()
             self.updater.start()
+            self.bot.start()
         }
     }
 
@@ -843,6 +855,7 @@ struct StoryCharacter: Identifiable {
 
     func appendLog(_ text: String) { log = String((log + text + "\n").suffix(24000)) }
     func cancel() {
+        if remoteBusy { bot.cancelActive(); return }
         cancelling = true; pending = nil
         stopProcessGroup()
     }
@@ -862,10 +875,11 @@ struct StoryCharacter: Identifiable {
     func removeMenuBar() { menuBar.remove() }
     func shutdown() -> Bool {
         credentialSave?.cancel(); saveCredential()
+        let remoteStopping = bot.shutdown()
         shuttingDown = true; cancelling = true; pending = nil
         audioPlayer?.stop(); audioPlayer = nil; playbackCompletion = nil
         removeMenuBar()
-        guard process?.isRunning == true else { return false }
+        guard process?.isRunning == true || remoteStopping else { return false }
         stopProcessGroup()
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) {
             NSApplication.shared.reply(toApplicationShouldTerminate: true)
@@ -1257,6 +1271,8 @@ struct SettingsView: View {
             Toggle("Разрешить веб-поиск при анализе характеров", isOn: $studio.webSearch)
             Toggle("LLM проверяет спорные ударения", isOn: $studio.cloudStress)
             Text("Для ролей и характеров текст книги отправляется в Ollama. Озвучка выполняется локально на Mac.").font(.caption).foregroundStyle(.secondary)
+            Divider()
+            BotSettingsView(bot: studio.bot)
             Divider()
             Text("Поведение приложения").font(.headline)
             Toggle("Показывать значок в Dock", isOn: $studio.showDock)

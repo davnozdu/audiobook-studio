@@ -1,0 +1,168 @@
+import Foundation
+import XCTest
+import CryptoKit
+@testable import StudioRemote
+
+final class MemorySecrets: RemoteSecrets {
+    var values: [String: String] = [:]
+    func read(_ account: String) throws -> String { values[account] ?? "" }
+    func write(_ account: String, _ value: String) throws { values[account] = value }
+}
+final class MockHTTP: URLProtocol {
+    static var handler: ((URLRequest) throws -> (Int, [String: String], Data))?
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        do {
+            let (code, headers, data) = try Self.handler!(request)
+            client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: code, httpVersion: "HTTP/1.1", headerFields: headers)!, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data); client?.urlProtocolDidFinishLoading(self)
+        } catch { client?.urlProtocol(self, didFailWithError: error) }
+    }
+    override func stopLoading() {}
+}
+@MainActor final class RemoteTests: XCTestCase {
+    func folder() throws -> URL {
+        let u = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: u, withIntermediateDirectories: true); return u
+    }
+    func testDeduplicateBookAndConfirmation() throws {
+        var s = RemoteState()
+        let a = s.receive(chatID: 1, messageID: 2, fileID: "x", name: "a.epub", provider: .dropbox)
+        let b = s.receive(chatID: 1, messageID: 2, fileID: "x", name: "a.epub", provider: .dropbox)
+        XCTAssertEqual(a.id, b.id); XCTAssertNil(s.next)
+        XCTAssertTrue(s.confirm(a.id, account: "account")); XCTAssertFalse(s.confirm(a.id, account: "account")); XCTAssertEqual(s.jobs.count, 1)
+    }
+    func testFIFOAndCloudAccountReset() throws {
+        var s = RemoteState()
+        let a = s.receive(chatID: 1, messageID: 2, fileID: "a", name: "a.epub", provider: .dropbox)
+        let b = s.receive(chatID: 1, messageID: 3, fileID: "b", name: "b.epub", provider: .googleDrive)
+        s.confirm(b.id, account: "b", now: Date(timeIntervalSince1970: 1)); s.confirm(a.id, account: "a", now: Date(timeIntervalSince1970: 2))
+        XCTAssertEqual(s.next?.id, b.id)
+        s.jobs[0].phase = .failed; s.jobs[0].cloudFolder = "old"; s.jobs[0].uploads["x"] = RemoteUpload()
+        s.confirm(a.id, account: "new"); XCTAssertTrue(s.jobs[0].uploads.isEmpty); XCTAssertEqual(s.jobs[0].cloudFolder, "")
+    }
+    func testRecoverNeverStartsInterruptedBook() throws {
+        var s = RemoteState(); let j = s.receive(chatID: 1, messageID: 1, fileID: "a", name: "a.epub", provider: .dropbox)
+        s.confirm(j.id, account: "a"); s.jobs[0].phase = .synthesis; s.recover(); s.recover()
+        XCTAssertEqual(s.jobs[0].phase, .paused); XCTAssertNil(s.next); XCTAssertEqual(s.outbox.count, 1)
+    }
+    func testQueueRoundtripAndCorruptionProtection() throws {
+        let f = try folder(); defer { try? FileManager.default.removeItem(at: f) }
+        let store = RemoteStateStore(f); var s = RemoteState(); s.ownerID = 12; s.offset = 94
+        _ = s.receive(chatID: 12, messageID: 3, fileID: "a", name: "a.epub", provider: .googleDrive)
+        s.outbox = [RemoteReply(12, "pending")]; try store.save(s)
+        let loaded = try store.load(); XCTAssertEqual(loaded.offset, 94); XCTAssertEqual(loaded.jobs[0].id, s.jobs[0].id); XCTAssertEqual(loaded.outbox.count, 1)
+        let file = f.appendingPathComponent("queue.json"); try Data("broken".utf8).write(to: file)
+        XCTAssertThrowsError(try store.load()); XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), "broken")
+    }
+    func testStatusTimeAndHonestETA() throws {
+        var j = RemoteJob(chatID: 1, messageID: 1, fileID: "a", name: "a", provider: .dropbox)
+        j.phase = .synthesis; j.started = Date(timeIntervalSince1970: 0); j.measuredAt = Date(timeIntervalSince1970: 10); j.eta = 120
+        let text = j.status(now: Date(timeIntervalSince1970: 40))
+        XCTAssertTrue(text.contains("40 с")); XCTAssertTrue(text.contains("1 мин 30 с")); XCTAssertTrue(text.contains("дополнительное время"))
+        j.phase = .uploading; XCTAssertFalse(j.status().contains("Осталось озвучивания"))
+    }
+    func testCommandAliasesAndCallbackLength() throws {
+        XCTAssertEqual(RemoteState.command("/status@my_bot"), "status"); XCTAssertEqual(RemoteState.command("сколько осталось"), "status")
+        XCTAssertEqual(RemoteState.command("/cancel"), "cancel"); XCTAssertEqual(RemoteState.command("очередь"), "queue")
+        XCTAssertTrue(("status:" + UUID().uuidString).utf8.count < 64)
+    }
+    func testSessionURLAndRangeValidation() throws {
+        XCTAssertTrue(CloudClient.safeGoogleSession("https://www.googleapis.com/upload/drive/v3/files?upload_id=a"))
+        XCTAssertFalse(CloudClient.safeGoogleSession("https://evil.test/upload/drive/a")); XCTAssertFalse(CloudClient.safeGoogleSession("http://www.googleapis.com/upload/drive/a"))
+        XCTAssertEqual(try CloudClient.googleOffset("bytes=0-262143", size: 400000), 262144)
+        XCTAssertEqual(try CloudClient.googleOffset(nil, size: 5), 0)
+        XCTAssertThrowsError(try CloudClient.googleOffset("bytes=1-3", size: 4)); XCTAssertThrowsError(try CloudClient.googleOffset("bytes=0-4", size: 4))
+    }
+    func testStreamingContentHashes() throws {
+        let f = try folder(); defer { try? FileManager.default.removeItem(at: f) }
+        let file = f.appendingPathComponent("fixture"); let data = Data(repeating: 37, count: 4 * 1024 * 1024 + 13); try data.write(to: file)
+        let h = try CloudClient.hashes(file)
+        var combined = Data(SHA256.hash(data: data.prefix(4 * 1024 * 1024))); combined.append(Data(SHA256.hash(data: data.suffix(13))))
+        XCTAssertEqual(h.size, Int64(data.count)); XCTAssertEqual(h.dropbox, SHA256.hash(data: combined).map { String(format: "%02x", $0) }.joined())
+        XCTAssertEqual(h.md5, Insecure.MD5.hash(data: data).map { String(format: "%02x", $0) }.joined())
+    }
+    @MainActor func testPrivateOwnerAndCancellationIsolation() async throws {
+        let f = try folder(); defer { try? FileManager.default.removeItem(at: f) }
+        let bot = BotService(folder: f, secrets: MemorySecrets()); bot.state.ownerID = 12; bot.config.connections["dropbox"] = "account"
+        func message(_ user: Int64, _ mid: Int64) -> [String: Any] { ["message": ["chat": ["id": user, "type": "private"], "from": ["id": user], "message_id": mid, "document": ["file_name": "book.epub", "file_size": 10, "file_id": "file"]]] }
+        try bot.handle(message(99, 1)); XCTAssertTrue(bot.state.jobs.isEmpty)
+        try bot.handle(message(12, 1)); try bot.handle(message(12, 2)); XCTAssertEqual(bot.state.jobs.count, 2); XCTAssertNil(bot.state.next)
+        let id = bot.state.jobs[0].id
+        func callback(_ action: String) -> [String: Any] { ["callback_query": ["from": ["id": 12], "data": action + ":" + id, "message": ["chat": ["id": 12, "type": "private"]]]] }
+        try bot.handle(callback("run")); XCTAssertEqual(bot.state.jobs[0].phase, .queued)
+        try bot.handle(callback("cancel")); XCTAssertEqual(bot.state.jobs[0].phase, .queued)
+        try bot.handle(callback("stop")); XCTAssertEqual(bot.state.jobs[0].phase, .cancelled); XCTAssertEqual(bot.state.jobs[1].phase, .confirmation)
+    }
+    @MainActor func testGoogleResumeUsesServerOffsetAndVerifiesHash() async throws {
+        let f = try folder(); defer { try? FileManager.default.removeItem(at: f); MockHTTP.handler = nil }
+        let file = f.appendingPathComponent("audiobook.m4b"); let bytes = Data(repeating: 7, count: 300000); try bytes.write(to: file)
+        let hash = try CloudClient.hashes(file); var ranges: [String] = []
+        let configuration = URLSessionConfiguration.ephemeral; configuration.protocolClasses = [MockHTTP.self]
+        let secrets = MemorySecrets(); secrets.values["googleDriveRefresh"] = "refresh"
+        MockHTTP.handler = { request in
+            if request.url!.host == "oauth2.googleapis.com" { return (200, [:], try RemoteJSON.data(["access_token": "test"])) }
+            let range = request.value(forHTTPHeaderField: "Content-Range") ?? ""; ranges.append(range)
+            if range.hasPrefix("bytes */") { return (308, ["Range": "bytes=0-262143"], Data()) }
+            XCTAssertEqual(range, "bytes 262144-299999/300000")
+            return (200, [:], try RemoteJSON.data(["id": "result", "size": "300000", "md5Checksum": hash.md5]))
+        }
+        var saved = RemoteUpload(); saved.session = "https://www.googleapis.com/upload/drive/v3/files?upload_id=test"; saved.offset = 42
+        let cloud = CloudClient(provider: .googleDrive, config: RemoteConfig(), secrets: secrets, http: RemoteHTTP(session: URLSession(configuration: configuration)))
+        let result = try await cloud.upload(file: file, folder: "folder", saved: saved) { _ in }
+        XCTAssertEqual(result.offset, 300000); XCTAssertEqual(result.link, "https://drive.google.com/file/d/result/view"); XCTAssertEqual(ranges.count, 2)
+    }
+    @MainActor func testDropboxResumeCorrectOffsetAndContentVerification() async throws {
+        let f = try folder(); defer { try? FileManager.default.removeItem(at: f); MockHTTP.handler = nil }
+        let file = f.appendingPathComponent("audiobook.epub"); try Data(repeating: 3, count: 101).write(to: file); let hash = try CloudClient.hashes(file)
+        let configuration = URLSessionConfiguration.ephemeral; configuration.protocolClasses = [MockHTTP.self]
+        let secrets = MemorySecrets(); secrets.values["dropboxRefresh"] = "refresh"; var finishes = 0
+        MockHTTP.handler = { request in
+            let path = request.url!.path
+            if path == "/oauth2/token" { return (200, [:], try RemoteJSON.data(["access_token": "test"])) }
+            if path.hasSuffix("get_metadata") { return (409, [:], try RemoteJSON.data(["error": "not_found"])) }
+            if path.hasSuffix("finish") {
+                finishes += 1
+                if finishes == 1 { return (409, [:], try RemoteJSON.data(["error": ["lookup_failed": ["correct_offset": 50]]])) }
+                let args = try RemoteJSON.object(Data(request.value(forHTTPHeaderField: "Dropbox-API-Arg")!.utf8))
+                XCTAssertEqual((args["cursor"] as? [String: Any])?["offset"] as? Int, 50)
+                return (200, [:], try RemoteJSON.data(["id": "file", "size": 101, "content_hash": hash.dropbox]))
+            }
+            return (200, [:], try RemoteJSON.data(["url": "https://dropbox.test/result"]))
+        }
+        var saved = RemoteUpload(); saved.session = "session"; saved.offset = 0
+        let cloud = CloudClient(provider: .dropbox, config: RemoteConfig(), secrets: secrets, http: RemoteHTTP(session: URLSession(configuration: configuration)))
+        let result = try await cloud.upload(file: file, folder: "/job", saved: saved) { _ in }
+        XCTAssertEqual(finishes, 2); XCTAssertEqual(result.offset, 101); XCTAssertFalse(result.link.isEmpty)
+    }
+    @MainActor func testGeneralStatusKeepsFinishedCloudLinks() async throws {
+        let f = try folder(); defer { try? FileManager.default.removeItem(at: f) }
+        let bot = BotService(folder: f, secrets: MemorySecrets()); bot.state.ownerID = 12
+        var ready = RemoteJob(chatID: 12, messageID: 1, fileID: "x", name: "finished.epub", provider: .dropbox)
+        ready.phase = .complete; var upload = RemoteUpload(); upload.link = "https://example.test/book"; ready.uploads["audiobook.m4b"] = upload
+        var current = RemoteJob(chatID: 12, messageID: 2, fileID: "y", name: "current.epub", provider: .googleDrive); current.phase = .synthesis
+        bot.state.jobs = [ready, current]
+        try bot.handle(["message": ["chat": ["id": 12, "type": "private"], "from": ["id": 12], "text": "/status"]])
+        XCTAssertTrue(bot.state.outbox.contains { $0.text.contains("current.epub") })
+        XCTAssertTrue(bot.state.outbox.contains { $0.text.contains("https://example.test/book") })
+        try bot.persist(); XCTAssertEqual(try RemoteStateStore(f).load().jobs[0].uploads["audiobook.m4b"]?.link, upload.link)
+    }
+    @MainActor func testCorruptQueueBlocksServiceWithoutOverwriting() async throws {
+        let f = try folder(); defer { try? FileManager.default.removeItem(at: f) }
+        let file = f.appendingPathComponent("queue.json"); try Data("broken".utf8).write(to: file)
+        let bot = BotService(folder: f, secrets: MemorySecrets())
+        XCTAssertTrue(bot.fatal); bot.start(); bot.kick(); XCTAssertNil(bot.worker)
+        XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), "broken")
+    }
+    @MainActor func testEngineDrainsFinalEventBeforeReturning() async throws {
+        let f = try folder(); defer { try? FileManager.default.removeItem(at: f) }
+        let script = f.appendingPathComponent("fixture.sh")
+        try Data("#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"type\":\"result\",\"path\":\"fixture\"}'\n".utf8).write(to: script)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
+        let runner = RemoteEngine(); var events: [String] = []
+        try await runner.run(executable: script, request: ["action": "fixture"], temporary: f.appendingPathComponent("temp")) { events.append($0["type"] as? String ?? "") }
+        XCTAssertEqual(events, ["result"]); XCTAssertFalse(runner.running); XCTAssertFalse(FileManager.default.fileExists(atPath: f.appendingPathComponent("temp").path))
+    }
+
+}
