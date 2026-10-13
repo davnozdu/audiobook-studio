@@ -71,6 +71,20 @@ public struct VoiceAcoustics: Equatable {
     return 10 * log10(speech.reduce(0, +) / Double(speech.count))
   }
 
+  /// Two main voices that sound alike: within a semitone of pitch, 1.5 semitones of pitch range
+  /// and 10 % of tempo. (The speaker-embedding similarity is 0.97–0.99 for nearly every pair of
+  /// one gender, even clearly different ones, so it cannot tell twins.)
+  public static func twins(_ a: VoiceAcoustics, _ b: VoiceAcoustics) -> Bool {
+    guard a.pitch > 0, b.pitch > 0, a.rate > 0, b.rate > 0 else { return false }
+    let tempo = a.rate / b.rate
+    return abs(12 * log2(a.pitch / b.pitch)) < 1 && abs(a.range - b.range) < 1.5 && tempo > 0.9 && tempo < 1.11
+  }
+  /// How far apart two voices are by ear, roughly: semitones of pitch plus half the range gap.
+  public static func distance(_ a: VoiceAcoustics, _ b: VoiceAcoustics) -> Double {
+    guard a.pitch > 0, b.pitch > 0 else { return 0 }
+    return abs(12 * log2(a.pitch / b.pitch)) + abs(a.range - b.range) / 2
+  }
+
   /// Differences from the calm sample: pitch and range in semitones, level in dB, tempo ratio,
   /// voiced share.
   public struct Change {
@@ -86,45 +100,48 @@ public struct VoiceAcoustics: Equatable {
   /// that is clearly audible: compatible signs alone are not enough, at least one must move
   /// past a noticeable step. Manners without a reliable acoustic sign always pass.
   public static func strength(_ manner: String, _ d: Change) -> (score: Double, audible: Bool) {
+    // Pitch, pitch range, tempo and voicing only: VoiceDesign returns samples at an arbitrary
+    // level (a shout came out 2.4 dB below the calm sample at +8.8 semitones), so loudness says
+    // nothing about the emotion here.
     let tempo = 10 * log2(max(d.tempo, 0.01))   // +1 ≈ 7 % faster
     switch manner {
     case "joyful": return (d.pitch + d.range, d.pitch >= 2 && d.range >= 0)
     case "laughing": return (d.pitch - 10 * d.voiced, d.pitch >= 2)
-    case "excited": return (d.pitch + tempo, d.pitch >= 2 && d.tempo >= 1)
+    case "excited": return (d.pitch + tempo, d.pitch >= 2 && d.tempo >= 0.85)
     case "surprised": return (d.pitch + d.range, d.range >= 2 || d.pitch >= 3)
-    case "angry": return (d.level + d.pitch, d.level >= 2 || d.pitch >= 2)
-    // A shout needs pitch, effort and pace together; a drawn-out loud sample reads as a wail.
-    case "shouting": return (d.level + d.pitch + tempo, d.pitch >= 4 && d.level >= 3 && d.tempo >= 0.85)
-    case "calling": return (d.level + d.pitch, d.level >= 2 || d.pitch >= 3)
+    case "angry": return (d.pitch + d.range, d.pitch >= 2 || d.range >= 2)
+    case "shouting": return (d.pitch + tempo, d.pitch >= 4 && d.tempo >= 0.8)
+    case "calling": return (d.pitch + d.range, d.pitch >= 3 || d.range >= 2)
     case "hysterical": return (d.pitch + d.range, d.pitch >= 3 && d.range >= 2)
-    case "desperate": return (d.pitch + d.level, d.pitch >= 2)
-    case "triumphant": return (d.level + d.pitch, d.level >= 1 || d.pitch >= 1.5)
+    case "desperate": return (d.pitch + d.range, d.pitch >= 2)
+    case "triumphant": return (d.pitch + d.range, d.pitch >= 1.5 || d.range >= 1.5)
     case "threatening": return (-d.pitch - tempo, d.pitch <= 0.5 && d.tempo <= 1 && (d.pitch <= -1 || d.tempo <= 0.9))
-    case "cold": return (-d.range - d.pitch, d.range <= 0 && d.pitch <= 1 && (d.range <= -1 || d.level <= -1))
-    case "solemn": return (-tempo - d.pitch, d.tempo <= 0.95 && d.pitch <= 1)
+    case "cold": return (-d.range - d.pitch, d.range <= 0 && d.pitch <= 1 && (d.range <= -1 || d.pitch <= -1))
+    case "stern": return (-d.pitch - tempo - d.range, d.pitch <= 1 && (d.pitch <= -1 || d.tempo <= 0.95 || d.range <= -1))
+    case "solemn": return (-tempo - d.pitch, d.tempo <= 0.97 && d.pitch <= 1.5)
+    case "frightened": return (d.pitch - 10 * d.voiced, d.pitch >= 2)
+    case "anxious": return (d.pitch + tempo, d.tempo >= 1.05 || d.pitch >= 1.5)
     case "hesitant": return (d.range - tempo, d.tempo <= 0.95 || d.range >= 1)
-    case "embarrassed": return (-d.level + tempo, d.level <= -1 || d.tempo >= 1.05)
+    case "embarrassed": return (tempo - d.range - d.pitch, d.tempo >= 1.05 || d.range <= -1 || d.pitch <= -1)
     case "guilty": return (-d.pitch - tempo, d.pitch <= 0.5 && d.tempo <= 1 && (d.pitch <= -1 || d.tempo <= 0.92))
     case "breathless": return (tempo - 10 * d.voiced, d.voiced <= -0.1 || d.tempo >= 1.05)
+    case "sad": return (-d.pitch - tempo - d.range, d.pitch <= 0.5 && (d.tempo <= 0.95 || d.range <= -1))
+    case "crying": return (d.pitch - 10 * d.voiced, d.pitch >= 1 || d.voiced <= -0.15)
+    case "tender": return (-tempo + d.range, d.tempo <= 0.97 || d.range >= 1)
     case "flirtatious": return (d.range, d.range >= 1)
-    case "dreamy": return (-tempo - d.level, d.tempo <= 0.95 && d.level <= 0)
+    case "dreamy": return (-tempo, d.tempo <= 0.95)
     case "thoughtful": return (-tempo, d.tempo <= 0.95)
     case "relieved": return (-tempo, d.tempo <= 0.95)
     case "indifferent": return (-d.range, d.range <= -1)
-    case "weak": return (-d.level, d.level <= -2)
-    case "sleepy": return (-tempo - d.level, d.tempo <= 0.9 && d.level <= -1)
+    case "weak": return (-10 * d.voiced - d.range, d.voiced <= -0.1 || d.range <= -1)
+    case "sleepy": return (-tempo, d.tempo <= 0.9)
     case "drunk": return (d.range - tempo, d.tempo <= 0.9 || d.range >= 2)
-    case "stern": return (-d.pitch - tempo, d.pitch <= 1 && d.tempo <= 1 && (d.pitch <= -1 || d.tempo <= 0.92))
-    case "frightened": return (d.pitch - 10 * d.voiced, d.pitch >= 2)
-    case "anxious": return (d.pitch + tempo, d.tempo >= 1.05 || d.pitch >= 1.5)
-    case "sad": return (-d.pitch - tempo, d.pitch <= 0.5 && d.tempo <= 0.95)
-    case "crying": return (d.pitch - 10 * d.voiced, d.pitch >= 1 || d.voiced <= -0.15)
-    case "tender": return (-d.level - tempo, d.level <= -1 && d.tempo <= 1)
     case "mocking": return (d.range, d.range >= 1)
     case "contemptuous": return (-d.pitch - tempo, d.tempo <= 1 && d.pitch <= 1 && (d.tempo <= 0.92 || d.pitch <= -1))
     case "pleading": return (d.pitch, d.pitch >= 1)
-    case "whisper": return (-10 * d.voiced - d.level, d.voiced <= -0.3 || d.level <= -6)
-    case "muttering": return (-d.range - d.level, d.range <= -1 || d.level <= -3)
+    // VoiceDesign gives a hushed, flattened voice rather than a true whisper.
+    case "whisper": return (-10 * d.voiced - d.range, d.voiced <= -0.3 || d.range <= -3)
+    case "muttering": return (-d.range, d.range <= -1)
     default: return (0, true)
     }
   }

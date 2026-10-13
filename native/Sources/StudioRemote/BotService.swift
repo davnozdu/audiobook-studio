@@ -230,7 +230,7 @@ import Combine
             let current = state.active ?? state.next
             let queueText = current.map { "Сейчас: «" + $0.name + "» · " + $0.phase.title + ".\nНовая книга будет ждать в очереди. /cancel — остановить текущую.\n" } ?? ""
             reply(queueText + "📚 «\(job.name)»\n\n🎙 Начать озвучивание в автоматическом режиме?\n☁️ Результат: \(job.provider.title).\n\n"
-                  + "🔉 Ровная громкость — эмоции слышны по голосу, крик лишь немного громче.\n🎭 Живые эмоции — крик громче, шёпот тише.", chat: id,
+                  + "🔉 Ровная громкость — все реплики на одном уровне: шёпот разборчивый, крик чуть громче.\n🎭 Живые эмоции — громкость как у модели: крик громче, шёпот тише.", chat: id,
                   buttons: [[RemoteButton("✅ Да, ровная громкость", "run-level:" + job.id)],
                             [RemoteButton("🎭 Да, живые эмоции", "run-live:" + job.id)],
                             [RemoteButton("✖️ Нет", "reject:" + job.id)]])

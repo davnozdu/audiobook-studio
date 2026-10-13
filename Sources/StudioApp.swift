@@ -300,8 +300,8 @@ struct StoryCharacter: Identifiable {
     @Published var cloudStress = UserDefaults.standard.object(forKey: "cloudStress") as? Bool ?? true {
         didSet { UserDefaults.standard.set(cloudStress, forKey: "cloudStress") }
     }
-    /// Emotional lines levelled to their speaker (a shout keeps a moderate +3 dB); off keeps the
-    /// model's own loudness of each emotion.
+    /// Every line levelled to its speaker (a shout keeps a moderate +3 dB, a whisper its usual
+    /// loudness); off keeps the model's own loudness of each line.
     /// The user's own stresses, one word per line (за́мок or ё), for every book.
     @Published var stressDictionary = UserDefaults.standard.string(forKey: "stressDictionary") ?? "" {
         didSet { UserDefaults.standard.set(stressDictionary, forKey: "stressDictionary") }
@@ -1406,11 +1406,11 @@ struct SettingsView: View {
             Divider()
             BotSettingsView(bot: studio.bot)
             Divider()
-            Text("Громкость эмоций").font(.headline)
-            Toggle("Выравнивать громкость эмоций", isOn: $studio.levelEmotions)
+            Text("Громкость").font(.headline)
+            Toggle("Ровная громкость реплик", isOn: $studio.levelEmotions)
             Text(studio.levelEmotions
-                 ? "Эмоция слышна по голосу, а не по громкости: крик лишь немного громче обычной речи персонажа, шёпот немного тише."
-                 : "Каждая эмоция звучит с той громкостью, которую дала модель: крик может быть заметно громче. От перегрузки защищает общий лимитер.")
+                 ? "Каждая реплика звучит на обычной громкости своего персонажа: тихие фразы не проваливаются, шёпот слышен как шёпот, но разборчиво, крик чуть громче (+3 дБ)."
+                 : "Громкость каждой реплики как у модели: крик может быть заметно громче, шёпот — тише. Голоса персонажей между собой выравниваются всегда.")
                 .font(.caption).foregroundStyle(.secondary)
             Divider()
             Text("Паузы при чтении").font(.headline)

@@ -364,17 +364,20 @@ final class CoreTests: XCTestCase {
     func tone(_ amplitude: Float) -> [Float] { (0..<24000).map { amplitude * Float(sin(Double($0) * 0.05)) } }
     let rows: [Object] = [
       ["id": "a", "speaker": "hero", "manner": "calm"], ["id": "b", "speaker": "hero", "manner": "calm"],
+      ["id": "q", "speaker": "hero", "manner": "calm"], ["id": "n", "speaker": "hero", "manner": "calm"],
       ["id": "c", "speaker": "hero", "manner": "shouting"], ["id": "d", "speaker": "hero", "manner": "whisper"],
       ["id": "e", "speaker": "other", "manner": "calm"]]
-    for (id, amplitude) in [("a", Float(0.1)), ("b", 0.1), ("c", 0.4), ("d", 0.025), ("e", 0.3)] {
+    for (id, amplitude) in [("a", Float(0.1)), ("b", 0.1), ("q", 0.05), ("n", 0.105), ("c", 0.4), ("d", 0.025), ("e", 0.3)] {
       try SpeechCache.save(root.appendingPathComponent("audio/segments/" + id + ".spcm"), samples: tone(amplitude), signature: id)
     }
     let audio = NativeAudio(ffmpeg: URL(fileURLWithPath: "/usr/bin/false"), ffprobe: URL(fileURLWithPath: "/usr/bin/false"))
     let gains = try audio.lineGains(project: root, segments: rows)
-    XCTAssertEqual(Set(gains.keys), ["c", "d"])        // calm lines and other speakers untouched
-    // Levelled to the speaker, keeping a moderate character: a shout +3 dB, a whisper −3 dB.
+    // A quiet calm phrase is lifted; tiny differences (n, 0.4 dB) and other speakers are left alone.
+    XCTAssertEqual(Set(gains.keys), ["q", "c", "d"])
+    XCTAssertEqual(gains["q"]!, 20 * log10(2.0), accuracy: 0.3)
+    // A shout keeps +3 dB over the usual line; a whisper comes to the usual loudness.
     XCTAssertEqual(gains["c"]!, -20 * log10(4.0) + 3, accuracy: 0.3)
-    XCTAssertEqual(gains["d"]!, 20 * log10(4.0) - 3, accuracy: 0.3)
+    XCTAssertEqual(gains["d"]!, 20 * log10(4.0), accuracy: 0.3)
     // The presence lift for a shout keeps length and leaves low frequencies as they were.
     let low = (0..<4800).map { Float(sin(Double($0) * 2 * .pi * 200 / 24000)) * 0.1 }
     let lifted = NativeAudio.presence(low)
@@ -493,6 +496,23 @@ final class CoreTests: XCTestCase {
     for (before, after, expected) in cases {
       XCTAssertEqual(StressRules.allOrEverything(before: before, after: after), expected, before + "|" + after)
     }
+  }
+  func testTwinVoicesAreToldByPitchRangeAndTempo() throws {
+    func v(_ pitch: Double, _ range: Double, _ rate: Double) -> VoiceAcoustics {
+      VoiceAcoustics(pitch: pitch, range: range, level: -20, rate: rate, voiced: 0.6)
+    }
+    // «Лотерея»: narrator and old Warner were twins; Mrs Delacroix and Mrs Hutchinson were not.
+    XCTAssertTrue(VoiceAcoustics.twins(v(115, 8.0, 10.8), v(118, 7.0, 10.4)))
+    XCTAssertFalse(VoiceAcoustics.twins(v(286, 12.6, 13.9), v(222, 7.6, 14.1)))
+    XCTAssertFalse(VoiceAcoustics.twins(v(169, 8.4, 11.0), v(167, 10.9, 11.9)))   // range differs
+    XCTAssertFalse(VoiceAcoustics.twins(v(115, 8.0, 10.8), v(118, 7.0, 12.5)))    // tempo differs
+    XCTAssertTrue(VoiceAcoustics.distance(v(140, 8, 10), v(115, 8, 10)) > VoiceAcoustics.distance(v(118, 7, 10), v(115, 8, 10)))
+    let voice: Object = ["tts_voice": "Gravelly old man, 70s", "tts_delivery": "Slow and grumbling", "seed": 5]
+    let higher = VoiceDirection.redesigned(voice, higher: true), lower = VoiceDirection.redesigned(voice, higher: false)
+    XCTAssertTrue(NativeIO.string(higher["tts_instruction"]).hasPrefix("Gravelly old man, 70s. Clearly higher"))
+    XCTAssertTrue(NativeIO.string(lower["tts_instruction"]).contains("Clearly lower, deeper pitch"))
+    XCTAssertTrue(NativeIO.string(lower["tts_instruction"]).hasSuffix(VoiceDirection.readingRules))
+    XCTAssertTrue(VoiceDirection.validEnglish(NativeIO.string(higher["tts_instruction"])))
   }
   func testPausesFollowBoundaryKindAndSettings() throws {
     let rows: [Object] = [

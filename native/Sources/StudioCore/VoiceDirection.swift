@@ -72,6 +72,17 @@ public enum VoiceDirection {
       + state + intensity[level] + readingRules
   }
 
+  /// The same character's voice pushed clearly higher or lower, to part it from a twin; the
+  /// habit part and the profile stay, so the cached direction remains valid.
+  public static func redesigned(_ voice: Object, higher: Bool) -> Object {
+    var result = voice
+    let timbre = sentence(NativeIO.string(voice["tts_voice"])) + (higher
+      ? " Clearly higher, lighter pitch than a typical voice of this age."
+      : " Clearly lower, deeper pitch than a typical voice of this age.")
+    result["tts_voice"] = timbre
+    result["tts_instruction"] = timbre + " " + sentence(NativeIO.string(voice["tts_delivery"])) + readingRules
+    return result
+  }
   public static func input(_ voice: Object) -> Object {
     let profile = NativeIO.object(voice["character_profile"])
     var result: Object = ["voice_gender": NativeIO.string(voice["voice_gender"])]

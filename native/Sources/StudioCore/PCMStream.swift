@@ -112,41 +112,36 @@ extension NativeAudio {
     }
   }
   /// Role measurements also use stdin: no whole-role WAV is stored on disk.
-  /// Lines read with a manner are levelled to their speaker's usual line (the median of the calm
-  /// ones): a shout is heard by its strain and pitch, not as a jump in loudness, and a whisper does
-  /// not vanish. Segment ID → gain in dB; calm lines get none.
+  /// Every line is levelled to its speaker's usual line (the median of the calm ones), so no
+  /// phrase drops away: a whisper or a mutter keeps its character at the usual loudness, a shout
+  /// keeps a moderate edge. Differences under 1 dB are left alone. Segment ID → gain in dB.
   public func lineGains(project: URL, segments: [Object]) throws -> [String: Double] {
     var result: [String: Double] = [:]
-    // Levelled, a shout keeps a moderate edge over the speaker's usual line and a whisper stays
-    // a little quieter: the emotion is audible without the reader yelling.
-    let character: [String: Double] = ["shouting": 3, "calling": 3, "hysterical": 2, "angry": 1.5, "triumphant": 1,
-      "whisper": -3, "muttering": -2, "weak": -2, "sleepy": -1.5]
+    let character: [String: Double] = ["shouting": 3, "calling": 3, "hysterical": 2, "angry": 1.5, "triumphant": 1]
     let groups = Dictionary(grouping: segments) { NativeIO.string($0["speaker"]) }
     for speaker in groups.keys.sorted() {
       let lines = groups[speaker]!
-      let emotional = lines.filter { VoiceDirection.manner($0["manner"]) != "calm" }
-      guard !emotional.isEmpty else { continue }
-      NativeIO.stage("Выравнивание громкости эмоциональных реплик · " + speaker)
+      NativeIO.stage("Ровная громкость реплик · " + speaker)
       func level(_ row: Object) throws -> Double? {
         try Task.checkCancellation()
         return VoiceAcoustics.speechLevel(try SpeechCache.readAudio(SpeechCache.segmentURL(project, id: NativeIO.string(row["id"]))))
       }
-      let calm = lines.filter { VoiceDirection.manner($0["manner"]) == "calm" }
-      // An evenly spread sample of calm lines is enough for the median of a long book.
-      let step = max(1, calm.count / 300)
-      var reference = try stride(from: 0, to: calm.count, by: step).compactMap { try level(calm[$0]) }.sorted()
-      if reference.isEmpty { reference = try lines.compactMap { try level($0) }.sorted() }
+      var levels: [String: Double] = [:]
+      for row in lines { if let value = try level(row) { levels[NativeIO.string(row["id"])] = value } }
+      let calm = lines.filter { VoiceDirection.manner($0["manner"]) == "calm" }.compactMap { levels[NativeIO.string($0["id"])] }.sorted()
+      let reference = calm.isEmpty ? levels.values.sorted() : calm
       guard !reference.isEmpty else { continue }
       let usual = reference[reference.count / 2]
-      for row in emotional {
-        guard let own = try level(row) else { continue }
+      for row in lines {
+        let id = NativeIO.string(row["id"])
+        guard let own = levels[id] else { continue }
         let gain = max(-12, min(12, usual + (character[VoiceDirection.manner(row["manner"])] ?? 0) - own))
-        if abs(gain) >= 0.5 { result[NativeIO.string(row["id"])] = gain }
+        if abs(gain) >= 1 { result[id] = gain }
       }
     }
     if !result.isEmpty {
       let values = result.values.sorted()
-      NativeIO.emit("log", ["message": String(format: "Эмоциональные реплики выровнены по громкости роли: %d · от %+.1f до %+.1f дБ",
+      NativeIO.emit("log", ["message": String(format: "Ровная громкость: выровнено реплик %d · от %+.1f до %+.1f дБ",
         values.count, values.first!, values.last!)])
     }
     return result

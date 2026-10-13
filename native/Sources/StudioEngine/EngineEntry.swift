@@ -620,6 +620,7 @@ final class Engine {
     lap("текст и ударения")
     var references: [String: (URL, String)] = [:]
     var design: Qwen3TTSModel?
+    var fresh = Set<String>()   // voices designed in this build (not cached, previewed or own)
     for voice in voices where used.contains(NativeIO.string(voice["id"])) {
       let id = NativeIO.string(voice["id"])
       if let ref = try custom(voice) {
@@ -663,6 +664,57 @@ final class Engine {
           "sha256": try NativeIO.hashFile(file),
         ])
       references[id] = (file, text)
+      fresh.insert(id)
+    }
+    // Twin voices: a voice made in this build that sounds like an earlier one of the same gender
+    // (pitch, range, tempo) is designed again clearly higher, then lower, with another seed; the
+    // version farther from its twin is kept. Voices of a book already being read never change.
+    var measured: [String: VoiceAcoustics] = [:]
+    func acoustics(_ id: String) -> VoiceAcoustics? {
+      if let known = measured[id] { return known }
+      let value = references[id].flatMap { ref in (try? NativeWAV.read(ref.0)).flatMap { VoiceAcoustics.measure($0, text: ref.1) } }
+      measured[id] = value
+      return value
+    }
+    var changedCast = false
+    for n in voices.indices where fresh.contains(NativeIO.string(voices[n]["id"])) && NativeIO.string(voices[n]["id"]) != "narrator" {
+      let id = NativeIO.string(voices[n]["id"]), gender = NativeIO.string(voices[n]["voice_gender"])
+      guard !["", "unknown"].contains(gender), let own = acoustics(id),
+        let twin = voices[..<n].first(where: { other in
+          let oid = NativeIO.string(other["id"])
+          return used.contains(oid) && NativeIO.string(other["voice_gender"]) == gender
+            && acoustics(oid).map { VoiceAcoustics.twins(own, $0) } == true
+        }), let twinSound = acoustics(NativeIO.string(twin["id"])) else { continue }
+      let ref = references[id]!
+      var best: (voice: Object, samples: [Float], distance: Double)?
+      for (k, higher) in [true, false].enumerated() {
+        try Task.checkCancellation()
+        NativeIO.stage("Голос похож на «" + NativeIO.string(twin["name"]) + "» · новый вариант · " + NativeIO.string(voices[n]["name"]))
+        var candidate = VoiceDirection.redesigned(voices[n], higher: higher)
+        candidate["seed"] = (voices[n]["seed"] as? Int ?? 17001) &+ 7919 * (k + 1)
+        if design == nil { design = try await Qwen3TTSModel.fromModelDirectory(designPath) }
+        let samples = try await generate(design!, text: ref.1, description: instruction(candidate), reference: nil,
+          seed: candidate["seed"] as? Int ?? 17001)
+        guard let sound = VoiceAcoustics.measure(samples, text: ref.1) else { continue }
+        let distance = VoiceAcoustics.distance(sound, twinSound)
+        if best == nil || distance > best!.distance { best = (candidate, samples, distance) }
+        if !VoiceAcoustics.twins(sound, twinSound) { break }
+      }
+      guard let best, best.distance > VoiceAcoustics.distance(own, twinSound) else { continue }
+      voices[n] = best.voice
+      measured[id] = VoiceAcoustics.measure(best.samples, text: ref.1)
+      let file = ref.0, meta = file.deletingPathExtension().appendingPathExtension("json")
+      try NativeWAV.write(file, best.samples)
+      try NativeIO.write(meta, ["signature": try VoiceSample.signature(text: ref.1, instruction: instruction(best.voice),
+        profile: VoiceDirection.signature(best.voice), seed: best.voice["seed"] as? Int ?? 17001),
+        "text": ref.1, "description": instruction(best.voice), "sha256": try NativeIO.hashFile(file)])
+      changedCast = true
+      NativeIO.emit("log", ["message": String(format: "Голос «%@» звучал как «%@» — создан заново, отличие %.1f пт",
+        NativeIO.string(voices[n]["name"]), NativeIO.string(twin["name"]), best.distance)])
+    }
+    if changedCast {
+      manifest["voices"] = voices
+      try writeManifest(manifest, at: project)
     }
     // Manner samples: the same voice and habits in another momentary state, only for
     // manners that this character actually uses. A failed sample falls back to the main one.
@@ -702,7 +754,8 @@ final class Engine {
         do {
           if design == nil { design = try await Qwen3TTSModel.fromModelDirectory(designPath) }
           var best: (samples: [Float], level: Int, score: Double)?
-          for level in VoiceDirection.intensity.indices {
+          // Two attempts: as written, then the extreme wording; the strongest is kept.
+          for level in [0, VoiceDirection.intensity.count - 1] {
             try Task.checkCancellation()
             NativeIO.stage("Создание голоса · " + NativeIO.string(voice["name"]) + " · " + manner
               + (level > 0 ? " · усиление \(level)" : ""))
