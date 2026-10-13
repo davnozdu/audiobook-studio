@@ -59,7 +59,12 @@ final class CoreTests: XCTestCase {
     defer { try? FileManager.default.removeItem(at: root) }
     let file = root.appendingPathComponent("segment.spcm")
     // Speech-like signal with extremes: 16-bit values come back exactly, the rest within ½ LSB.
-    var samples = (0..<48000).map { Float(sin(Double($0) * 0.03) * 0.6 + sin(Double($0) * 0.31) * 0.2) }
+    var samples: [Float] = (0..<48000).map { (i: Int) -> Float in
+      let t = Double(i)
+      let low: Double = sin(t * 0.03) * 0.6
+      let high: Double = sin(t * 0.31) * 0.2
+      return Float(low + high)
+    }
     samples += [0, -0.0, Float.leastNonzeroMagnitude, -0.125, 1.25, -1.25, 0.00002, -0.00002]
     try SpeechCache.save(file, samples: samples, signature: "test")
     let restored = try SpeechPCM.read(file)
