@@ -624,29 +624,56 @@ final class Engine {
     for voice in voices where used.contains(NativeIO.string(voice["id"])) {
       let id = NativeIO.string(voice["id"])
       guard try custom(voice) == nil else { continue }
+      // The calm sample is the yardstick: a manner sample must sound audibly different from it.
+      let calm = references[id].flatMap { ref in
+        (try? NativeWAV.read(ref.0)).flatMap { VoiceAcoustics.measure($0, text: ref.1) }
+      }
       for manner in (mannerUses[id] ?? []).sorted() {
-        guard let description = VoiceDirection.mannerInstruction(voice, manner: manner) else { continue }
+        guard VoiceDirection.mannerInstruction(voice, manner: manner) != nil else { continue }
         let directory = project.appendingPathComponent("voices")
         let file = directory.appendingPathComponent(id + "--" + manner + ".wav")
         let meta = directory.appendingPathComponent(id + "--" + manner + ".json")
         let text = (try? NativeProject.excerpt(manifest, character: id, manner: manner))
           ?? references[id]?.1 ?? "Это мой голос в этой книге. Сейчас я расскажу свою часть истории."
         let seed = voice["seed"] as? Int ?? 17001
-        let signature = try VoiceSample.signature(text: text, instruction: description,
-          profile: VoiceDirection.signature(voice), seed: seed)
-        if fm.fileExists(atPath: file.path), let old = try? NativeIO.load(meta),
-          NativeIO.string(old["signature"]) == signature,
+        func signature(_ level: Int) throws -> String {
+          try VoiceSample.signature(text: text, instruction: VoiceDirection.mannerInstruction(voice, manner: manner, level: level)!,
+            profile: VoiceDirection.signature(voice), seed: seed)
+        }
+        let saved = try? NativeIO.load(meta), level = saved?["level"] as? Int ?? 0
+        if fm.fileExists(atPath: file.path), let old = saved, VoiceDirection.intensity.indices.contains(level),
+          NativeIO.string(old["signature"]) == (try signature(level)),
           (try NativeIO.hashFile(file)) == NativeIO.string(old["sha256"])
         {
           references[id + "|" + manner] = (file, NativeIO.string(old["text"]))
           continue
         }
-        NativeIO.stage("Создание голоса · " + NativeIO.string(voice["name"]) + " · " + manner)
+        // Same timbre text and seed at every step: the voice stays, only the emotion is pushed
+        // further until it is audible. The strongest attempt is kept if none clearly is.
         do {
           if design == nil { design = try await Qwen3TTSModel.fromModelDirectory(designPath) }
-          let samples = try await generate(design!, text: text, description: description, reference: nil, seed: seed)
-          try NativeWAV.write(file, samples)
-          try NativeIO.write(meta, ["signature": signature, "text": text, "description": description,
+          var best: (samples: [Float], level: Int, score: Double)?
+          for level in VoiceDirection.intensity.indices {
+            try Task.checkCancellation()
+            NativeIO.stage("Создание голоса · " + NativeIO.string(voice["name"]) + " · " + manner
+              + (level > 0 ? " · усиление \(level)" : ""))
+            let description = VoiceDirection.mannerInstruction(voice, manner: manner, level: level)!
+            let samples = try await generate(design!, text: text, description: description, reference: nil, seed: seed)
+            guard let calm, let measured = VoiceAcoustics.measure(samples, text: text) else {
+              best = (samples, level, 0); break
+            }
+            let d = measured.change(from: calm)
+            let (score, audible) = VoiceAcoustics.strength(manner, d)
+            NativeIO.emit("log", ["message": String(format:
+              "Манера [%@|%@] · ступень %d: высота %+.1f пт · размах %+.1f пт · уровень %+.1f дБ · темп ×%.2f · %@",
+              id, manner, level, d.pitch, d.range, d.level, d.tempo, audible ? "эмоция слышна" : "слабо, усиливается")])
+            if best == nil || score > best!.score { best = (samples, level, score) }
+            if audible { best = (samples, level, score); break }
+          }
+          guard let best else { continue }
+          try NativeWAV.write(file, best.samples)
+          try NativeIO.write(meta, ["signature": try signature(best.level), "text": text, "level": best.level,
+            "description": VoiceDirection.mannerInstruction(voice, manner: manner, level: best.level)!,
             "sha256": try NativeIO.hashFile(file)])
           references[id + "|" + manner] = (file, text)
         } catch is CancellationError {
@@ -668,7 +695,8 @@ final class Engine {
     let raw = project.appendingPathComponent("audio")
     try NativeIO.write(raw.appendingPathComponent("timeline.json"), ["segments": timeline])
     NativeIO.stage("Потоковая нормализация громкости по ролям")
-    let gains = try audio.streamingGains(project: project, segments: rows)
+    let lineGains = try audio.lineGains(project: project, segments: rows)
+    let gains = try audio.streamingGains(project: project, segments: rows, lineGains: lineGains)
     lap("громкость")
     var selectedMusic: URL?
     if request["music_enabled"] as? Bool ?? true {
@@ -688,7 +716,7 @@ final class Engine {
     NativeIO.stage("Сборка отдельного M4B и EPUB с синхронным аудио")
     let result = try audio.package(
       project: project, manifest: prepared, source: source, timeline: timeline,
-      gains: gains, music: selectedMusic, musicPercent: request["music_volume"] as? Double ?? 5)
+      gains: gains, lineGains: lineGains, music: selectedMusic, musicPercent: request["music_volume"] as? Double ?? 5)
     let external = URL(fileURLWithPath: destination)
     if fm.fileExists(atPath: external.path) {
       // Replacement confirmed in the save panel: the old folder goes to the Trash (recoverable) only

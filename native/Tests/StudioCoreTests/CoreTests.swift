@@ -318,6 +318,71 @@ final class CoreTests: XCTestCase {
     } catch is CancellationError {}
     XCTAssertEqual(cancelled, 1)
   }
+  func testMannerSamplesAreMeasuredAgainstTheCalmVoice() throws {
+    // Voiced speech-like signal: a tone with harmonics in 0.5 s syllables separated by short gaps.
+    func voice(_ hz: Double, _ amplitude: Float, seconds: Double = 3) -> [Float] {
+      (0..<Int(seconds * 24000)).map { i in
+        let t = Double(i) / 24000
+        let on = (i / 6000) % 2 == 0 || (i % 12000) < 10000
+        let v = sin(2 * .pi * hz * t) + 0.5 * sin(4 * .pi * hz * t) + 0.25 * sin(6 * .pi * hz * t)
+        return on ? amplitude * Float(v) : 0
+      }
+    }
+    let text = String(repeating: "слово ", count: 6)
+    let calm = VoiceAcoustics.measure(voice(100, 0.2), text: text)!
+    XCTAssertEqual(calm.pitch, 100, accuracy: 3)
+    XCTAssertTrue(calm.voiced > 0.8)
+    let shout = VoiceAcoustics.measure(voice(170, 0.5), text: text)!.change(from: calm)
+    XCTAssertEqual(shout.pitch, 12 * log2(1.7), accuracy: 0.5)
+    XCTAssertEqual(shout.level, 20 * log10(2.5), accuracy: 0.5)
+    XCTAssertTrue(VoiceAcoustics.strength("shouting", shout).audible)
+    XCTAssertFalse(VoiceAcoustics.strength("sad", shout).audible)
+    // The same voice "excited" but slower: the pitch alone is not enough.
+    let slow = VoiceAcoustics.measure(voice(170, 0.2), text: String(repeating: "слово ", count: 4))!.change(from: calm)
+    XCTAssertFalse(VoiceAcoustics.strength("excited", slow).audible)
+    // A whisper is noise: almost nothing voiced.
+    var seed: UInt32 = 1
+    let noise = (0..<72000).map { _ -> Float in seed = seed &* 1664525 &+ 1013904223; return Float(Int32(bitPattern: seed)) / Float(Int32.max) * 0.05 }
+    let whisper = VoiceAcoustics.measure(noise, text: text)!.change(from: calm)
+    XCTAssertTrue(VoiceAcoustics.strength("whisper", whisper).audible)
+    XCTAssertTrue(VoiceAcoustics.strength("calm", whisper).audible)   // no sign to check
+    XCTAssertEqual(VoiceAcoustics.speechLevel(voice(100, 0.2))!, calm.level, accuracy: 0.5)
+    // Stronger steps keep the timbre text and add intensity; unknown steps give nothing.
+    let profile: Object = ["tts_voice": "Low husky baritone", "tts_delivery": "Slow and dry"]
+    let base = VoiceDirection.mannerInstruction(profile, manner: "shouting")!
+    let strongest = VoiceDirection.mannerInstruction(profile, manner: "shouting", level: 2)!
+    XCTAssertTrue(base.hasPrefix("Low husky baritone.") && strongest.hasPrefix("Low husky baritone."))
+    XCTAssertTrue(strongest.contains("extreme")); XCTAssertNil(VoiceDirection.mannerInstruction(profile, manner: "shouting", level: 3))
+    XCTAssertNil(VoiceDirection.mannerInstruction(profile, manner: "calm"))
+    for manner in ["shouting", "crying", "muttering", "laughing", "tender", "surprised", "stern", "anxious", "contemptuous"] {
+      XCTAssertEqual(VoiceDirection.manner(manner), manner)
+    }
+  }
+  func testEmotionalLinesAreLevelledToTheirSpeaker() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    func tone(_ amplitude: Float) -> [Float] { (0..<24000).map { amplitude * Float(sin(Double($0) * 0.05)) } }
+    let rows: [Object] = [
+      ["id": "a", "speaker": "hero", "manner": "calm"], ["id": "b", "speaker": "hero", "manner": "calm"],
+      ["id": "c", "speaker": "hero", "manner": "shouting"], ["id": "d", "speaker": "hero", "manner": "whisper"],
+      ["id": "e", "speaker": "other", "manner": "calm"]]
+    for (id, amplitude) in [("a", Float(0.1)), ("b", 0.1), ("c", 0.4), ("d", 0.025), ("e", 0.3)] {
+      try SpeechCache.save(root.appendingPathComponent("audio/segments/" + id + ".spcm"), samples: tone(amplitude), signature: id)
+    }
+    let audio = NativeAudio(ffmpeg: URL(fileURLWithPath: "/usr/bin/false"), ffprobe: URL(fileURLWithPath: "/usr/bin/false"))
+    let gains = try audio.lineGains(project: root, segments: rows)
+    XCTAssertEqual(Set(gains.keys), ["c", "d"])        // calm lines and other speakers untouched
+    XCTAssertEqual(gains["c"]!, -20 * log10(4.0), accuracy: 0.3)
+    XCTAssertEqual(gains["d"]!, 20 * log10(4.0), accuracy: 0.3)
+  }
+  func testLongFragmentsAreCutAtSentencesForManner() throws {
+    let monologue = "— И тогда я понял, что всё это было зря и что никто меня не услышит в этом сером холодном городе. Нет! Не отдам я её вам никогда, слышите, никогда и ни за что на свете, хоть убейте!"
+    let parts = NativeDirector.fragments(monologue).map { String(String.UnicodeScalarView(Array(monologue.unicodeScalars)[$0.0..<$0.1])) }
+    XCTAssertEqual(parts, ["— И тогда я понял, что всё это было зря и что никто меня не услышит в этом сером холодном городе.",
+      "Нет!", "Не отдам я её вам никогда, слышите, никогда и ни за что на свете, хоть убейте!"])
+    XCTAssertEqual(parts.joined(separator: " "), monologue)
+    XCTAssertEqual(NativeDirector.fragments("— Нет! Не отдам! — вскричал он.").count, 2)   // short lines stay whole
+  }
   func testPausesFollowBoundaryKindAndSettings() throws {
     let rows: [Object] = [
       ["id": "a", "speaker": "hero", "text": "— Да,", "paragraph_id": "p1", "chapter_id": "c1"],
@@ -821,7 +886,7 @@ final class CoreTests: XCTestCase {
     // Manner splits a speaker's span; narrator is always calm; a broken list is calm, not an error.
     let toned = try NativeDirector.validateSpeakers(["paragraphs": [[
       "id": "p00001", "speakers": ["hero", "narrator", "hero", "hero"],
-      "manners": ["joyful", "angry", "angry", "shouting"]]]], chunk: [paragraph], fragments: split, allowed: ["hero", "narrator"])
+      "manners": ["joyful", "angry", "angry", "yelling"]]]], chunk: [paragraph], fragments: split, allowed: ["hero", "narrator"])
     XCTAssertEqual(NativeIO.objects(toned[0]["spans"]).map { NativeIO.string($0["manner"]) }, ["joyful", "calm", "angry", "calm"])
     let untoned = try NativeDirector.validateSpeakers(["paragraphs": [[
       "id": "p00001", "speakers": ["hero", "narrator", "hero", "hero"], "manners": ["angry"]]]],

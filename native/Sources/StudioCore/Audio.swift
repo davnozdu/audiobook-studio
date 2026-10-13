@@ -245,7 +245,7 @@ public struct NativeAudio {
   }
   public func package(
     project: URL, manifest: Object, source: Object, timeline: [Object], audio: URL? = nil,
-    gains: [String: Double] = [:], music: URL? = nil, musicPercent: Double = 0
+    gains: [String: Double] = [:], lineGains: [String: Double] = [:], music: URL? = nil, musicPercent: Double = 0
   ) throws -> URL {
     let out = project.appendingPathComponent("result")
     let fm = FileManager.default
@@ -315,7 +315,7 @@ public struct NativeAudio {
     if audio != nil { try ff(arguments) }
     else {
       _ = try NativeIO.stream(ffmpeg, ["-hide_banner", "-nostats", "-loglevel", "error", "-y"] + arguments) { sink in
-        try Self.streamMontage(project: project, segments: segments, timeline: timeline, gains: gains) {
+        try Self.streamMontage(project: project, segments: segments, timeline: timeline, gains: gains, lineGains: lineGains) {
           try sink.write(contentsOf: $0)
         }
       }

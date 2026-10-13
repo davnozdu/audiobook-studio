@@ -112,7 +112,42 @@ extension NativeAudio {
     }
   }
   /// Role measurements also use stdin: no whole-role WAV is stored on disk.
-  public func streamingGains(project: URL, segments: [Object]) throws -> [String: Double] {
+  /// Lines read with a manner are levelled to their speaker's usual line (the median of the calm
+  /// ones): a shout is heard by its strain and pitch, not as a jump in loudness, and a whisper does
+  /// not vanish. Segment ID → gain in dB; calm lines get none.
+  public func lineGains(project: URL, segments: [Object]) throws -> [String: Double] {
+    var result: [String: Double] = [:]
+    let groups = Dictionary(grouping: segments) { NativeIO.string($0["speaker"]) }
+    for speaker in groups.keys.sorted() {
+      let lines = groups[speaker]!
+      let emotional = lines.filter { VoiceDirection.manner($0["manner"]) != "calm" }
+      guard !emotional.isEmpty else { continue }
+      NativeIO.stage("Выравнивание громкости эмоциональных реплик · " + speaker)
+      func level(_ row: Object) throws -> Double? {
+        try Task.checkCancellation()
+        return VoiceAcoustics.speechLevel(try SpeechCache.readAudio(SpeechCache.segmentURL(project, id: NativeIO.string(row["id"]))))
+      }
+      let calm = lines.filter { VoiceDirection.manner($0["manner"]) == "calm" }
+      // An evenly spread sample of calm lines is enough for the median of a long book.
+      let step = max(1, calm.count / 300)
+      var reference = try stride(from: 0, to: calm.count, by: step).compactMap { try level(calm[$0]) }.sorted()
+      if reference.isEmpty { reference = try lines.compactMap { try level($0) }.sorted() }
+      guard !reference.isEmpty else { continue }
+      let usual = reference[reference.count / 2]
+      for row in emotional {
+        guard let own = try level(row) else { continue }
+        let gain = max(-12, min(12, usual - own))
+        if abs(gain) >= 0.5 { result[NativeIO.string(row["id"])] = gain }
+      }
+    }
+    if !result.isEmpty {
+      let values = result.values.sorted()
+      NativeIO.emit("log", ["message": String(format: "Эмоциональные реплики выровнены по громкости роли: %d · от %+.1f до %+.1f дБ",
+        values.count, values.first!, values.last!)])
+    }
+    return result
+  }
+  public func streamingGains(project: URL, segments: [Object], lineGains: [String: Double] = [:]) throws -> [String: Double] {
     var measurements: [String: (Double, Double)] = [:]
     let groups = Dictionary(grouping: segments) { NativeIO.string($0["speaker"]) }
     for speaker in groups.keys.sorted() {
@@ -127,7 +162,8 @@ extension NativeAudio {
           repeat {
             for part in parts {
               try Task.checkCancellation()
-              let samples = try SpeechCache.readAudio(part)
+              let line = Float(pow(10, (lineGains[part.deletingPathExtension().lastPathComponent] ?? 0) / 20))
+              let samples = try SpeechCache.readAudio(part).map { $0 * line }
               guard !samples.isEmpty else { throw StudioError("Пустая реплика при измерении громкости") }
               try sink.write(contentsOf: NativeWAV.bytes(samples)); frames += samples.count
             }
@@ -150,13 +186,14 @@ extension NativeAudio {
   /// Stream exact original-order samples and pauses. Only one utterance occupies
   /// memory and the consumer's bounded pipe applies backpressure.
   @discardableResult public static func streamMontage(project: URL, segments: [Object],
-    timeline: [Object], gains: [String: Double], write: (Data) throws -> Void) throws -> Int {
+    timeline: [Object], gains: [String: Double], lineGains: [String: Double] = [:],
+    write: (Data) throws -> Void) throws -> Int {
     try SpeechBatch.verifyOrder(segments, timeline: timeline)
     var frames = 0
     for (segment, clip) in zip(segments, timeline) {
       try Task.checkCancellation()
       let id = NativeIO.string(segment["id"]), speaker = NativeIO.string(segment["speaker"])
-      let gain = Float(pow(10, (gains[speaker] ?? 0) / 20))
+      let gain = Float(pow(10, ((gains[speaker] ?? 0) + (lineGains[id] ?? 0)) / 20))
       guard gain.isFinite else { throw StudioError("Некорректный уровень громкости · " + speaker) }
       let samples = try SpeechCache.readAudio(SpeechCache.segmentURL(project, id: id)).map { $0 * gain }
       let expected = (clip["audio_end"] as! Double) - (clip["audio_start"] as! Double)

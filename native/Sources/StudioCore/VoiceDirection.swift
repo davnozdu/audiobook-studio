@@ -8,17 +8,34 @@ public enum VoiceDirection {
   public static let readingRules = " Say only the supplied text, no added sounds."
 
   /// Momentary manner of one line. "calm" reads with the character's main sample;
-  /// every other manner gets its own sample of the same voice in that state.
+  /// every other manner gets its own sample of the same voice in that state. The reading model
+  /// clones a sample and takes no instructions, so the state must be plainly audible in it.
   public static let manners: [String: String] = [
     "calm": "",
-    "joyful": "Right now joyful and delighted: bright lively pitch, warm smiling tone, quick light breath.",
-    "excited": "Right now excited and agitated: fast animated pace, raised pitch, urgent energetic breath.",
-    "angry": "Right now angry: loud forceful voice, harsh tense timbre, sharp stressed words, heated breath.",
-    "frightened": "Right now frightened: tense shaky voice, high strained pitch, hurried uneven breath.",
-    "sad": "Right now sad and weary: low quiet voice, slow heavy pace, sighing breath.",
-    "mocking": "Right now mocking: sneering sarcastic drawl, exaggerated ironic intonation.",
-    "pleading": "Right now pleading: soft whining voice, imploring rising intonation, anxious breath.",
-    "whisper": "Right now hushed: quiet breathy half-whisper, secretive close tone.",
+    "joyful": "Right now joyful and delighted: bright high lively pitch, wide melodic swings, warm smiling tone, quick light breath.",
+    "laughing": "Right now laughing while speaking: voice bubbling and shaking with laughter, high bright pitch, breathy bursts between words.",
+    "excited": "Right now excited and agitated: fast urgent pace, raised pitch, wide pitch jumps, energetic gasping breath.",
+    "surprised": "Right now astonished: sudden high pitch leaps, drawn-out stressed words, exclamatory rising intonation, quick intake of breath.",
+    "angry": "Right now angry: forceful hard voice, harsh tense timbre, clipped sharp stressed words, heated breath.",
+    "shouting": "Right now shouting at full voice: strained high pitch, maximum vocal effort, every word hurled out, fast heated breath.",
+    "stern": "Right now stern and commanding: low firm voice, slow heavy deliberate words, falling cold intonation.",
+    "frightened": "Right now frightened: shaky trembling voice, high strained pitch, hurried uneven gasping breath.",
+    "anxious": "Right now anxious and nervous: tense hurried voice, unsteady pitch, short shallow breath, words tumbling out.",
+    "sad": "Right now sad and weary: low quiet heavy voice, slow dragging pace, falling intonation, sighing breath.",
+    "crying": "Right now crying: tearful choked voice, trembling and breaking pitch, words squeezed out between wet sobbing breaths.",
+    "tender": "Right now tender and loving: soft warm gentle voice, slow caressing pace, quiet intimate tone.",
+    "mocking": "Right now mocking: sneering sarcastic drawl, exaggerated ironic swoops of pitch, stretched stressed words.",
+    "contemptuous": "Right now contemptuous: cold disdainful drawl, low dismissive voice, words dropped lazily with scorn.",
+    "pleading": "Right now pleading: soft whining voice, imploring rising intonation, anxious trembling breath.",
+    "whisper": "Right now whispering: hushed breathy whisper with almost no voiced tone, secretive close tone.",
+    "muttering": "Right now muttering under the breath: low mumbled monotone, quick slurred words, quiet grumbling voice.",
+  ]
+  /// Stronger wording for the same state, used when a sample came out too mild; the timbre text
+  /// and the seed stay, so the voice is the same and only the emotion is pushed further.
+  public static let intensity = [
+    "",
+    " The emotion is strong and unmistakable from the first word.",
+    " The emotion is extreme and exaggerated, at the very limit of this state, theatrical and impossible to miss.",
   ]
   public static func manner(_ value: Any?) -> String {
     let name = NativeIO.string(value).lowercased()
@@ -27,13 +44,13 @@ public enum VoiceDirection {
   /// Same voice and habitual character, then the momentary state, which explicitly takes over pace,
   /// loudness and energy (a slow quiet old man who is angry gets one consistent command) while the
   /// timbre, age and breath limits of the voice stay. nil for calm or old projects.
-  public static func mannerInstruction(_ voice: Object, manner: String) -> String? {
+  public static func mannerInstruction(_ voice: Object, manner: String, level: Int = 0) -> String? {
     let state = manners[manner] ?? ""
     let timbre = NativeIO.string(voice["tts_voice"]), habit = NativeIO.string(voice["tts_delivery"])
-    guard !state.isEmpty, !timbre.isEmpty else { return nil }
+    guard !state.isEmpty, !timbre.isEmpty, intensity.indices.contains(level) else { return nil }
     return sentence(timbre) + (habit.isEmpty ? "" : " Usual character: " + sentence(habit))
       + " For this sample, the state overrides the usual pace, loudness and energy, keeping the same voice and age. "
-      + state + readingRules
+      + state + intensity[level] + readingRules
   }
 
   public static func input(_ voice: Object) -> Object {
