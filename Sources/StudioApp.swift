@@ -314,6 +314,13 @@ struct StoryCharacter: Identifiable {
               let data = try? Data(contentsOf: url), let tracks = try? JSONDecoder().decode([MusicTrack].self, from: data) else { return [] }
         return tracks
     }()
+    // Silence after a line by boundary kind, in milliseconds (about 0.3 s of the line's own edge
+    // silence is heard on top). Changing them rebuilds only the montage, not the speech.
+    static let pauseDefaults = ["comma": 100, "sentence": 450, "paragraph": 800, "chapter": 2000]
+    @Published var pauses: [String: Int] = (UserDefaults.standard.dictionary(forKey: "pauses") as? [String: Int])
+        .map { Studio.pauseDefaults.merging($0) { _, saved in saved } } ?? Studio.pauseDefaults {
+        didSet { UserDefaults.standard.set(pauses, forKey: "pauses") }
+    }
     @Published var musicVolume = UserDefaults.standard.object(forKey: "musicVolume") as? Double ?? 5.0 {
         didSet { UserDefaults.standard.set(musicVolume, forKey: "musicVolume") }
     }
@@ -543,7 +550,7 @@ struct StoryCharacter: Identifiable {
         saveThen {
             var r = self.request("project-export"); r["destination"] = url.path
             r["settings"] = ["music": r["music"]!, "music_enabled": self.musicEnabled,
-                "music_volume": self.musicVolume, "cloud_stress": self.cloudStress]
+                "music_volume": self.musicVolume, "cloud_stress": self.cloudStress, "pauses": self.pauses]
             self.launch(r, after: after)
         }
     }
@@ -589,7 +596,7 @@ struct StoryCharacter: Identifiable {
          "llm_provider": llmProvider, "deepseek_key": deepseekKey, "deepseek_model": deepseekModel,
          "web_search": webSearch, "cloud_stress": cloudStress,
          "music": music.isEmpty ? resources.appendingPathComponent("engine/resources/" + bundledMusic).path : music,
-         "music_enabled": musicEnabled, "music_volume": musicVolume]
+         "music_enabled": musicEnabled, "music_volume": musicVolume, "pauses": pauses]
     }
 
     func prepare() { launch(request("prepare")) }
@@ -833,6 +840,7 @@ struct StoryCharacter: Identifiable {
                             self.musicEnabled = settings["music_enabled"] as? Bool ?? true
                             self.musicVolume = settings["music_volume"] as? Double ?? 5
                             self.cloudStress = settings["cloud_stress"] as? Bool ?? false
+                            if let saved = settings["pauses"] as? [String: Int] { self.pauses = Studio.pauseDefaults.merging(saved) { _, v in v } }
                         }
                     } catch { self.error = "Не удалось открыть проект: \(error.localizedDescription)" }
                 }
@@ -1347,6 +1355,18 @@ struct SettingsView: View {
             Text("Для ролей и характеров текст книги отправляется в " + (studio.llmProvider == "deepseek" ? "DeepSeek" : "Ollama") + ". Озвучка выполняется локально на Mac.").font(.caption).foregroundStyle(.secondary)
             Divider()
             BotSettingsView(bot: studio.bot)
+            Divider()
+            Text("Паузы при чтении").font(.headline)
+            Text("Тишина, которую приложение добавляет между фрагментами. Внутри фразы паузы на запятых делает сама модель. К каждому значению добавляется около 0,3 с естественной тишины на краях реплики.").font(.caption).foregroundStyle(.secondary)
+            ForEach([("comma", "Внутри предложения (запятая, «— сказал он, —»)"), ("sentence", "Между предложениями"),
+                     ("paragraph", "Между абзацами"), ("chapter", "После главы")], id: \.0) { key, title in
+                Stepper(value: Binding(get: { studio.pauses[key] ?? Studio.pauseDefaults[key]! },
+                                       set: { studio.pauses[key] = $0 }), in: 0...5000, step: 50) {
+                    Text("\(title): \(studio.pauses[key] ?? Studio.pauseDefaults[key]!) мс")
+                }
+            }
+            Text("При смене говорящего внутри фразы добавляется ещё 80 мс. Изменение пауз не требует новой озвучки: при следующей сборке пересобирается только монтаж.").font(.caption).foregroundStyle(.secondary)
+            Button("Паузы по умолчанию") { studio.pauses = Studio.pauseDefaults }.disabled(studio.pauses == Studio.pauseDefaults)
             Divider()
             Text("Поведение приложения").font(.headline)
             Toggle("Показывать значок в Dock", isOn: $studio.showDock)

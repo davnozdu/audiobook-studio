@@ -869,7 +869,7 @@ final class Engine {
       }
       framesByID[NativeIO.string(row["id"])] = samples.count
     }
-    let result = try SpeechBatch.timeline(rows, frameCounts: framesByID)
+    let result = try SpeechBatch.timeline(rows, frameCounts: framesByID, pauses: SpeechBatch.Pauses(request["pauses"]))
     try SpeechBatch.verifyOrder(rows, timeline: result.0)
     NativeIO.emit("log", ["message": "Полнота озвучки проверена: \(rows.count)/\(rows.count) реплик · исходный порядок и голоса сохранены"])
     return result

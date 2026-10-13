@@ -158,6 +158,25 @@ final class CoreTests: XCTestCase {
     } catch is CancellationError {}
     XCTAssertEqual(cancelled, 1)
   }
+  func testPausesFollowBoundaryKindAndSettings() throws {
+    let rows: [Object] = [
+      ["id": "a", "speaker": "hero", "text": "— Да,", "paragraph_id": "p1", "chapter_id": "c1"],
+      ["id": "b", "speaker": "narrator", "text": "— сказал он, —", "paragraph_id": "p1", "chapter_id": "c1"],
+      ["id": "c", "speaker": "hero", "text": "идём.", "paragraph_id": "p1", "chapter_id": "c1"],
+      ["id": "d", "speaker": "narrator", "text": "Они шли так:", "paragraph_id": "p1", "chapter_id": "c1"],
+      ["id": "e", "speaker": "narrator", "text": "молча.", "paragraph_id": "p1", "chapter_id": "c1"],
+      ["id": "f", "speaker": "narrator", "text": "Конец главы.", "paragraph_id": "p2", "chapter_id": "c1"],
+      ["id": "g", "speaker": "narrator", "text": "Глава вторая", "paragraph_id": "p3", "chapter_id": "c2"]]
+    let counts = Dictionary(uniqueKeysWithValues: rows.map { (NativeIO.string($0["id"]), 2400) })
+    let (timeline, _) = try SpeechBatch.timeline(rows, frameCounts: counts, pauses: SpeechBatch.Pauses())
+    // role change mid-sentence, role change, sentence, colon (as a comma), paragraph, chapter, end of book;
+    // the defaults keep the former sentence/paragraph/comma values and add the chapter pause.
+    XCTAssertEqual(timeline.map { ($0["pause_frames"] as! Int) / 24 }, [180, 180, 450, 100, 800, 2000, 2000])
+    let custom = SpeechBatch.Pauses(["comma": 200, "sentence": 700, "paragraph": 1200, "chapter": 3500, "bogus": 1])
+    XCTAssertEqual(try SpeechBatch.timeline(rows, frameCounts: counts, pauses: custom).0.map { ($0["pause_frames"] as! Int) / 24 },
+      [280, 280, 700, 200, 1200, 3500, 3500])
+    XCTAssertEqual(SpeechBatch.Pauses(["sentence": 99999]), SpeechBatch.Pauses())  // out of range keeps the default
+  }
   func testBatchRecoveryRetriesOnlyUnfinishedLane() async throws {
     let complete = [Float](repeating: 0.1, count: 4800) + [Float](repeating: 0, count: 2400)
     var calls: [[Int]] = [], attemptSeeds: [[Int]] = [], saved: [Int] = []
