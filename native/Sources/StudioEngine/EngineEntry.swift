@@ -1036,7 +1036,10 @@ final class Engine {
           return try await base.studioGenerateBatch(texts: lanes.map { texts[$0] }, speakers: lanes.map { laneVoices[$0] },
             seeds: attemptSeeds.map { UInt64($0) },
             generationParameters: GenerateParameters(maxTokens: 4096, temperature: 0.9, topP: 1, topK: 50, repetitionPenalty: 1.05),
-            timing: { name, seconds in timings[name, default: 0] += seconds })
+            timing: { name, seconds in timings[name, default: 0] += seconds },
+            uncertainEnd: { lane in
+              NativeIO.emit("log", ["message": "Конец реплики без уверенного завершения — стоит послушать · " + ids[lanes[lane]]])
+            })
         }, accepted: { lane, samples in
           let i = indices[lane]
           // The 16-bit cache clips at full scale. Measured peaks stay below 0.8; log any overshoot.

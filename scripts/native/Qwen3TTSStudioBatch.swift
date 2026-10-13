@@ -12,6 +12,8 @@ import MLXNN
 public enum StudioPace {
     nonisolated(unsafe) public static var gentle = false
     public static let share = 0.35
+    /// Least EOS probability that ends a line before its generous length estimate is reached.
+    public static let eosConfidence = 0.5
 }
 
 public struct StudioQwenBatchStops {
@@ -126,6 +128,7 @@ public enum StudioQwenSampler {
     public static func sample(_ logits: MLXArray, finished: MLXArray, fill: Int32,
         temperature: Float, topK: Int, suppress: MLXArray? = nil,
         seen: MLXArray? = nil, repetitionPenalty: Float = 1, eos: Int? = nil,
+        eosGate: MLXArray? = nil,
         seeds: MLXArray, step: Int, group: Int) -> MLXArray {
         var scores = logits[0..., (-1)..., 0...].squeezed(axis: 1).asType(.float32)
         let batch = scores.dim(0), vocab = scores.dim(1)
@@ -139,7 +142,14 @@ public enum StudioQwenSampler {
             tokens = argMax(scores, axis: -1)
         } else {
             // Keep the EOS logit out of top-k so the utterance can always finish.
-            let eosLogit = eos.map { scores[0..., $0 ..< ($0 + 1)] }
+            var eosLogit = eos.map { scores[0..., $0 ..< ($0 + 1)] }
+            // Gated lanes may end only when the model is sure (EOS above half the probability):
+            // a chance EOS while the last word is still being said would swallow its ending.
+            if let gate = eosGate, let eos, let current = eosLogit {
+                let probability = softmax(scores / temperature, axis: -1)[0..., eos ..< (eos + 1)]
+                let block = gate.reshaped(batch, 1) .&& (probability .< Float(StudioPace.eosConfidence))
+                eosLogit = which(block, MLXArray(-Float.infinity), current)
+            }
             if topK > 0, topK < vocab {
                 let dropped = argPartition(-scores, kth: topK - 1, axis: -1)[0..., topK...]
                 scores = putAlong(scores, dropped, values: MLXArray.full(dropped.shape,
@@ -227,7 +237,8 @@ extension Qwen3TTSModel {
     /// batch dimension. nil is an unfinished lane; completed neighbours stay usable.
     public func studioGenerateBatch(texts: [String], speakers: [StudioQwenSpeaker],
         seeds: [UInt64], generationParameters: GenerateParameters,
-        timing: ((String, Double) -> Void)? = nil) async throws -> [[Float]?] {
+        timing: ((String, Double) -> Void)? = nil,
+        uncertainEnd: ((Int) -> Void)? = nil) async throws -> [[Float]?] {
         guard (1...4).contains(texts.count), texts.count == seeds.count, texts.count == speakers.count,
               texts.allSatisfy({ !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }),
               tokenizer != nil, speechTokenizer != nil, let talkerConfig = config.talkerConfig else {
@@ -258,6 +269,9 @@ extension Qwen3TTSModel {
         var seen = MLXArray.zeros([lanes, vocab], type: Float.self)
         var codes = [[MLXArray]](repeating: [], count: lanes)
         var stops = StudioQwenBatchStops(count: lanes)
+        // A generous length per lane (2.5 frames per character, slow voices included): before it,
+        // a line may end only on a confident EOS; past it, as before, so nothing runs on forever.
+        let eosCaps = texts.map { $0.count * 5 / 2 + 24 }
         let generationStart = Date()
         var firstStepTime: Double = 0
 
@@ -285,7 +299,8 @@ extension Qwen3TTSModel {
             let nextToken = StudioQwenSampler.sample(logits, finished: finished, fill: Int32(talkerConfig.codecPadId),
                 temperature: parameters.temperature, topK: parameters.topK,
                 suppress: step < 2 ? suppressEarly : suppressMain, seen: seen,
-                repetitionPenalty: parameters.repetitionPenalty ?? 1.05, eos: eos, seeds: laneSeeds, step: step, group: 0)
+                repetitionPenalty: parameters.repetitionPenalty ?? 1.05, eos: eos,
+                eosGate: MLXArray(eosCaps.map { step < $0 }), seeds: laneSeeds, step: step, group: 0)
             var codeTokens = [nextToken]
             let codeHidden = hidden[0..., (-1)..., 0...]
             for item in codeCache { _ = item.trim(item.offset) }
@@ -318,6 +333,8 @@ extension Qwen3TTSModel {
             stepClock = Date()
         }
         if !done, let previous = waiting { _ = collect(previous.token, previous.frame, step: previous.step) }
+        // Lines that reached the generous length without a confident end are worth a listen.
+        for lane in 0 ..< lanes where stops.lengths[lane] >= eosCaps[lane] { uncertainEnd?(lane) }
         timing?("first_step", firstStepTime)
         timing?("remaining_tokens", max(0, Date().timeIntervalSince(generationStart) - firstStepTime))
         try Task.checkCancellation()
@@ -433,6 +450,19 @@ extension Qwen3TTSModel {
         guard ab == [ba[1], ba[0]], alone == [ab[0]], noise.allSatisfy({ $0.isFinite }), edge.allSatisfy({ $0.isFinite }),
               Set(noise.map { Int($0 * 4) }).count > 8 else {
             throw AudioGenerationError.invalidInput("Qwen batch noise depends on neighbours or is degenerate")
+        }
+        // An uncertain EOS (about a quarter of the probability) never ends a gated lane; ungated it may.
+        let unsure = MLXArray([Float(1.2), 0.2, 0.1, 0.0, 0.0, 1.0]).reshaped(1, 1, 6)
+        var gatedEOS = 0, freeEOS = 0
+        for seed in 1...32 {
+            let laneSeed = StudioQwenSampler.laneSeeds([UInt64(seed)])
+            if StudioQwenSampler.sample(unsure, finished: MLXArray([false]), fill: 0, temperature: 1, topK: 0, eos: 5,
+                eosGate: MLXArray([true]), seeds: laneSeed, step: 3, group: 0).asArray(Int32.self) == [5] { gatedEOS += 1 }
+            if StudioQwenSampler.sample(unsure, finished: MLXArray([false]), fill: 0, temperature: 1, topK: 0, eos: 5,
+                eosGate: MLXArray([false]), seeds: laneSeed, step: 3, group: 0).asArray(Int32.self) == [5] { freeEOS += 1 }
+        }
+        guard gatedEOS == 0, freeEOS > 0 else {
+            throw AudioGenerationError.invalidInput("Qwen batch EOS gate: gated \(gatedEOS), free \(freeEOS)")
         }
         let remembered = StudioQwenSampler.remember(MLXArray.zeros([3, 6], type: Float.self),
             tokens: MLXArray([Int32(2), 5, 4]).reshaped(3, 1), finished: MLXArray([false, false, true]), eos: 5)
