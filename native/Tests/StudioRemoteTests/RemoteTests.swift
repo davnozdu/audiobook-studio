@@ -314,6 +314,21 @@ final class RemoteTests: XCTestCase {
         XCTAssertEqual(saved.phase, .complete); XCTAssertEqual(saved.project, ""); XCTAssertEqual(saved.result, "")
         XCTAssertEqual(saved.uploads["audiobook.m4b"]?.link, "https://dropbox.test/book.m4b")
     }
+    @MainActor func testOnlySideEffectFreeTelegramCallsAreRetried() async throws {
+        defer { MockHTTP.handler = nil }
+        let configuration = URLSessionConfiguration.ephemeral; configuration.protocolClasses = [MockHTTP.self]
+        var calls = 0
+        MockHTTP.handler = { _ in
+            calls += 1
+            return calls == 1 ? (503, ["Retry-After": "1"], Data()) : (200, [:], try RemoteJSON.data(["ok": true, "result": []]))
+        }
+        let telegram = TelegramClient(token: "1:abc", http: RemoteHTTP(session: URLSession(configuration: configuration)))
+        _ = try await telegram.call("getUpdates", ["offset": 0])
+        XCTAssertEqual(calls, 2)   // read-only: a 503 is retried
+        calls = 0
+        do { _ = try await telegram.call("sendMessage", ["chat_id": 1, "text": "x"]); XCTFail("503 must surface") } catch {}
+        XCTAssertEqual(calls, 1)   // a message is never sent twice by the HTTP layer
+    }
     @MainActor func testSameBookTwiceGetsItsOwnCloudFolder() async throws {
         defer { MockHTTP.handler = nil }
         let configuration = URLSessionConfiguration.ephemeral; configuration.protocolClasses = [MockHTTP.self]

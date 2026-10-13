@@ -48,7 +48,8 @@ public struct RemoteConfig: Codable {
         var request = URLRequest(url: URL(string: p == .dropbox ? "https://api.dropboxapi.com/oauth2/token" : "https://oauth2.googleapis.com/token")!)
         request.httpMethod = "POST"; request.httpBody = RemoteJSON.form(fields)
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        let (data, response) = try await http.send(request)
+        // Refreshing a token can be repeated safely; a one-time authorization code cannot.
+        let (data, response) = try await http.send(request, retrySafe: fields["grant_type"] == "refresh_token")
         guard response.statusCode == 200 else { throw RemoteError("Не удалось авторизоваться в " + p.title + ". Подключите аккаунт заново.") }
         let result = try RemoteJSON.object(data)
         guard !(result["access_token"] as? String ?? "").isEmpty else { throw RemoteError("Сервис не выдал токен доступа") }

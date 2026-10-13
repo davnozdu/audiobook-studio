@@ -81,11 +81,11 @@ public final class RemoteHTTP {
         }
         throw last
     }
-    public func json(_ url: URL, _ body: [String: Any], bearer: String? = nil) async throws -> [String: Any] {
+    public func json(_ url: URL, _ body: [String: Any], bearer: String? = nil, retrySafe: Bool? = nil) async throws -> [String: Any] {
         var request = URLRequest(url: url); request.httpMethod = "POST"; request.timeoutInterval = 60
         request.httpBody = try RemoteJSON.data(body); request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if let bearer { request.setValue("Bearer " + bearer, forHTTPHeaderField: "Authorization") }
-        let (data, response) = try await send(request)
+        let (data, response) = try await send(request, retrySafe: retrySafe)
         guard (200..<300).contains(response.statusCode) else {
             throw RemoteError("Сервис вернул HTTP \(response.statusCode)", status: response.statusCode)
         }
@@ -97,10 +97,13 @@ public final class TelegramClient {
     public init(token: String, http: RemoteHTTP = RemoteHTTP()) { self.token = token; self.http = http }
     public func call(_ method: String, _ body: [String: Any] = [:]) async throws -> Any {
         guard token.range(of: #"^[0-9]+:[A-Za-z0-9_-]+$"#, options: .regularExpression) != nil else { throw RemoteError("Некорректный токен Telegram-бота") }
-        let object = try await http.json(URL(string: "https://api.telegram.org/bot" + token + "/" + method)!, body)
+        // Read-only Bot API calls are POSTs too, but repeating them has no side effect.
+        let object = try await http.json(URL(string: "https://api.telegram.org/bot" + token + "/" + method)!, body,
+                                         retrySafe: Self.readOnly.contains(method) ? true : nil)
         guard object["ok"] as? Bool == true else { throw RemoteError("Telegram отклонил запрос. Проверьте подключение бота.") }
         return object["result"] ?? [:]
     }
+    static let readOnly: Set<String> = ["getUpdates", "getFile", "getWebhookInfo", "getMe"]
     /// Long HTML falls back to plain text before splitting, preserving link targets.
     static func messageParts(_ reply: RemoteReply) -> [(text: String, mode: String?)] {
         if reply.text.utf16.count <= 3900 { return [(reply.text, reply.parseMode)] }
