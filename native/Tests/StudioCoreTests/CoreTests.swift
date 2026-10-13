@@ -499,6 +499,29 @@ final class CoreTests: XCTestCase {
     XCTAssertEqual(NativeIO.string(NativeIO.objects(resolved["segments"])[0]["speaker"]), "other_voices")
     XCTAssertTrue(NativeIO.string(NativeIO.object(other?["character_profile"])["voice_description"]).hasPrefix("Neutral adult"))
   }
+  func testCastAuditFindings() async throws {
+    // An empty profile field does not hide the filled top-level description.
+    let input = VoiceDirection.input(["voice_gender": "male", "voice_description": "Distinct deep gravelly bass",
+      "character_profile": ["voice_description": "", "age": "40"]])
+    XCTAssertEqual(NativeIO.string(input["voice_description"]), "Distinct deep gravelly bass")
+    XCTAssertEqual(NativeIO.string(input["age"]), "40")
+    // Announcer wording is flagged unless the profile itself asks for it.
+    XCTAssertEqual(Set(VoiceDirection.unwanted("Neutral warm baritone, clear diction. Flat steady narration.", profile: ["habits": "живой"])),
+      ["neutral", "clear diction", "flat"])
+    XCTAssertEqual(VoiceDirection.unwanted("Flat mechanical voice.", profile: ["voice_description": "flat mechanical robot"]), [])
+    // A first-person narrator's own listed speech keeps its manner; plain narration stays calm.
+    let text = "— Прочь! — крикнул я и ушёл."
+    let paragraph: Object = ["id": "p1", "text": text]
+    let rows = try NativeDirector.validateSpeakers(["paragraphs": [["id": "p1", "speech": [["n": 1, "speaker": "narrator", "manner": "angry"]]]]],
+      chunk: [paragraph], fragments: [NativeDirector.fragments(text)], allowed: ["narrator"])
+    XCTAssertEqual(NativeIO.objects(rows[0]["spans"]).map { NativeIO.string($0["manner"]) }, ["angry", "calm"])
+    // The narrator template keeps an age and voice already found (audit: 80-year-old → 35–50 baritone).
+    let narrated = try await NativeDirector([:]).characterize(["voices": [["id": "narrator", "name": "Рассказчик", "voice_gender": "male",
+      "age": "80 лет", "voice_description": "Old frail high tenor"]], "segments": []], source: ["paragraphs": []])
+    let profile = NativeIO.object(NativeIO.objects(narrated["voices"])[0]["character_profile"])
+    XCTAssertEqual(NativeIO.string(profile["age"]), "80 лет")
+    XCTAssertEqual(NativeIO.string(profile["voice_description"]), "Old frail high tenor")
+  }
   func testEveryVoiceDetailInvalidatesDirection() throws {
     let profile: Object = [
       "age": "Пожилой, 70 лет", "personality": "Сдержанный",
@@ -608,8 +631,10 @@ final class CoreTests: XCTestCase {
       "id": "p00001", "speakers": ["hero", "narrator", "hero", "hero"], "manners": ["angry"]]]],
       chunk: [paragraph], fragments: split, allowed: ["hero", "narrator"])
     XCTAssertEqual(NativeIO.objects(untoned[0]["spans"]).map { NativeIO.string($0["manner"]) }, ["calm", "calm", "calm"])
+    // The state takes over pace, loudness and energy explicitly; voice and age stay (audit: "fast… / very slow…").
     XCTAssertEqual(VoiceDirection.mannerInstruction(["tts_voice": "Old frail male voice.", "tts_delivery": "Slow."], manner: "angry"),
-      "Old frail male voice. " + VoiceDirection.manners["angry"]! + " Slow." + VoiceDirection.readingRules)
+      "Old frail male voice. Usual character: Slow. For this sample, the state overrides the usual pace, loudness and energy, keeping the same voice and age. "
+        + VoiceDirection.manners["angry"]! + VoiceDirection.readingRules)
     XCTAssertNil(VoiceDirection.mannerInstruction(["tts_voice": "Old frail male voice."], manner: "calm"))
     XCTAssertNil(VoiceDirection.mannerInstruction([:], manner: "angry"))
   }

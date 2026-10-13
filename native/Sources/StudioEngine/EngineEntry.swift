@@ -334,7 +334,10 @@ final class Engine {
       else { throw StudioError("Неизвестный персонаж") }
       reference = try custom(voice)
       if reference == nil {
-        let directed = try await NativeDirector(request).directVoice(voice)
+        let others: [Object] = NativeIO.objects(manifest["voices"]).filter {
+          NativeIO.string($0["id"]) != character && !NativeIO.string($0["tts_voice"]).isEmpty
+        }.map { ["name": $0["name"] ?? "", "voice": $0["tts_voice"]!] }
+        let directed = try await NativeDirector(request).directVoice(voice, cast: others)
         manifest["voices"] = NativeIO.objects(manifest["voices"]).map {
           NativeIO.string($0["id"]) == character ? directed : $0
         }
@@ -432,10 +435,20 @@ final class Engine {
     var voices = NativeIO.objects(manifest["voices"])
     let segments = NativeIO.objects(manifest["segments"])
     let used = Set(segments.map { NativeIO.string($0["speaker"]) })
-    for i in voices.indices where used.contains(NativeIO.string(voices[i]["id"])) {
+    // Voices are designed as one cast: the narrator first, then by number of lines; each request
+    // sees the timbres chosen so far and must differ from them audibly.
+    let lines = Dictionary(segments.map { (NativeIO.string($0["speaker"]), 1) }, uniquingKeysWith: +)
+    let order = voices.indices.filter { used.contains(NativeIO.string(voices[$0]["id"])) }.sorted {
+      let a = NativeIO.string(voices[$0]["id"]), b = NativeIO.string(voices[$1]["id"])
+      return a == "narrator" || (b != "narrator" && (lines[a] ?? 0) > (lines[b] ?? 0))
+    }
+    var cast: [Object] = []
+    for i in order {
       if try custom(voices[i]) == nil {
-        voices[i] = try await director.directVoice(voices[i])
+        voices[i] = try await director.directVoice(voices[i], cast: cast)
       }
+      let timbre = NativeIO.string(voices[i]["tts_voice"])
+      if !timbre.isEmpty { cast.append(["name": voices[i]["name"] ?? "", "voice": timbre]) }
     }
     manifest["voices"] = voices
     try writeManifest(manifest, at: project)
@@ -569,7 +582,7 @@ final class Engine {
       let meta = directory.appendingPathComponent(id + ".json")
       let text =
         (try? NativeProject.excerpt(manifest, character: id))
-        ?? "Сегодня тихое утро. Я спокойно и ясно читаю эту книгу."
+        ?? "Это мой голос в этой книге. Сейчас я расскажу свою часть истории."
       let signature = try VoiceSample.signature(text: text, instruction: instruction(voice),
         profile: VoiceDirection.signature(voice), seed: voice["seed"] as? Int ?? 17001)
       if fm.fileExists(atPath: file.path), let old = try? NativeIO.load(meta),
@@ -617,7 +630,7 @@ final class Engine {
         let file = directory.appendingPathComponent(id + "--" + manner + ".wav")
         let meta = directory.appendingPathComponent(id + "--" + manner + ".json")
         let text = (try? NativeProject.excerpt(manifest, character: id, manner: manner))
-          ?? references[id]?.1 ?? "Сегодня тихое утро. Я спокойно и ясно читаю эту книгу."
+          ?? references[id]?.1 ?? "Это мой голос в этой книге. Сейчас я расскажу свою часть истории."
         let seed = voice["seed"] as? Int ?? 17001
         let signature = try VoiceSample.signature(text: text, instruction: description,
           profile: VoiceDirection.signature(voice), seed: seed)
@@ -705,6 +718,8 @@ final class Engine {
   }
   /// Cosine similarity of speaker embeddings required to read lines with a manner sample.
   static let mannerIdentityThreshold = 0.65
+  /// Two different characters this close in speaker embedding are reported as sounding alike.
+  static let castSimilarityWarning = 0.85
   /// Per-batch memory: MLX peak since the previous batch and system swap, to tell
   /// memory pressure apart from slow code in speed measurements.
   func batchMemoryLog(_ batch: Int) {
@@ -788,6 +803,17 @@ final class Engine {
       NativeIO.emit("log", ["message": String(format: "Манера [%@]: сходство с основным голосом %.3f · %@", key, similarity,
         accepted ? "используется" : "голос отличается, реплики читаются основным образцом")])
     }
+    // What the manner tags actually became: a sample in use, or the main voice as fallback.
+    var mannerUse: [String: Int] = [:], mannerFallback: [String: Int] = [:]
+    for row in rows where VoiceDirection.manner(row["manner"]) != "calm" {
+      let key = NativeIO.string(row["speaker"]) + "|" + VoiceDirection.manner(row["manner"])
+      if mannerAccepted.contains(key) { mannerUse[key, default: 0] += 1 } else { mannerFallback[key, default: 0] += 1 }
+    }
+    if !mannerUse.isEmpty || !mannerFallback.isEmpty {
+      NativeIO.emit("log", ["message": "Манеры: образцы используются для \(mannerUse.values.reduce(0, +)) реплик"
+        + (mannerFallback.isEmpty ? "" : " · основным голосом читаются \(mannerFallback.values.reduce(0, +)): "
+          + mannerFallback.keys.sorted().joined(separator: ", "))])
+    }
     func voiceKey(_ row: Object) -> String {
       let key = NativeIO.string(row["speaker"]) + "|" + VoiceDirection.manner(row["manner"])
       return mannerAccepted.contains(key) ? key : NativeIO.string(row["speaker"])
@@ -824,6 +850,30 @@ final class Engine {
       } else { pending.insert(i) }
     }
     let total = rows.indices.reduce(0) { $0 + weight($1) }
+    // Cast check: speaker-embedding similarity of every pair of main voices, narrator included.
+    // Very close pairs are reported so they can be redesigned («Другой вариант голоса»).
+    let mains = Set(rows.map { NativeIO.string($0["speaker"]) }).filter { references[$0] != nil }.sorted()
+    if !pending.isEmpty && mains.count > 1 {
+      for key in mains { try await prepareVoice(key, progress: 0) }
+      var pairs: [(String, Double)] = []
+      for (n, a) in mains.enumerated() {
+        for b in mains[(n + 1)...] {
+          let x = voicesReady[a]!.conditioning.speakerEmbedding!.asArray(Float.self)
+          let y = voicesReady[b]!.conditioning.speakerEmbedding!.asArray(Float.self)
+          let dot = zip(x, y).reduce(Float(0)) { $0 + $1.0 * $1.1 }
+          let norm = sqrt(x.reduce(Float(0)) { $0 + $1 * $1 }) * sqrt(y.reduce(Float(0)) { $0 + $1 * $1 })
+          pairs.append((a + " ↔ " + b, Double(dot / max(norm, 1e-12))))
+        }
+      }
+      pairs.sort { $0.1 > $1.1 }
+      NativeIO.emit("log", ["message": "Сходство голосов состава (1 = одинаковые): " + pairs.prefix(5).map {
+        String(format: "%@ %.2f", $0.0, $0.1) }.joined(separator: " · ")])
+      let close = pairs.filter { $0.1 >= Self.castSimilarityWarning }
+      if !close.isEmpty {
+        NativeIO.emit("log", ["message": "Внимание: голоса звучат похоже — " + close.map { $0.0 }.joined(separator: ", ")
+          + ". Можно выбрать «Другой вариант голоса» в карточке."])
+      }
+    }
     let jobs = try SpeechBatch.plan(rows, pending: pending)
     NativeIO.emit("log", ["message": "План озвучки: \(jobs.count) запусков · \(pending.count) новых реплик · \(jobs.filter { $0.count > 1 }.count) пакетов · до 4 коротких реплик, голоса могут смешиваться"])
     var measurements: [(Double, Double, Int)] = []
