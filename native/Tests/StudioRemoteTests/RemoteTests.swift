@@ -329,6 +329,21 @@ final class RemoteTests: XCTestCase {
         do { _ = try await telegram.call("sendMessage", ["chat_id": 1, "text": "x"]); XCTFail("503 must surface") } catch {}
         XCTAssertEqual(calls, 1)   // a message is never sent twice by the HTTP layer
     }
+    @MainActor func testConfirmationAsksHowToLevelEmotions() async throws {
+        let f = try folder(); defer { try? FileManager.default.removeItem(at: f) }
+        let bot = BotService(folder: f, secrets: MemorySecrets()); bot.state.ownerID = 12; bot.config.connections["dropbox"] = "account"
+        bot.config.provider = .dropbox
+        try await bot.handle(["message": ["chat": ["id": 12, "type": "private"], "from": ["id": 12], "message_id": 5,
+            "document": ["file_name": "book.epub", "file_size": 10, "file_id": "file"]]])
+        let id = bot.state.jobs[0].id
+        let asked = bot.state.outbox.last!.buttons.flatMap { $0 }.map { $0.data }
+        XCTAssertEqual(asked, ["run-level:" + id, "run-live:" + id, "reject:" + id])
+        XCTAssertNil(bot.state.jobs[0].levelEmotions)   // not chosen yet: the app setting applies
+        try await bot.handle(["callback_query": ["from": ["id": 12], "data": "run-live:" + id, "message": ["chat": ["id": 12, "type": "private"]]]])
+        XCTAssertEqual(bot.state.jobs[0].phase, .queued)
+        XCTAssertEqual(bot.state.jobs[0].levelEmotions, false)
+        try bot.persist(); XCTAssertEqual(try RemoteStateStore(f).load().jobs[0].levelEmotions, false)
+    }
     @MainActor func testSameBookTwiceGetsItsOwnCloudFolder() async throws {
         defer { MockHTTP.handler = nil }
         let configuration = URLSessionConfiguration.ephemeral; configuration.protocolClasses = [MockHTTP.self]

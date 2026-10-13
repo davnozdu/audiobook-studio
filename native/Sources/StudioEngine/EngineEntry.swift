@@ -701,7 +701,8 @@ final class Engine {
     let raw = project.appendingPathComponent("audio")
     try NativeIO.write(raw.appendingPathComponent("timeline.json"), ["segments": timeline])
     NativeIO.stage("Потоковая нормализация громкости по ролям")
-    let lineGains = try audio.lineGains(project: project, segments: rows)
+    // Off in the settings: each emotion keeps the loudness the model gave it.
+    let lineGains = try (request["level_emotions"] as? Bool ?? true) ? audio.lineGains(project: project, segments: rows) : [:]
     let gains = try audio.streamingGains(project: project, segments: rows, lineGains: lineGains)
     lap("громкость")
     var selectedMusic: URL?

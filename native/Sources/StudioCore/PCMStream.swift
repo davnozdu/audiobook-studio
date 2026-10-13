@@ -117,6 +117,10 @@ extension NativeAudio {
   /// not vanish. Segment ID → gain in dB; calm lines get none.
   public func lineGains(project: URL, segments: [Object]) throws -> [String: Double] {
     var result: [String: Double] = [:]
+    // Levelled, a shout keeps a moderate edge over the speaker's usual line and a whisper stays
+    // a little quieter: the emotion is audible without the reader yelling.
+    let character: [String: Double] = ["shouting": 3, "calling": 3, "hysterical": 2, "angry": 1.5, "triumphant": 1,
+      "whisper": -3, "muttering": -2, "weak": -2, "sleepy": -1.5]
     let groups = Dictionary(grouping: segments) { NativeIO.string($0["speaker"]) }
     for speaker in groups.keys.sorted() {
       let lines = groups[speaker]!
@@ -136,7 +140,7 @@ extension NativeAudio {
       let usual = reference[reference.count / 2]
       for row in emotional {
         guard let own = try level(row) else { continue }
-        let gain = max(-12, min(12, usual - own))
+        let gain = max(-12, min(12, usual + (character[VoiceDirection.manner(row["manner"])] ?? 0) - own))
         if abs(gain) >= 0.5 { result[NativeIO.string(row["id"])] = gain }
       }
     }
@@ -183,6 +187,24 @@ extension NativeAudio {
     return gains
   }
 
+  /// Manners whose strain is heard in the upper voice: a gentle presence lift at about 2.8 kHz,
+  /// not more loudness.
+  static let effort: Set<String> = ["shouting", "calling", "hysterical"]
+  /// RBJ peaking filter, +4 dB at 2.8 kHz, Q 1, on 24 kHz mono; length and timing unchanged.
+  static func presence(_ x: [Float], hz: Double = 2800, gainDB: Double = 4, q: Double = 1) -> [Float] {
+    let a = pow(10, gainDB / 40), w = 2 * Double.pi * hz / 24000, alpha = sin(w) / (2 * q)
+    let a0 = 1 + alpha / a
+    let b0 = (1 + alpha * a) / a0, b1 = -2 * cos(w) / a0, b2 = (1 - alpha * a) / a0
+    let a1 = -2 * cos(w) / a0, a2 = (1 - alpha / a) / a0
+    var y = [Float](repeating: 0, count: x.count)
+    var x1 = 0.0, x2 = 0.0, y1 = 0.0, y2 = 0.0
+    for i in x.indices {
+      let v = Double(x[i]), out = b0 * v + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
+      x2 = x1; x1 = v; y2 = y1; y1 = out
+      y[i] = Float(out)
+    }
+    return y
+  }
   /// Stream exact original-order samples and pauses. Only one utterance occupies
   /// memory and the consumer's bounded pipe applies backpressure.
   @discardableResult public static func streamMontage(project: URL, segments: [Object],
@@ -195,7 +217,8 @@ extension NativeAudio {
       let id = NativeIO.string(segment["id"]), speaker = NativeIO.string(segment["speaker"])
       let gain = Float(pow(10, ((gains[speaker] ?? 0) + (lineGains[id] ?? 0)) / 20))
       guard gain.isFinite else { throw StudioError("Некорректный уровень громкости · " + speaker) }
-      let samples = try SpeechCache.readAudio(SpeechCache.segmentURL(project, id: id)).map { $0 * gain }
+      var samples = try SpeechCache.readAudio(SpeechCache.segmentURL(project, id: id)).map { $0 * gain }
+      if Self.effort.contains(VoiceDirection.manner(segment["manner"])) { samples = Self.presence(samples) }
       let expected = (clip["audio_end"] as! Double) - (clip["audio_start"] as! Double)
       guard !samples.isEmpty, samples.allSatisfy({ $0.isFinite }),
         abs(Double(samples.count) / 24000 - expected) < 0.00001 else {

@@ -372,8 +372,16 @@ final class CoreTests: XCTestCase {
     let audio = NativeAudio(ffmpeg: URL(fileURLWithPath: "/usr/bin/false"), ffprobe: URL(fileURLWithPath: "/usr/bin/false"))
     let gains = try audio.lineGains(project: root, segments: rows)
     XCTAssertEqual(Set(gains.keys), ["c", "d"])        // calm lines and other speakers untouched
-    XCTAssertEqual(gains["c"]!, -20 * log10(4.0), accuracy: 0.3)
-    XCTAssertEqual(gains["d"]!, 20 * log10(4.0), accuracy: 0.3)
+    // Levelled to the speaker, keeping a moderate character: a shout +3 dB, a whisper −3 dB.
+    XCTAssertEqual(gains["c"]!, -20 * log10(4.0) + 3, accuracy: 0.3)
+    XCTAssertEqual(gains["d"]!, 20 * log10(4.0) - 3, accuracy: 0.3)
+    // The presence lift for a shout keeps length and leaves low frequencies as they were.
+    let low = (0..<4800).map { Float(sin(Double($0) * 2 * .pi * 200 / 24000)) * 0.1 }
+    let lifted = NativeAudio.presence(low)
+    XCTAssertEqual(lifted.count, low.count)
+    XCTAssertEqual(VoiceAcoustics.speechLevel(Array(lifted[2400...]))!, VoiceAcoustics.speechLevel(Array(low[2400...]))!, accuracy: 0.3)
+    let high = (0..<4800).map { Float(sin(Double($0) * 2 * .pi * 2800 / 24000)) * 0.1 }
+    XCTAssertEqual(VoiceAcoustics.speechLevel(Array(NativeAudio.presence(high)[2400...]))! - VoiceAcoustics.speechLevel(Array(high[2400...]))!, 4, accuracy: 0.3)
   }
   func testLongFragmentsAreCutAtSentencesForManner() throws {
     let monologue = "— И тогда я понял, что всё это было зря и что никто меня не услышит в этом сером холодном городе. Нет! Не отдам я её вам никогда, слышите, никогда и ни за что на свете, хоть убейте!"

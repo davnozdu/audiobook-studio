@@ -37,6 +37,9 @@ public struct RemoteJob: Codable, Identifiable {
     public var completed = 0, total = 0, fraction: Double = 0, speed: Double?
     public var eta: Double?, measuredAt: Date?
     public var uploads: [String: RemoteUpload] = [:]
+    /// Chosen when the book is confirmed: emotions levelled (true) or with the model's own loudness;
+    /// nil follows the app setting.
+    public var levelEmotions: Bool?
     public init(chatID: Int64, messageID: Int64, fileID: String, name: String, provider: RemoteProvider) {
         self.chatID = chatID; self.messageID = messageID; self.fileID = fileID
         self.name = name; self.provider = provider

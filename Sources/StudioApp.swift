@@ -300,6 +300,11 @@ struct StoryCharacter: Identifiable {
     @Published var cloudStress = UserDefaults.standard.object(forKey: "cloudStress") as? Bool ?? true {
         didSet { UserDefaults.standard.set(cloudStress, forKey: "cloudStress") }
     }
+    /// Emotional lines levelled to their speaker (a shout keeps a moderate +3 dB); off keeps the
+    /// model's own loudness of each emotion.
+    @Published var levelEmotions = UserDefaults.standard.object(forKey: "levelEmotions") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(levelEmotions, forKey: "levelEmotions") }
+    }
     @Published var musicEnabled = UserDefaults.standard.object(forKey: "musicEnabled") as? Bool ?? true {
         didSet { UserDefaults.standard.set(musicEnabled, forKey: "musicEnabled") }
     }
@@ -596,7 +601,7 @@ struct StoryCharacter: Identifiable {
          "llm_provider": llmProvider, "deepseek_key": deepseekKey, "deepseek_model": deepseekModel,
          "web_search": webSearch, "cloud_stress": cloudStress,
          "music": music.isEmpty ? resources.appendingPathComponent("engine/resources/" + bundledMusic).path : music,
-         "music_enabled": musicEnabled, "music_volume": musicVolume, "pauses": pauses]
+         "music_enabled": musicEnabled, "music_volume": musicVolume, "pauses": pauses, "level_emotions": levelEmotions]
     }
 
     func prepare() { launch(request("prepare")) }
@@ -1368,6 +1373,13 @@ struct SettingsView: View {
             Text("Для ролей и характеров текст книги отправляется в " + (studio.llmProvider == "deepseek" ? "DeepSeek" : "Ollama") + ". Озвучка выполняется локально на Mac.").font(.caption).foregroundStyle(.secondary)
             Divider()
             BotSettingsView(bot: studio.bot)
+            Divider()
+            Text("Громкость эмоций").font(.headline)
+            Toggle("Выравнивать громкость эмоций", isOn: $studio.levelEmotions)
+            Text(studio.levelEmotions
+                 ? "Эмоция слышна по голосу, а не по громкости: крик лишь немного громче обычной речи персонажа, шёпот немного тише."
+                 : "Каждая эмоция звучит с той громкостью, которую дала модель: крик может быть заметно громче. От перегрузки защищает общий лимитер.")
+                .font(.caption).foregroundStyle(.secondary)
             Divider()
             Text("Паузы при чтении").font(.headline)
             Text("Тишина, которую приложение добавляет между фрагментами. Внутри фразы паузы на запятых делает сама модель; её собственная тишина на краях реплики звучит сверх этих значений.").font(.caption).foregroundStyle(.secondary)

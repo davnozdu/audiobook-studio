@@ -189,7 +189,8 @@ import Combine
             guard parts.count == 2, let i = state.jobs.firstIndex(where: { $0.id == parts[1] && $0.chatID == id }) else { return }
             let job = state.jobs[i]
             switch parts[0] {
-            case "run":
+            case "run", "run-level", "run-live":
+                if parts[0] != "run" { state.jobs[i].levelEmotions = parts[0] == "run-level" }
                 guard let account = config.connections[job.provider.rawValue], !account.isEmpty else {
                     reply("Сначала подключите " + job.provider.title + " в настройках Mac.", chat: id, buttons: [[RemoteButton("Повторить", "run:" + job.id)]]); return
                 }
@@ -228,8 +229,11 @@ import Combine
             let job = state.receive(chatID: id, messageID: messageID, fileID: fileID, name: String(name.prefix(240)), provider: config.provider)
             let current = state.active ?? state.next
             let queueText = current.map { "Сейчас: «" + $0.name + "» · " + $0.phase.title + ".\nНовая книга будет ждать в очереди. /cancel — остановить текущую.\n" } ?? ""
-            reply(queueText + "📚 «\(job.name)»\n\n🎙 Начать озвучивание в автоматическом режиме?\n☁️ Результат: \(job.provider.title).", chat: id,
-                  buttons: [[RemoteButton("✅ Да, начать", "run:" + job.id), RemoteButton("✖️ Нет", "reject:" + job.id)]])
+            reply(queueText + "📚 «\(job.name)»\n\n🎙 Начать озвучивание в автоматическом режиме?\n☁️ Результат: \(job.provider.title).\n\n"
+                  + "🔉 Ровная громкость — эмоции слышны по голосу, крик лишь немного громче.\n🎭 Живые эмоции — крик громче, шёпот тише.", chat: id,
+                  buttons: [[RemoteButton("✅ Да, ровная громкость", "run-level:" + job.id)],
+                            [RemoteButton("🎭 Да, живые эмоции", "run-live:" + job.id)],
+                            [RemoteButton("✖️ Нет", "reject:" + job.id)]])
             return
         }
         switch RemoteState.command(text) {
@@ -449,6 +453,7 @@ import Combine
             // Incomplete export can only be a copy from an interrupted previous build. Keep the native project cache.
             if FileManager.default.fileExists(atPath: result.path) { try FileManager.default.removeItem(at: result) }
             var request = makeRequest("build"); request["project"] = project; request["destination"] = result.path
+            if let level = try job(id).levelEmotions { request["level_emotions"] = level }
             try await runEngine(id, request, folder)
             for name in ["audiobook.m4b", "audiobook.epub", "package-report.json"] {
                 guard FileManager.default.fileExists(atPath: result.appendingPathComponent(name).path) else { throw RemoteError("Неполный результат сборки") }
