@@ -259,6 +259,28 @@ public final class NativeStress {
     /// (same word regex as `stressCandidates`), with every reading rendered on the word.
     public let disputes: [Int: [String]]
   }
+  /// Name forms with 'ё' that the dictionaries miss or confuse with common words.
+  static let yoNames: [String: String] = {
+    var forms: [String: String] = [:]
+    let stems: [(String, [String])] = [
+      ("фёдор", ["", "а", "у", "ом", "е"]), ("фёдоров", ["ич", "ича", "ичу", "ичем", "иче", "на", "ны", "не", "ну", "ной"]),
+      ("алён", ["а", "ы", "е", "у", "ой", "ушка", "ушки", "ушке", "ушку"]), ("семён", ["", "а", "у", "ом", "е"]),
+      ("семёнов", ["ич", "ича", "ичу", "ичем", "иче", "на", "ны", "не", "ну", "ной"]), ("пётр", [""]),
+      ("фёкл", ["а", "ы", "е", "у", "ой"]), ("артём", ["", "а", "у", "ом", "е"]), ("матрён", ["а", "ы", "е", "у", "ой"]),
+      ("алёш", ["а", "и", "е", "у", "ей"]), ("серёж", ["а", "и", "е", "у", "ей"]), ("лёш", ["а", "и", "е", "у", "ей"]),
+    ]
+    for (stem, endings) in stems {
+      for ending in endings { forms[(stem + ending).replacingOccurrences(of: "ё", with: "е")] = stem + ending }
+    }
+    return forms
+  }()
+  /// True when only spaces, quotes or dashes separate the word from a sentence end or the line start.
+  static func sentenceStart(_ text: NSString, before location: Int, prefix: String) -> Bool {
+    let head = (prefix + text.substring(to: location)).trimmingCharacters(
+      in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "«»\"„“-—–(")))
+    guard let last = head.last else { return true }
+    return ".!?…".contains(last)
+  }
   public func annotate(_ text: String, prefix: String = "", suffix: String = "") throws
     -> Annotated
   {
@@ -282,6 +304,7 @@ public final class NativeStress {
     var homos: [Object] = []
     var homoPositions: [Int] = []
     var predictions: [Int: String] = [:]
+    var ruled: [Int] = []  // homographs settled by a context pattern; the LLM check may still differ
     for (i, m) in matches.enumerated() {
       let original = ns.substring(with: m.range)
       let word = original.lowercased()
@@ -290,8 +313,25 @@ public final class NativeStress {
       // homographs still have to choose their letter from context.
       let yoHomograph = homographs[word]?.contains { $0.contains("ё") } ?? false
       let vowels = Self.vowelCount(word)
-      guard !word.contains("\u{301}"), !word.contains("ё"), vowels > 1 || (vowels == 1 && yoHomograph)
-      else { continue }
+      // By scalars: String.contains("\u{301}") is false for "за́мок" (the mark joins its vowel),
+      // and a stress already printed in the book must be kept as it is.
+      guard !word.unicodeScalars.contains("\u{301}"), !word.unicodeScalars.contains("ё") else { continue }
+      // Personal names whose common-word twin has no 'ё' (Фёдора/федо́ра, Семёна/семена́).
+      if let name = Self.yoNames[word], original.first?.isUppercase == true,
+        !Self.sentenceStart(ns, before: m.range.location, prefix: prefix) {
+        predictions[i] = name
+        continue
+      }
+      // One-vowel words carry no mark, but still take 'ё' from the dictionary (лёд, Пётр, шёл).
+      if vowels == 1 && !yoHomograph {
+        // By scalars: "ё" followed by the stress mark is a different Character ("ё́").
+        if word.contains("е"), let entry = try binary.lookup(word), entry.unicodeScalars.contains("ё"),
+          Self.plain(entry) == Self.plain(word) {
+          predictions[i] = entry
+        }
+        continue
+      }
+      guard vowels > 0 else { continue }
       if homographs[word] != nil || patterns[word] != nil {
         let before = String(
           cleanContext(prefix + ns.substring(to: m.range.location), start: true).suffix(150))
@@ -309,6 +349,7 @@ public final class NativeStress {
           where match.range(withName: "v\(j)").location != NSNotFound {
             predictions[i] = variant
             matched = true
+            if homographs[word] != nil { ruled.append(i) }
             break
           }
         }
@@ -402,7 +443,10 @@ public final class NativeStress {
         throw StudioError("Нет варианта ударения омографа")
       }
       predictions[i] = variants[p]
-      if homoProbabilities.indices.contains(j), (0.2...0.8).contains(homoProbabilities[j]) {
+      // Every homograph goes to the optional LLM check, not only uncertain ones: the model is
+      // confidently wrong too (за́мок/замо́к, все/всё, бе́лки/белки́, сре́ду/среду́, о́рган/орга́н).
+      _ = homoProbabilities
+      do {
         var readings: [String] = []
         for variant in variants {
           let reading = Self.transfer(original, variant)
@@ -410,6 +454,15 @@ public final class NativeStress {
         }
         if readings.count > 1 { disputes[i] = readings }
       }
+    }
+    for i in ruled {
+      let original = ns.substring(with: matches[i].range)
+      var readings: [String] = []
+      for variant in homographs[original.lowercased()] ?? [] {
+        let reading = Self.transfer(original, variant)
+        if !readings.contains(reading) { readings.append(reading) }
+      }
+      if readings.count > 1 { disputes[i] = readings }
     }
     var replacements = compounds
     for (i, m) in matches.enumerated() {

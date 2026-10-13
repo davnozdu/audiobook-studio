@@ -622,6 +622,24 @@ final class CoreTests: XCTestCase {
     let ru = try RussianText(rules)
     XCTAssertEqual(try ru.normalize("См. § 7 и §§ 9"), "См. параграф семь и параграфы девять")
   }
+  func testNamesStressAndYoAreChecked() {
+    let text = "Он видел Рогожина у окна. Рогожин молчал; потом пришёл генерал Епанчин и Фёдор."
+    let forms = ProperNames.collect([text], names: ["Лев Мышкин"])
+    // Inside a sentence or from the cast; the sentence-initial "Он" and one-vowel "Лев" are not names to stress.
+    XCTAssertEqual(forms.map(\.form), ["мышкин", "рогожина", "епанчин", "федор"])
+    XCTAssertTrue(ProperNames.valid("рого\u{301}жина", for: "рогожина"))
+    XCTAssertTrue(ProperNames.valid("фёдор", for: "федор"))
+    XCTAssertFalse(ProperNames.valid("семёна\u{301}", for: "семена"))   // ё is already the stress
+    XCTAssertFalse(ProperNames.valid("рогожина", for: "рогожина"))       // no stress at all
+    XCTAssertFalse(ProperNames.valid("раго\u{301}жина", for: "рогожина"))  // letters changed
+    XCTAssertEqual(ProperNames.apply("Рого\u{301}жин и РОГОЖИНА, Федор.", stresses: ["рогожин": "рого\u{301}жин", "рогожина": "рого\u{301}жина", "федор": "фёдор"]),
+      "Рого\u{301}жин и РОГО\u{301}ЖИНА, Фёдор.")
+    XCTAssertEqual(NativeStress.yoNames["федоровича"], "фёдоровича")
+    XCTAssertTrue(NativeStress.sentenceStart("Он ушёл. — Федор" as NSString, before: 11, prefix: ""))
+    XCTAssertFalse(NativeStress.sentenceStart("Он и Федор" as NSString, before: 5, prefix: ""))
+    // Words already stressed (in the book or by the dictionary) are not candidates again.
+    XCTAssertEqual(NativeDirector.stressCandidates("за\u{301}мок и замок").map(\.id), [2])
+  }
   func temporary() -> URL {
     let folder = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     try! fm.createDirectory(at: folder, withIntermediateDirectories: true)

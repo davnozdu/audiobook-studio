@@ -296,7 +296,8 @@ struct StoryCharacter: Identifiable {
     @Published var webSearch = UserDefaults.standard.bool(forKey: "webSearch") {
         didSet { UserDefaults.standard.set(webSearch, forKey: "webSearch") }
     }
-    @Published var cloudStress = UserDefaults.standard.bool(forKey: "cloudStress") {
+    // On by default: the LLM check fixes confidently wrong homographs (за́мок, бе́лки, все/всё).
+    @Published var cloudStress = UserDefaults.standard.object(forKey: "cloudStress") as? Bool ?? true {
         didSet { UserDefaults.standard.set(cloudStress, forKey: "cloudStress") }
     }
     @Published var musicEnabled = UserDefaults.standard.object(forKey: "musicEnabled") as? Bool ?? true {

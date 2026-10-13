@@ -488,6 +488,31 @@ final class Engine {
         }
       }
     }
+    // Names and surnames are often missing from the dictionaries: the LLM stresses each form
+    // once per book (cached), and that answer wins over the dictionary/model guess.
+    let castNames = voices.flatMap { [NativeIO.string($0["name"])] + ($0["aliases"] as? [String] ?? []) }
+    let nameForms = ProperNames.collect(rows.map { NativeIO.string($0["text"]) }, names: castNames)
+    if !nameForms.isEmpty {
+      let cache = project.appendingPathComponent("source/name-stress.json")
+      var stresses = NativeIO.object(try? NativeIO.load(cache)).compactMapValues { $0 as? String }
+      let missing = nameForms.filter { stresses[$0.form] == nil }
+      if !missing.isEmpty {
+        do {
+          let book = NativeIO.object(manifest["book"])
+          stresses.merge(try await director.nameStresses(missing, book: ["title": book["title"] ?? "", "author": book["author"] ?? ""])) { old, _ in old }
+          try NativeIO.write(cache, stresses)
+        } catch is CancellationError {
+          throw CancellationError()
+        } catch {
+          NativeIO.emit("log", ["message": "Ударения в именах не уточнены, остаются словарные: " + error.localizedDescription])
+        }
+      }
+      for i in rows.indices {
+        rows[i]["tts_text"] = ProperNames.apply(NativeIO.string(rows[i]["tts_text"]), stresses: stresses)
+      }
+      NativeIO.emit("log", ["message": "Имена и названия: \(nameForms.filter { stresses[$0.form] != nil }.count) из \(nameForms.count) форм с ударением от LLM · "
+        + nameForms.prefix(10).compactMap { stresses[$0.form] }.joined(separator: ", ")])
+    }
     // Foreign insertions get a Cyrillic reading in the spoken text only; answers are cached
     // per project, and without an answer the fragment stays as written.
     var foreign: [(fragment: String, context: String)] = []
