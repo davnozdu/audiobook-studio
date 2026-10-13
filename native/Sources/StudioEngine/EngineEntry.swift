@@ -461,11 +461,17 @@ final class Engine {
     NativeIO.stage("Нормализация текста · словари и нативный Silero")
     var prepared = manifest
     var rows = segments
+    // A book that already prints 'ё' keeps its own 'е': no second, guessed placement of 'ё'.
+    let bookHasYo = NativeStress.hasYo(NativeIO.objects(source["paragraphs"]).map { NativeIO.string($0["text"]) }.joined(separator: "\n"))
+    NativeIO.emit("log", ["message": bookHasYo
+      ? "В книге уже расставлена ё — повторная расстановка пропущена, ударения ставятся на буквы книги"
+      : "В книге нет ё — буква ё расставляется по словарю и модели ударений"])
     do {
       let ru = try RussianText(resources.appendingPathComponent("supertonic_rules.json"))
       let helper = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
         .appendingPathComponent("StudioStress")
       let stress = try NativeStress(resources: resources, helper: helper)
+      stress.bookHasYo = bookHasYo
       let paragraphs = Dictionary(
         uniqueKeysWithValues: NativeIO.objects(source["paragraphs"]).map {
           (NativeIO.string($0["id"]), NativeIO.string($0["text"]))
@@ -531,7 +537,7 @@ final class Engine {
         }
       }
       for i in rows.indices {
-        rows[i]["tts_text"] = ProperNames.apply(NativeIO.string(rows[i]["tts_text"]), stresses: stresses)
+        rows[i]["tts_text"] = ProperNames.apply(NativeIO.string(rows[i]["tts_text"]), stresses: stresses, keepYo: bookHasYo)
       }
       NativeIO.emit("log", ["message": "Имена и названия: \(nameForms.filter { stresses[$0.form] != nil }.count) из \(nameForms.count) форм с ударением от LLM · "
         + nameForms.prefix(10).compactMap { stresses[$0.form] }.joined(separator: ", ")])

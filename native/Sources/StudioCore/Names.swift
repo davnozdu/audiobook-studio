@@ -43,13 +43,13 @@ public enum ProperNames {
   }
 
   /// Replaces every occurrence whose plain form is known; the book's letter case is kept.
-  public static func apply(_ text: String, stresses: [String: String]) -> String {
+  public static func apply(_ text: String, stresses: [String: String], keepYo: Bool = false) -> String {
     let ns = NSMutableString(string: text)
     for match in NativeIO.regex("[А-ЯЁа-яё\\u0301]+(?:-[А-ЯЁа-яё\\u0301]+)*", text).reversed() {
       let original = ns.substring(with: match.range)
       guard let answer = stresses[NativeStress.plain(original)] else { continue }
       let bare = original.replacingOccurrences(of: "\u{301}", with: "")
-      let marked = NativeStress.transfer(bare, answer)
+      let marked = NativeStress.transfer(bare, answer, keepYo: keepYo)
       if marked != bare || original != bare { ns.replaceCharacters(in: match.range, with: marked) }
     }
     return ns as String

@@ -153,7 +153,9 @@ public final class NativeStress {
   /// Puts the predicted stress on the book's own letters. A predicted 'ё' replaces the
   /// book's 'е' (books are often printed without 'ё'); 'ё' is always stressed, so no mark
   /// follows it. One-vowel words get no mark, as Silero does without stress_single_vowel.
-  static func transfer(_ original: String, _ prediction: String) -> String {
+  /// With `keepYo` (the book already prints every 'ё') the book's 'е' stays 'е' and takes the
+  /// stress mark instead: a predicted 'ё' is always the stressed vowel (осел → осе́л, not осёл).
+  static func transfer(_ original: String, _ prediction: String, keepYo: Bool = false) -> String {
     guard plain(original) == plain(prediction) else { return original }
     // Letters only: an existing mark in the original would take a letter's place and cut the
     // word ("за́мок" → "за́́мо"). The prediction carries the stress.
@@ -169,8 +171,13 @@ public final class NativeStress {
       }
       guard index < scalars.count else { return original }
       var letter = scalars[index]
-      if scalar == "ё" || scalar == "Ё" {
-        if letter == "е" { letter = "ё" } else if letter == "Е" { letter = "Ё" }
+      if scalar == "ё" || scalar == "Ё", letter == "е" || letter == "Е" {
+        if keepYo {
+          out.append(letter); out.append("\u{301}")
+          index += 1; afterYo = true
+          continue
+        }
+        letter = letter == "е" ? "ё" : "Ё"
       }
       afterYo = letter == "ё" || letter == "Ё"
       out.append(letter)
@@ -286,6 +293,25 @@ public final class NativeStress {
     /// (same word regex as `stressCandidates`), with every reading rendered on the word.
     public let disputes: [Int: [String]]
   }
+  /// The book already prints 'ё' (set by the engine for the whole book): its 'е' is never turned
+  /// into 'ё' again, and все/всё-type pairs need no guessing.
+  public var bookHasYo = false
+  /// True when the text uses 'ё' throughout. Any 'ё' counts, unless the commonest words that
+  /// always take it (ещё, её) are mostly printed with 'е': a lone 'ё' in a name or an epigraph does
+  /// not make a book printed without 'ё' complete.
+  public static func hasYo(_ text: String) -> Bool {
+    let lower = text.lowercased()
+    guard lower.unicodeScalars.contains("ё") else { return false }
+    var with = 0, without = 0
+    for word in lower.components(separatedBy: CharacterSet.letters.inverted) {
+      switch word {
+      case "ещё", "её": with += 1
+      case "еще", "ее": without += 1
+      default: break
+      }
+    }
+    return with + without < 3 || Double(with) >= 0.9 * Double(with + without)
+  }
   /// Name forms with 'ё' that the dictionaries miss or confuse with common words.
   static let yoNames: [String: String] = {
     var forms: [String: String] = [:]
@@ -323,7 +349,7 @@ public final class NativeStress {
       guard let entry = try binary.lookup(original.lowercased()),
         Self.plain(entry) == Self.plain(original)
       else { continue }
-      let marked = Self.transfer(original, entry)
+      let marked = Self.transfer(original, entry, keepYo: bookHasYo)
       if marked != original { compounds.append((m.range, marked)) }
     }
     var words: [String] = []
@@ -338,13 +364,13 @@ public final class NativeStress {
       if compounds.contains(where: { NSLocationInRange(m.range.location, $0.0) }) { continue }
       // One-vowel words need no stress mark, but все/всё, чем/чём and similar
       // homographs still have to choose their letter from context.
-      let yoHomograph = homographs[word]?.contains { $0.contains("ё") } ?? false
+      let yoHomograph = !bookHasYo && (homographs[word]?.contains { $0.contains("ё") } ?? false)
       let vowels = Self.vowelCount(word)
       // By scalars: String.contains("\u{301}") is false for "за́мок" (the mark joins its vowel),
       // and a stress already printed in the book must be kept as it is.
       guard !word.unicodeScalars.contains("\u{301}"), !word.unicodeScalars.contains("ё") else { continue }
       // Personal names whose common-word twin has no 'ё' (Фёдора/федо́ра, Семёна/семена́).
-      if let name = Self.yoNames[word], original.first?.isUppercase == true,
+      if !bookHasYo, let name = Self.yoNames[word], original.first?.isUppercase == true,
         !Self.sentenceStart(ns, before: m.range.location, prefix: prefix) {
         predictions[i] = name
         continue
@@ -352,7 +378,7 @@ public final class NativeStress {
       // One-vowel words carry no mark, but still take 'ё' from the dictionary (лёд, Пётр, шёл).
       if vowels == 1 && !yoHomograph {
         // By scalars: "ё" followed by the stress mark is a different Character ("ё́").
-        if word.contains("е"), let entry = try binary.lookup(word), entry.unicodeScalars.contains("ё"),
+        if !bookHasYo, word.contains("е"), let entry = try binary.lookup(word), entry.unicodeScalars.contains("ё"),
           Self.plain(entry) == Self.plain(word) {
           predictions[i] = entry
         }
@@ -476,7 +502,7 @@ public final class NativeStress {
       do {
         var readings: [String] = []
         for variant in variants {
-          let reading = Self.transfer(original, variant)
+          let reading = Self.transfer(original, variant, keepYo: bookHasYo)
           if !readings.contains(reading) { readings.append(reading) }
         }
         if readings.count > 1 { disputes[i] = readings }
@@ -486,7 +512,7 @@ public final class NativeStress {
       let original = ns.substring(with: matches[i].range)
       var readings: [String] = []
       for variant in homographs[original.lowercased()] ?? [] {
-        let reading = Self.transfer(original, variant)
+        let reading = Self.transfer(original, variant, keepYo: bookHasYo)
         if !readings.contains(reading) { readings.append(reading) }
       }
       if readings.count > 1 { disputes[i] = readings }
@@ -494,7 +520,7 @@ public final class NativeStress {
     var replacements = compounds
     for (i, m) in matches.enumerated() {
       if let target = predictions[i] {
-        replacements.append((m.range, Self.transfer(ns.substring(with: m.range), target)))
+        replacements.append((m.range, Self.transfer(ns.substring(with: m.range), target, keepYo: bookHasYo)))
       }
     }
     var output = text

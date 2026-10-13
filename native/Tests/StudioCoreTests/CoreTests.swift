@@ -383,6 +383,21 @@ final class CoreTests: XCTestCase {
     XCTAssertEqual(parts.joined(separator: " "), monologue)
     XCTAssertEqual(NativeDirector.fragments("— Нет! Не отдам! — вскричал он.").count, 2)   // short lines stay whole
   }
+  func testBookThatPrintsYoKeepsItsOwnYe() throws {
+    // Detection: no ё at all; ё throughout; a lone ё in a name while ещё/её are printed with е.
+    XCTAssertFalse(NativeStress.hasYo("Он еще шел по дороге и думал о ней."))
+    XCTAssertTrue(NativeStress.hasYo("Он ещё шёл по дороге. Её не было. Ещё раз всё проверил, ещё."))
+    XCTAssertFalse(NativeStress.hasYo("Фёдор Михайлович. Он еще шел, ее не было, еще раз, еще."))
+    XCTAssertTrue(NativeStress.hasYo("Пётр пришёл."))   // too few telling words: any ё counts
+    // A predicted ё goes onto the book's е as a stress mark when the book prints ё itself.
+    XCTAssertEqual(NativeStress.transfer("осел", "осёл"), "осёл")
+    XCTAssertEqual(NativeStress.transfer("осел", "осёл", keepYo: true), "осе\u{301}л")
+    XCTAssertEqual(NativeStress.transfer("все", "всё", keepYo: true), "все")       // one vowel: no mark
+    XCTAssertEqual(NativeStress.transfer("Федора", "Фёдора", keepYo: true), "Фе\u{301}дора")
+    XCTAssertEqual(NativeStress.transfer("замок", "за+мок".replacingOccurrences(of: "+", with: ""), keepYo: true), "замок")
+    XCTAssertEqual(ProperNames.apply("Пришел Семен.", stresses: ["семен": "Семён"], keepYo: true), "Пришел Семе\u{301}н.")
+    XCTAssertEqual(ProperNames.apply("Пришел Семен.", stresses: ["семен": "Семён"]), "Пришел Семён.")
+  }
   func testPausesFollowBoundaryKindAndSettings() throws {
     let rows: [Object] = [
       ["id": "a", "speaker": "hero", "text": "— Да,", "paragraph_id": "p1", "chapter_id": "c1"],
