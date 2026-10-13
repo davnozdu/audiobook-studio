@@ -958,9 +958,13 @@ final class CoreTests: XCTestCase {
     XCTAssertEqual(
       try spans.map { try NativeIO.scalarSlice(text, $0["start"] as! Int, $0["end"] as! Int) },
       ["— Да 😀!", "— сказал он.", "— Идём, — и ничего больше!"])
+    // A speaker outside the cast never fails the answer: a spelling variant of a cast ID becomes
+    // that ID, any other ID an unknown speaker (settled later from context).
+    let stray = try NativeDirector.validateSpeakers(["paragraphs": [["id": "p00001", "speakers": ["Hero", "narrator", "mrs_draves", "hero"]]]],
+      chunk: [paragraph], fragments: split, allowed: ["hero", "narrator"])
+    XCTAssertEqual(NativeIO.objects(stray[0]["spans"]).map { NativeIO.string($0["speaker"]) }, ["hero", "narrator", "", "hero"])
     for bad: Object in [
       ["paragraphs": [["id": "p00001", "speakers": ["hero"]]]],
-      ["paragraphs": [["id": "p00001", "speakers": ["hero", "ghost", "hero", "hero"]]]],
       ["paragraphs": [["id": "p00002", "speakers": ["hero", "narrator", "hero", "hero"]]]],
     ] {
       XCTAssertThrowsError(try NativeDirector.validateSpeakers(

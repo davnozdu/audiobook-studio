@@ -48,7 +48,10 @@ public final class NativeDirector {
   }
   /// Sends a request and validates the answer; a rejected answer is retried with the reason,
   /// so the model can correct exactly that mistake instead of repeating it.
-  func ask<T>(_ prompt: String, attempts: Int = 3, validate: (Object) throws -> T) async throws -> T {
+  /// With `fallback`, answers that keep failing validation give the fallback instead of an error;
+  /// network and key errors from `call` still stop.
+  func ask<T>(_ prompt: String, attempts: Int = 3, fallback: ((String) throws -> T)? = nil,
+    validate: (Object) throws -> T) async throws -> T {
     var lastError = ""
     for attempt in 0..<attempts {
       let answer = try await call(
@@ -56,7 +59,10 @@ public final class NativeDirector {
       do { return try validate(answer) } catch let error as StudioError {
         lastError = error.message
         NativeIO.emit("log", ["message": "Ответ LLM отклонён: " + error.message])
-        if attempt + 1 == attempts { throw error }
+        if attempt + 1 == attempts {
+          guard let fallback else { throw error }
+          return try fallback(error.message)
+        }
       }
     }
     throw StudioError("LLM: не удалось получить корректный ответ")
@@ -238,7 +244,13 @@ public final class NativeDirector {
         Ремарка автора рядом определяет манеру той прямой речи, к которой относится, до и после ремарки: «вскричал/закричал» — shouting, «окликнул» — calling, «заплакал/всхлипнул/сквозь слёзы» — crying, «пробормотал/проворчал» — muttering, «прошептал» — whisper, «рассмеялся» — laughing, «изумился» — surprised, «пригрозил» — threatening, «задумчиво» — thoughtful. Иначе опирайся на смысл, восклицания, многоточия и характер персонажа в cast. Ставь не calm, когда состояние явно слышно; один восклицательный знак в обычной фразе ещё не эмоция. Фрагменты бывают отдельными предложениями одной реплики: манеру можно менять от предложения к предложению.
         Верни JSON {"paragraphs":[{"id":"p00001","speech":[{"n":2,"speaker":"ID или null","manner":"calm"}],"confidence":"high|medium|low"}]} для каждого target в исходном порядке; speech — пустой список, если в абзаце нет речи персонажей.
         """ + String(data: try NativeIO.json(payload), encoding: .utf8)!
-      let labels = try await ask(prompt) {
+      // A part the LLM keeps answering wrongly is read by the narrator; the book goes on.
+      let labels = try await ask(prompt, fallback: { reason in
+        NativeIO.emit("log", ["message": "Роли не размечены в абзацах "
+          + NativeIO.string(chunk.first?["id"]) + "–" + NativeIO.string(chunk.last?["id"]) + ", их читает рассказчик · " + reason])
+        return try Self.validateSpeakers(["paragraphs": chunk.map { ["id": $0["id"]!, "speech": [Any]()] as Object }],
+          chunk: chunk, fragments: split, allowed: allowed)
+      }) {
         try Self.validateSpeakers($0, chunk: chunk, fragments: split, allowed: allowed)
       }
       for (paragraph, label) in zip(chunk, labels) {
@@ -397,6 +409,9 @@ public final class NativeDirector {
     return result
   }
 
+  static func speakerKey(_ id: String) -> String {
+    id.lowercased().replacingOccurrences(of: "[\\s-]+", with: "_", options: .regularExpression)
+  }
   /// Checks one speaker per fragment and joins neighbouring fragments of one speaker into
   /// spans; the spans reproduce the paragraph exactly by construction.
   public static func validateSpeakers(
@@ -435,8 +450,15 @@ public final class NativeDirector {
         }
         given = row["manners"] as? [Any] ?? []
       }
-      if let unknown = speakers.first(where: { !$0.isEmpty && !allowed.contains($0) }) {
-        throw StudioError("Абзац \(id): неизвестный говорящий \(unknown); используй ID из cast или null")
+      // An ID outside the cast never stops the book: a spelling variant of a cast ID (case,
+      // spaces, hyphens) is that ID; anything else, often a minor speaker the cast missed, is
+      // an unknown speaker, settled later from context and grammatical gender.
+      speakers = speakers.map { speaker in
+        guard !speaker.isEmpty, !allowed.contains(speaker) else { return speaker }
+        let key = Self.speakerKey(speaker)
+        if let match = allowed.first(where: { Self.speakerKey($0) == key }) { return match }
+        NativeIO.emit("log", ["message": "Абзац \(id): говорящий \(speaker) не из списка персонажей — определяется по контексту"])
+        return ""
       }
       let confidence = ["high", "medium", "low"].contains(NativeIO.string(row["confidence"]))
         ? NativeIO.string(row["confidence"]) : "medium"
