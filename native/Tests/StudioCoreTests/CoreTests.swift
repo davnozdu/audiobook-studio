@@ -752,6 +752,20 @@ final class CoreTests: XCTestCase {
     // Words already stressed (in the book or by the dictionary) are not candidates again.
     XCTAssertEqual(NativeDirector.stressCandidates("за\u{301}мок и замок").map(\.id), [2])
   }
+  func testLegacyPythonRuntimeIsRemovedButModelsStay() throws {
+    let root = temporary()
+    defer { try? fm.removeItem(at: root) }
+    for dir in ["models/Qwen", ".venv-mlx", ".cache/x", "data/stress"] {
+      try fm.createDirectory(at: root.appendingPathComponent(dir), withIntermediateDirectories: true)
+    }
+    for file in ["model-validation.json", "prepare_qwen.py", "requirements.txt", "models/Qwen/model.safetensors"] {
+      try Data("x".utf8).write(to: root.appendingPathComponent(file))
+    }
+    let removed = NativeModels(root: root, resources: root).removeLegacyRuntime()
+    XCTAssertEqual(Set(removed), [".venv-mlx", ".cache", "data", "prepare_qwen.py", "requirements.txt"])
+    XCTAssertTrue(fm.fileExists(atPath: root.appendingPathComponent("models/Qwen/model.safetensors").path))
+    XCTAssertTrue(fm.fileExists(atPath: root.appendingPathComponent("model-validation.json").path))
+  }
   func temporary() -> URL {
     let folder = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     try! fm.createDirectory(at: folder, withIntermediateDirectories: true)

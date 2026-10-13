@@ -92,6 +92,8 @@ final class Engine {
     audio = NativeAudio(
       ffmpeg: URL(fileURLWithPath: NativeIO.string(request["ffmpeg"])),
       ffprobe: URL(fileURLWithPath: NativeIO.string(request["ffprobe"])))
+    let leftovers = models.removeLegacyRuntime()
+    if !leftovers.isEmpty { NativeIO.emit("log", ["message": "Удалены остатки прежнего Python-движка: " + leftovers.sorted().joined(separator: ", ")]) }
   }
   var project: URL { URL(fileURLWithPath: NativeIO.string(request["project"])) }
   func done(_ message: String, path: URL? = nil) {
@@ -398,8 +400,14 @@ final class Engine {
   }
   func build() async throws {
     let destination = NativeIO.string(request["destination"])
-    guard !destination.isEmpty, !fm.fileExists(atPath: destination) else {
+    let replace = request["replace"] as? Bool ?? false
+    guard !destination.isEmpty, replace || !fm.fileExists(atPath: destination) else {
       throw StudioError("Выберите новую папку для результата")
+    }
+    // Never replace the project itself or a folder that contains it.
+    let target = URL(fileURLWithPath: destination).standardizedFileURL.path
+    guard !(project.standardizedFileURL.path + "/").hasPrefix(target + "/") else {
+      throw StudioError("Нельзя сохранить результат поверх папки проекта")
     }
     var (manifest, source) = try NativeProject.verify(project)
     NativeProject.cleanupBuildIntermediates(project)
@@ -669,6 +677,13 @@ final class Engine {
       project: project, manifest: prepared, source: source, timeline: timeline,
       gains: gains, music: selectedMusic, musicPercent: request["music_volume"] as? Double ?? 5)
     let external = URL(fileURLWithPath: destination)
+    if fm.fileExists(atPath: external.path) {
+      // Replacement confirmed in the save panel: the old folder goes to the Trash (recoverable) only
+      // now, after the new book has been assembled and verified.
+      guard replace else { throw StudioError("Папка результата уже существует") }
+      NativeIO.stage("Прежняя папка результата перемещается в Корзину")
+      try fm.trashItem(at: external, resultingItemURL: nil)
+    }
     NativeIO.stage("Сохранение аудиокниги и EPUB · " + destination)
     try fm.copyItem(at: result, to: external)
     NativeIO.stage("Проверка сохранённой книги и очистка временного аудио")

@@ -23,18 +23,31 @@ import CryptoKit
         guard response.statusCode == 200 else { throw RemoteError("Dropbox: HTTP \(response.statusCode)") }
         return try RemoteJSON.object(data)
     }
+      /// A new folder for every processed book: the same book sent twice lands in "Автор - Книга (2)"
+    /// instead of overwriting the first result. The job stores the folder, so a resumed upload
+    /// returns to it rather than creating another.
     public func folder(jobID: String, title: String = "", author: String = "") async throws -> String {
+        let base = Self.bookBase(title: title, author: author).isEmpty ? "Книга " + jobID : Self.bookBase(title: title, author: author)
         if provider == .dropbox {
             let root = "/Audiobook Studio"
             try await dropboxCreateFolder(root)
-            let base = Self.bookBase(title: title, author: author).isEmpty ? "Книга " + jobID : Self.bookBase(title: title, author: author)
-            let path = root + "/" + base
-            try await dropboxCreateFolder(path)
+            let (data, response) = try await request(URL(string: "https://api.dropboxapi.com/2/files/create_folder_v2")!, method: "POST",
+                data: RemoteJSON.data(["path": root + "/" + base, "autorename": true]), headers: ["Content-Type": "application/json"])
+            guard response.statusCode == 200, let path = Self.createdPath(data) else { throw RemoteError("Не удалось создать папку книги в Dropbox") }
             return path
         }
         let root = try await googleRoot(create: true)
-        let base = Self.bookBase(title: title, author: author).isEmpty ? "Книга " + jobID : Self.bookBase(title: title, author: author)
-        return try await googleFolder(name: base, parent: root)
+        for n in 1...200 {
+            let name = n == 1 ? base : base + " (\(n))"
+            if try await findGoogleFolder(name: name, parent: root).isEmpty { return try await googleFolder(name: name, parent: root) }
+        }
+        throw RemoteError("Не удалось подобрать свободное имя папки книги в Google Drive")
+    }
+    /// path_display from a Dropbox create_folder_v2 answer (after autorename).
+    nonisolated static func createdPath(_ data: Data) -> String? {
+        guard let object = try? RemoteJSON.object(data), let metadata = object["metadata"] as? [String: Any] else { return nil }
+        let path = RemoteJSON.string(metadata, "path_display")
+        return path.isEmpty ? nil : path
     }
     public struct CloudBook: Sendable {
         public let id: String, name: String, m4bURL: String?, epubURL: String?, path: String?

@@ -648,11 +648,9 @@ struct StoryCharacter: Identifiable {
         panel.canCreateDirectories = true
         panel.directoryURL = URL(fileURLWithPath: UserDefaults.standard.string(forKey: "buildOutputFolder") ?? output)
         panel.nameFieldStringValue = URL(fileURLWithPath: book).deletingPathExtension().lastPathComponent + " — аудиокнига"
+        // An existing folder was confirmed with «Заменить» in the panel; the engine moves it to the
+        // Trash only after the new book is assembled, so a failed build keeps it.
         guard panel.runModal() == .OK, let url = panel.url else { return nil }
-        if FileManager.default.fileExists(atPath: url.path) {
-            error = "Выберите имя новой папки для сборки. Предыдущие результаты сохраняются отдельно."
-            return nil
-        }
         UserDefaults.standard.set(url.deletingLastPathComponent().path, forKey: "buildOutputFolder")
         resultPath = url.path
         return url.path
@@ -662,6 +660,7 @@ struct StoryCharacter: Identifiable {
         guard let destination = destination ?? chooseBuildDestination() else { return }
         saveThen {
             var r = self.request("build"); r["destination"] = destination
+            r["replace"] = FileManager.default.fileExists(atPath: destination)
             self.launch(r)
         }
     }

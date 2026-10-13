@@ -7,6 +7,23 @@ public struct NativeModels {
     self.root = root
     self.resources = resources
   }
+  /// Leftovers of the former Python engine in the runtime folder (virtualenvs, caches, stress
+  /// data, scripts). The native engine reads none of them; models and their validation stay.
+  static let legacyRuntime = [".cache", ".venv-mlx", ".venv-stress", "data", "books", "rab", "results",
+    "requirements.txt", "requirements-stress.txt", "UPSTREAM.txt", "THIRD_PARTY.md",
+    "supertonic_rules.json", "design_model_files.json", "stress_model_files.json"]
+  @discardableResult public func removeLegacyRuntime() -> [String] {
+    let fm = FileManager.default
+    // Only the app's own runtime folder (…/Audiobook Studio/Engine or a test folder holding models).
+    guard root.lastPathComponent == "Engine" && root.deletingLastPathComponent().lastPathComponent == "Audiobook Studio"
+      || fm.fileExists(atPath: root.appendingPathComponent("model-validation.json").path) else { return [] }
+    let names = (try? fm.contentsOfDirectory(atPath: root.path)) ?? []
+    var removed: [String] = []
+    for name in names where Self.legacyRuntime.contains(name) || name.hasSuffix(".py") {
+      if (try? fm.removeItem(at: root.appendingPathComponent(name))) != nil { removed.append(name) }
+    }
+    return removed
+  }
   public func ensure(design: Bool) throws -> URL {
     let name =
       design ? "Qwen3-TTS-12Hz-1.7B-VoiceDesign-8bit" : "Qwen3-TTS-12Hz-1.7B-Ru-Stress-CF-source"

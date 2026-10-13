@@ -148,6 +148,54 @@ final class RemoteTests: XCTestCase {
         XCTAssertTrue(RemoteError("x", status: 403).rejected); XCTAssertFalse(RemoteError("x", status: 429).rejected)
         XCTAssertFalse(RemoteError("x", status: 502).rejected); XCTAssertFalse(RemoteError("x").rejected)
     }
+    @MainActor func testFinishedJobsKeepNoLocalCopy() throws {
+        let f = try folder(); defer { try? FileManager.default.removeItem(at: f) }
+        let store = RemoteStateStore(f)
+        var state = RemoteState()
+        let done = state.receive(chatID: 1, messageID: 1, fileID: "a", name: "a.fb2", provider: .dropbox)
+        let open = state.receive(chatID: 1, messageID: 2, fileID: "b", name: "b.epub", provider: .dropbox)
+        state.jobs[0].phase = .complete; state.jobs[1].phase = .failed
+        try store.save(state)
+        for job in [done, open] {
+            try FileManager.default.createDirectory(at: store.jobFolder(job.id).appendingPathComponent("projects/x"), withIntermediateDirectories: true)
+            try Data("m4b".utf8).write(to: store.jobFolder(job.id).appendingPathComponent("projects/x/audiobook.m4b"))
+        }
+        _ = BotService(folder: f, secrets: MemorySecrets())
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.jobFolder(done.id).path))   // in the cloud: removed
+        XCTAssertTrue(FileManager.default.fileExists(atPath: store.jobFolder(open.id).path))    // unfinished: kept to resume
+        XCTAssertEqual(BotService.bookExtension("Книга.FB2.zip"), "fb2.zip"); XCTAssertNil(BotService.bookExtension("a.pdf"))
+    }
+    @MainActor func testSameBookTwiceGetsItsOwnCloudFolder() async throws {
+        defer { MockHTTP.handler = nil }
+        let configuration = URLSessionConfiguration.ephemeral; configuration.protocolClasses = [MockHTTP.self]
+        let secrets = MemorySecrets(); secrets.values["googleDriveRefresh"] = "refresh"; secrets.values["googleSecret"] = "s"
+        var existing: Set<String> = ["Audiobook Studio", "Ницше - Мораль", "Ницше - Мораль (2)"], created: [String] = []
+        MockHTTP.handler = { request in
+            if request.url!.host == "oauth2.googleapis.com" { return (200, [:], try RemoteJSON.data(["access_token": "t"])) }
+            if request.httpMethod == "POST" {
+                // URLProtocol receives the POST body as a stream.
+                var body = request.httpBody ?? Data()
+                if body.isEmpty, let stream = request.httpBodyStream {
+                    stream.open(); defer { stream.close() }
+                    var buffer = [UInt8](repeating: 0, count: 4096)
+                    while stream.hasBytesAvailable { let n = stream.read(&buffer, maxLength: buffer.count); if n <= 0 { break }; body.append(buffer, count: n) }
+                }
+                let name = RemoteJSON.string(try RemoteJSON.object(body), "name")
+                created.append(name); existing.insert(name)
+                return (200, [:], try RemoteJSON.data(["id": "id-" + name]))
+            }
+            let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "q" }?.value ?? ""
+            let name = query.components(separatedBy: "name='").dropFirst().first?.components(separatedBy: "'").first ?? ""
+            return (200, [:], try RemoteJSON.data(["files": existing.contains(name) ? [["id": "id-" + name]] : []]))
+        }
+        var config = RemoteConfig(); config.googleID = "g.apps.googleusercontent.com"
+        let client = CloudClient(provider: .googleDrive, config: config, secrets: secrets, http: RemoteHTTP(session: URLSession(configuration: configuration)))
+        let folder = try await client.folder(jobID: "j", title: "Мораль", author: "Ницше")
+        XCTAssertEqual(folder, "id-Ницше - Мораль (3)")
+        XCTAssertEqual(created, ["Ницше - Мораль (3)"])
+        let dropbox = Data(#"{"metadata":{"path_display":"/Audiobook Studio/Ницше - Мораль (2)"}}"#.utf8)
+        XCTAssertEqual(CloudClient.createdPath(dropbox), "/Audiobook Studio/Ницше - Мораль (2)")
+    }
     @MainActor func testGoogleResumeUsesServerOffsetAndVerifiesHash() async throws {
         let f = try folder(); defer { try? FileManager.default.removeItem(at: f); MockHTTP.handler = nil }
         let file = f.appendingPathComponent("audiobook.m4b"); let bytes = Data(repeating: 7, count: 300000); try bytes.write(to: file)

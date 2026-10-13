@@ -23,6 +23,8 @@ import Combine
             if config.dropboxID.isEmpty { config.dropboxID = RemoteRegistration.values["dropboxID"] ?? "" }
             if config.googleID.isEmpty { config.googleID = RemoteRegistration.values["googleID"] ?? "" }
             state = try store.load(); state.recover(); try persist()
+            // Books already in the cloud need no local copy (also cleans jobs finished by older versions).
+            for job in state.jobs where job.phase == .complete { Self.removeLocalCopy(store.jobFolder(job.id)) }
         } catch { fatal = true; message = "Не удалось прочитать очередь. Файл сохранён; автоматический запуск заблокирован." }
     }
     public var paired: Bool { state.ownerID != nil }
@@ -481,8 +483,14 @@ import Combine
                 try self.mutate(id) { $0.uploads[name] = checkpoint; $0.stage = "\(name): загружено \(checkpoint.offset / 1024 / 1024) МБ" }
             }
         }
-        // The source already exists in the verified native project and final EPUB; remove only this redundant inbox copy.
-        try? FileManager.default.removeItem(at: input)
+        // Both files are uploaded and verified by content hash: the cloud copy is the book now.
+        // Remove the whole local job (input, project, voices, M4B/EPUB); the queue keeps the links.
+        Self.removeLocalCopy(folder)
+        try mutate(id) { $0.project = ""; $0.result = "" }
+    }
+    /// Deletes a finished job's local folder; failures are left for the next start-up sweep.
+    static func removeLocalCopy(_ folder: URL) {
+        try? FileManager.default.removeItem(at: folder)
     }
     /// Accepted book file types, longest suffix first; nil for anything else.
     static func bookExtension(_ name: String) -> String? {
