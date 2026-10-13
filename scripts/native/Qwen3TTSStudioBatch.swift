@@ -7,6 +7,13 @@ import MLXAudioCore
 @preconcurrency import MLXLMCommon
 import MLXNN
 
+/// Gentle mode of the app: after every generation step the GPU rests for this share of the
+/// step, so the screen and other apps get it in between. Set while running by the engine.
+public enum StudioPace {
+    nonisolated(unsafe) public static var gentle = false
+    public static let share = 0.35
+}
+
 public struct StudioQwenBatchStops {
     public private(set) var finished: [Bool]
     public private(set) var lengths: [Int]
@@ -269,6 +276,7 @@ extension Qwen3TTSModel {
         // so CPU bookkeeping overlaps model work. Lane state lives on the GPU.
         var waiting: (token: MLXArray, frame: MLXArray, step: Int)?
         var done = false
+        var stepClock = Date()
         for step in 0 ..< maxTokens {
             try Task.checkCancellation()
             let (logits, hidden) = talker(input,
@@ -302,6 +310,12 @@ extension Qwen3TTSModel {
                 done = true; break
             }
             waiting = (nextToken, frame, step)
+            if StudioPace.gentle {
+                // The queued step must finish first, or the GPU would keep working through the pause.
+                eval(nextToken)
+                Thread.sleep(forTimeInterval: min(0.25, Date().timeIntervalSince(stepClock) * StudioPace.share))
+            }
+            stepClock = Date()
         }
         if !done, let previous = waiting { _ = collect(previous.token, previous.frame, step: previous.step) }
         timing?("first_step", firstStepTime)

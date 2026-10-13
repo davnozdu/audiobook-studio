@@ -8,6 +8,22 @@ import MLXLMCommon
 import StudioCore
 
 @main struct StudioEngine {
+  nonisolated(unsafe) static var paceTimer: DispatchSourceTimer?
+  /// The app's build mode can change while a book is read: the file says "gentle" or not and is
+  /// read again every 2 seconds.
+  static func watchPace(_ path: String) {
+    guard !path.isEmpty else { return }
+    let read = {
+      StudioPace.gentle = (try? String(contentsOfFile: path, encoding: .utf8))?
+        .trimmingCharacters(in: .whitespacesAndNewlines) == "gentle"
+    }
+    read()
+    let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+    timer.schedule(deadline: .now() + 2, repeating: 2)
+    timer.setEventHandler(handler: read)
+    timer.resume()
+    paceTimer = timer
+  }
   static func main() async {
     _ = setpgid(0, 0)
     // A crashed helper must produce an error event, not kill the engine on a pipe write.
@@ -74,6 +90,7 @@ import StudioCore
         throw StudioError("Нет запроса")
       }
       let request = NativeIO.object(try JSONSerialization.jsonObject(with: data))
+      Self.watchPace(NativeIO.string(request["pace_file"]))
       try await Engine(request).run()
     } catch {
       NativeIO.emit("error", ["message": error.localizedDescription])

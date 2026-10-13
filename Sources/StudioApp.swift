@@ -361,8 +361,12 @@ struct StoryCharacter: Identifiable {
     @Published var showMenuBar = UserDefaults.standard.object(forKey: "showMenuBar") as? Bool ?? true {
         didSet { UserDefaults.standard.set(showMenuBar, forKey: "showMenuBar"); updatePresence() }
     }
-    @Published var backgroundPriority = UserDefaults.standard.bool(forKey: "backgroundPriority") {
-        didSet { UserDefaults.standard.set(backgroundPriority, forKey: "backgroundPriority"); applyPriority() }
+    /// Build mode: "normal"; "gentle" — the engine pauses the GPU after every step so the screen
+    /// and other apps stay smooth (about a third slower); "background" — macOS background policy
+    /// on the efficiency cores (measured 2–2.5× slower). Old "background priority" carries over.
+    @Published var priorityMode = UserDefaults.standard.string(forKey: "priorityMode")
+        ?? (UserDefaults.standard.bool(forKey: "backgroundPriority") ? "background" : "normal") {
+        didSet { UserDefaults.standard.set(priorityMode, forKey: "priorityMode"); applyPriority() }
     }
     private let menuBar = MenuBarController()
     private var childPIDs: Set<Int32> = []
@@ -446,12 +450,23 @@ struct StoryCharacter: Identifiable {
     /// priority on the efficiency cores and throttled disk. Children started later inherit it.
     /// The Telegram engine follows the same setting.
     func applyPriority() {
+        writePace()
+        let background = priorityMode == "background"
         for pid in [process?.processIdentifier ?? 0] + Array(childPIDs) where pid > 1 {
-            if setpriority(PRIO_DARWIN_PROCESS, id_t(pid), backgroundPriority ? PRIO_DARWIN_BG : 0) != 0 {
+            if setpriority(PRIO_DARWIN_PROCESS, id_t(pid), background ? PRIO_DARWIN_BG : 0) != 0 {
                 appendLog("Не удалось изменить приоритет движка: " + String(cString: strerror(errno)))
             }
         }
-        bot.engine.background = backgroundPriority
+        bot.engine.background = background
+    }
+    /// The gentle mode reaches a running engine (window or Telegram) through this file.
+    var paceFile: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Audiobook Studio/engine-pace")
+    }
+    func writePace() {
+        try? FileManager.default.createDirectory(at: paceFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? Data((priorityMode == "gentle" ? "gentle" : "normal").utf8).write(to: paceFile, options: .atomic)
     }
 
     var resources: URL { Bundle.main.resourceURL! }
@@ -603,7 +618,8 @@ struct StoryCharacter: Identifiable {
     }
 
     func request(_ action: String) -> [String: Any] {
-        ["action": action, "book": book, "project": project, "output": output,
+        writePace()
+        return ["action": action, "pace_file": paceFile.path, "book": book, "project": project, "output": output,
          "runtime": runtime.path, "resources": resources.appendingPathComponent("engine").path,
          "ffmpeg": resources.appendingPathComponent("runtime/bin/ffmpeg").path, "ffprobe": resources.appendingPathComponent("runtime/bin/ffprobe").path, "key": key, "model": model,
          "llm_provider": llmProvider, "deepseek_key": deepseekKey, "deepseek_model": deepseekModel,
@@ -1274,10 +1290,11 @@ struct ContentView: View {
                     }
                     HStack {
                         Text("Приоритет").font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: true, vertical: false)
-                        Picker("Приоритет", selection: $studio.backgroundPriority) {
-                            Text("Обычный").tag(false)
-                            Text("Фоновый").tag(true)
-                        }.pickerStyle(.segmented).labelsHidden().frame(width: 220)
+                        Picker("Приоритет", selection: $studio.priorityMode) {
+                            Text("Обычный").tag("normal")
+                            Text("Щадящий").tag("gentle")
+                            Text("Фоновый").tag("background")
+                        }.pickerStyle(.segmented).labelsHidden().frame(width: 300)
                         Spacer()
                     }
                     if studio.busy {
@@ -1412,8 +1429,19 @@ struct SettingsView: View {
             Toggle("Показывать значок в Dock", isOn: $studio.showDock)
             Toggle("Показывать значок в верхней панели", isOn: $studio.showMenuBar)
             Text("Один значок всегда остаётся доступным, чтобы вернуться к приложению.").font(.caption).foregroundStyle(.secondary)
-            Toggle("Фоновый приоритет сборки", isOn: $studio.backgroundPriority)
-            Text("Снижает приоритет CPU и ввода-вывода. GPU и память продолжают использоваться моделью.").font(.caption).foregroundStyle(.secondary)
+            Picker("Режим сборки", selection: $studio.priorityMode) {
+                Text("Обычный").tag("normal")
+                Text("Щадящий").tag("gentle")
+                Text("Фоновый").tag("background")
+            }.pickerStyle(.segmented)
+            Text(studio.priorityMode == "gentle"
+                 ? "Щадящий: во время озвучки движок после каждого шага ненадолго отдаёт видеокарту экрану и другим программам. Работать комфортнее, озвучка примерно на треть медленнее."
+                 : studio.priorityMode == "background"
+                 ? "Фоновый: движок уходит на энергоэффективные ядра с низшим приоритетом. Озвучка в 2–2,5 раза медленнее; память и видеокарта заняты как обычно."
+                 : "Обычный: полная скорость озвучки.")
+                .font(.caption).foregroundStyle(.secondary)
+            Text("Режим действует только пока идёт сборка и переключается на ходу; в простое ничего не происходит.")
+                .font(.caption).foregroundStyle(.secondary)
             Divider()
             Text("Обновления").font(.headline)
             if !studio.updateStatus.isEmpty { Text(studio.updateStatus).font(.caption).foregroundStyle(.secondary) }
