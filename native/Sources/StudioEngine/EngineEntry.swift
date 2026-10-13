@@ -462,6 +462,8 @@ final class Engine {
     var prepared = manifest
     var rows = segments
     // A book that already prints 'ё' keeps its own 'е': no second, guessed placement of 'ё'.
+    let own = StressRules.userDictionary(NativeIO.string(request["stress_dictionary"]))
+    if !own.isEmpty { NativeIO.emit("log", ["message": "Свой словарь ударений: \(own.count) слов"]) }
     let bookHasYo = NativeStress.hasYo(NativeIO.objects(source["paragraphs"]).map { NativeIO.string($0["text"]) }.joined(separator: "\n"))
     NativeIO.emit("log", ["message": bookHasYo
       ? "В книге уже расставлена ё — повторная расстановка пропущена, ударения ставятся на буквы книги"
@@ -472,6 +474,8 @@ final class Engine {
         .appendingPathComponent("StudioStress")
       let stress = try NativeStress(resources: resources, helper: helper)
       stress.bookHasYo = bookHasYo
+      // Orthoepic norms, then the user's own words, win over the dictionary and the model.
+      stress.overrides = StressRules.orthoepy.merging(own) { $1 }
       let paragraphs = Dictionary(
         uniqueKeysWithValues: NativeIO.objects(source["paragraphs"]).map {
           (NativeIO.string($0["id"]), NativeIO.string($0["text"]))
@@ -490,7 +494,10 @@ final class Engine {
         rows[i]["tts_text"] = marked.text
         items.append(NativeDirector.StressItem(text: marked.text, context: full, disputes: marked.disputes))
       }
-      if request["cloud_stress"] as? Bool == true {
+      if request["cloud_stress"] as? Bool != true {
+        // Without the LLM check a rare homograph reading from Silero alone gives way to the common one.
+        for i in rows.indices { rows[i]["tts_text"] = NativeDirector.settle(items[i]) }
+      } else {
         // About 4000 characters per request instead of one request per line. The check is
         // optional: without an answer the dictionary and Silero results stay.
         var batches: [[Int]] = [[]]
@@ -513,6 +520,7 @@ final class Engine {
             throw CancellationError()
           } catch {
             NativeIO.emit("log", ["message": "Проверка ударений LLM пропущена · пакет \(number + 1) · " + error.localizedDescription])
+            for i in batch { rows[i]["tts_text"] = NativeDirector.settle(items[i]) }
           }
         }
       }
@@ -537,7 +545,8 @@ final class Engine {
         }
       }
       for i in rows.indices {
-        rows[i]["tts_text"] = ProperNames.apply(NativeIO.string(rows[i]["tts_text"]), stresses: stresses, keepYo: bookHasYo)
+        // The user's own words win over the LLM's name stresses too.
+        rows[i]["tts_text"] = ProperNames.apply(NativeIO.string(rows[i]["tts_text"]), stresses: stresses.merging(own) { $1 }, keepYo: bookHasYo)
       }
       NativeIO.emit("log", ["message": "Имена и названия: \(nameForms.filter { stresses[$0.form] != nil }.count) из \(nameForms.count) форм с ударением от LLM · "
         + nameForms.prefix(10).compactMap { stresses[$0.form] }.joined(separator: ", ")])

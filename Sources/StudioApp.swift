@@ -302,6 +302,10 @@ struct StoryCharacter: Identifiable {
     }
     /// Emotional lines levelled to their speaker (a shout keeps a moderate +3 dB); off keeps the
     /// model's own loudness of each emotion.
+    /// The user's own stresses, one word per line (за́мок or ё), for every book.
+    @Published var stressDictionary = UserDefaults.standard.string(forKey: "stressDictionary") ?? "" {
+        didSet { UserDefaults.standard.set(stressDictionary, forKey: "stressDictionary") }
+    }
     @Published var levelEmotions = UserDefaults.standard.object(forKey: "levelEmotions") as? Bool ?? true {
         didSet { UserDefaults.standard.set(levelEmotions, forKey: "levelEmotions") }
     }
@@ -601,7 +605,8 @@ struct StoryCharacter: Identifiable {
          "llm_provider": llmProvider, "deepseek_key": deepseekKey, "deepseek_model": deepseekModel,
          "web_search": webSearch, "cloud_stress": cloudStress,
          "music": music.isEmpty ? resources.appendingPathComponent("engine/resources/" + bundledMusic).path : music,
-         "music_enabled": musicEnabled, "music_volume": musicVolume, "pauses": pauses, "level_emotions": levelEmotions]
+         "music_enabled": musicEnabled, "music_volume": musicVolume, "pauses": pauses, "level_emotions": levelEmotions,
+         "stress_dictionary": stressDictionary]
     }
 
     func prepare() { launch(request("prepare")) }
@@ -1370,6 +1375,12 @@ struct SettingsView: View {
             Text(studio.keyStorageStatus).font(.caption).foregroundStyle(.secondary)
             Toggle("Разрешить веб-поиск при анализе характеров", isOn: $studio.webSearch)
             Toggle("LLM проверяет спорные ударения", isOn: $studio.cloudStress)
+            Text("Мой словарь ударений").font(.subheadline)
+            TextEditor(text: $studio.stressDictionary)
+                .font(.body.monospaced()).frame(height: 80)
+                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.secondary.opacity(0.3)))
+            Text("По слову в строке, со знаком ударения над гласной (за́мок) или с буквой ё. Эти ударения важнее словаря и модели во всех книгах.")
+                .font(.caption).foregroundStyle(.secondary)
             Text("Для ролей и характеров текст книги отправляется в " + (studio.llmProvider == "deepseek" ? "DeepSeek" : "Ollama") + ". Озвучка выполняется локально на Mac.").font(.caption).foregroundStyle(.secondary)
             Divider()
             BotSettingsView(bot: studio.bot)

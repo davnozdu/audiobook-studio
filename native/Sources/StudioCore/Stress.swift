@@ -296,6 +296,9 @@ public final class NativeStress {
   /// The book already prints 'ё' (set by the engine for the whole book): its 'е' is never turned
   /// into 'ё' again, and все/всё-type pairs need no guessing.
   public var bookHasYo = false
+  /// Fixed readings that win over the dictionary and the model: the orthoepic norms and the
+  /// user's own words (plain form → marked form).
+  public var overrides: [String: String] = [:]
   /// True when the text uses 'ё' throughout. Any 'ё' counts, unless the commonest words that
   /// always take it (ещё, её) are mostly printed with 'е': a lone 'ё' in a name or an epigraph does
   /// not make a book printed without 'ё' complete.
@@ -369,6 +372,10 @@ public final class NativeStress {
       // By scalars: String.contains("\u{301}") is false for "за́мок" (the mark joins its vowel),
       // and a stress already printed in the book must be kept as it is.
       guard !word.unicodeScalars.contains("\u{301}"), !word.unicodeScalars.contains("ё") else { continue }
+      if let fixed = overrides[Self.plain(word)] {
+        predictions[i] = fixed
+        continue
+      }
       // Personal names whose common-word twin has no 'ё' (Фёдора/федо́ра, Семёна/семена́).
       if !bookHasYo, let name = Self.yoNames[word], original.first?.isUppercase == true,
         !Self.sentenceStart(ns, before: m.range.location, prefix: prefix) {

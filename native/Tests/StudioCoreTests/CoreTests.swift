@@ -402,9 +402,36 @@ final class CoreTests: XCTestCase {
     XCTAssertEqual(NativeStress.transfer("осел", "осёл", keepYo: true), "осе\u{301}л")
     XCTAssertEqual(NativeStress.transfer("все", "всё", keepYo: true), "все")       // one vowel: no mark
     XCTAssertEqual(NativeStress.transfer("Федора", "Фёдора", keepYo: true), "Фе\u{301}дора")
-    XCTAssertEqual(NativeStress.transfer("замок", "за+мок".replacingOccurrences(of: "+", with: ""), keepYo: true), "замок")
+    XCTAssertEqual(NativeStress.transfer("замок", "замок", keepYo: true), "замок")
     XCTAssertEqual(ProperNames.apply("Пришел Семен.", stresses: ["семен": "Семён"], keepYo: true), "Пришел Семе\u{301}н.")
     XCTAssertEqual(ProperNames.apply("Пришел Семен.", stresses: ["семен": "Семён"]), "Пришел Семён.")
+  }
+  func testStressArbitrationPrefersCommonReadingsAndMajority() throws {
+    let uzhe = ["уже\u{301}", "у\u{301}же"], zamok = ["за\u{301}мок", "замо\u{301}к"]
+    // A rare reading needs all three votes; anything less gives the common one.
+    XCTAssertEqual(StressRules.arbitrate(uzhe, votes: ["у\u{301}же", nil, nil]), "уже\u{301}")
+    XCTAssertEqual(StressRules.arbitrate(uzhe, votes: ["у\u{301}же", "у\u{301}же", nil]), "уже\u{301}")
+    XCTAssertEqual(StressRules.arbitrate(uzhe, votes: ["у\u{301}же", "у\u{301}же", "у\u{301}же"]), "у\u{301}же")
+    XCTAssertEqual(StressRules.arbitrate(["Уже\u{301}", "У\u{301}же"], votes: ["У\u{301}же"]), "Уже\u{301}")   // case kept
+    // Ordinary homographs: the majority, a tie to the first vote (Silero); nothing named — nil.
+    XCTAssertEqual(StressRules.arbitrate(zamok, votes: ["за\u{301}мок", "замо\u{301}к", "замо\u{301}к"]), "замо\u{301}к")
+    XCTAssertEqual(StressRules.arbitrate(zamok, votes: ["за\u{301}мок", "замо\u{301}к", nil]), "за\u{301}мок")
+    XCTAssertNil(StressRules.arbitrate(zamok, votes: ["замок", nil, nil]))
+    // A second answer is asked for disagreement or any rare reading, not for agreement on a common one.
+    XCTAssertTrue(StressRules.needsSecondOpinion(zamok, votes: ["за\u{301}мок", "замо\u{301}к"]))
+    XCTAssertTrue(StressRules.needsSecondOpinion(uzhe, votes: ["у\u{301}же", "у\u{301}же"]))
+    XCTAssertFalse(StressRules.needsSecondOpinion(uzhe, votes: ["уже\u{301}", "уже\u{301}"]))
+    XCTAssertFalse(StressRules.needsSecondOpinion(zamok, votes: ["за\u{301}мок", nil]))
+    // Without the LLM: Silero's rare «у́же» in the text becomes «уже́»; other words stay.
+    let text = "Он у\u{301}же ушёл в за\u{301}мок."
+    let item = NativeDirector.StressItem(text: text, context: text, disputes: [1: uzhe, 3: zamok])
+    XCTAssertEqual(NativeDirector.settle(item), "Он уже\u{301} ушёл в за\u{301}мок.")
+    // Orthoepic norms and the user's own words.
+    XCTAssertEqual(StressRules.orthoepy["звонит"], "звони\u{301}т")
+    XCTAssertEqual(StressRules.orthoepy["началось"], "начало\u{301}сь")
+    let own = StressRules.userDictionary("за\u{301}мок\nЛе\u{301}бедев\nз+амок\nвойна\u{301}\nе\u{308}лка\n  творо\u{301}г \nвсё\nплохо\nдва\u{301}ра\u{301}за\nhello")
+    XCTAssertEqual(own, ["замок": "за\u{301}мок", "лебедев": "ле\u{301}бедев", "творог": "творо\u{301}г", "все": "всё",
+      "война": "война\u{301}", "елка": "ёлка"])
   }
   func testPausesFollowBoundaryKindAndSettings() throws {
     let rows: [Object] = [
