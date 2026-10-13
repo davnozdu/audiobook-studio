@@ -4,6 +4,14 @@ import Darwin
 @MainActor public final class RemoteEngine {
     var process: Process?, children: Set<Int32> = []
     var stopping = false
+    /// macOS background policy for the engine and the children it starts (the app's setting).
+    public var background = false { didSet { applyBackground() } }
+    func applyBackground() {
+        guard let p = process, p.isRunning else { return }
+        for pid in [p.processIdentifier] + Array(children) where pid > 1 {
+            _ = setpriority(PRIO_DARWIN_PROCESS, id_t(pid), background ? PRIO_DARWIN_BG : 0)
+        }
+    }
     public init() {}
     public var running: Bool { process?.isRunning == true }
     public func stop() {
@@ -32,7 +40,7 @@ import Darwin
         // One serial reader prevents termination from overtaking the last result event.
         do { try await withTaskCancellationHandler(operation: {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                do { try p.run(); try input.fileHandleForWriting.write(contentsOf: payload); try input.fileHandleForWriting.close() }
+                do { try p.run(); self.applyBackground(); try input.fileHandleForWriting.write(contentsOf: payload); try input.fileHandleForWriting.close() }
                 catch { stop(); continuation.resume(throwing: RemoteError("Не удалось запустить движок")); return }
                 DispatchQueue.global().async {
                     // Drain stderr concurrently so a full pipe cannot stall generation. Never log raw secrets.

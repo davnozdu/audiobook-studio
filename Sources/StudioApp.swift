@@ -441,13 +441,17 @@ struct StoryCharacter: Identifiable {
         NSApplication.shared.windows.first(where: { $0.canBecomeMain })?.makeKeyAndOrderFront(nil)
     }
 
+    /// macOS background policy, set by the system call itself (the one taskpolicy -b makes; the
+    /// tool moved from /usr/bin to /usr/sbin and the setting silently did nothing): lowest CPU
+    /// priority on the efficiency cores and throttled disk. Children started later inherit it.
+    /// The Telegram engine follows the same setting.
     func applyPriority() {
-        for pid in [process?.processIdentifier ?? 0] + Array(childPIDs) where pid > 0 {
-            let task = Process(); task.executableURL = URL(fileURLWithPath: "/usr/bin/taskpolicy")
-            task.arguments = [backgroundPriority ? "-b" : "-B", "-p", String(pid)]
-            task.standardOutput = FileHandle.nullDevice; task.standardError = FileHandle.nullDevice
-            try? task.run()
+        for pid in [process?.processIdentifier ?? 0] + Array(childPIDs) where pid > 1 {
+            if setpriority(PRIO_DARWIN_PROCESS, id_t(pid), backgroundPriority ? PRIO_DARWIN_BG : 0) != 0 {
+                appendLog("Не удалось изменить приоритет движка: " + String(cString: strerror(errno)))
+            }
         }
+        bot.engine.background = backgroundPriority
     }
 
     var resources: URL { Bundle.main.resourceURL! }
