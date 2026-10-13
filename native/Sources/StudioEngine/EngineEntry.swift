@@ -699,8 +699,14 @@ final class Engine {
     }
     NativeIO.stage("Сохранение аудиокниги и EPUB · " + destination)
     try fm.copyItem(at: result, to: external)
+    // Saved from the window: the files are named after the book ("Автор - Название.m4b"). Telegram
+    // keeps the result names and names the cloud copies itself.
+    let names = NativeProject.exportNames(base: request["named_files"] as? Bool == true ? NativeProject.exportBase(prepared) : "")
+    for (from, to) in names where from != to {
+      try fm.moveItem(at: external.appendingPathComponent(from), to: external.appendingPathComponent(to))
+    }
     NativeIO.stage("Проверка сохранённой книги и очистка временного аудио")
-    let cleanupFailures = try NativeProject.cleanupCompletedSpeech(project, exported: external)
+    let cleanupFailures = try NativeProject.cleanupCompletedSpeech(project, exported: external, names: names)
     NativeIO.emit("log", ["message": cleanupFailures.isEmpty
       ? "Результат проверен; временное аудио и кеш реплик удалены. Книга, разметка и образцы голосов сохранены."
       : "Результат проверен, но не удалось удалить временные файлы: " + cleanupFailures.joined(separator: ", ")])

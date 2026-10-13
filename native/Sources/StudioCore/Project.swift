@@ -64,7 +64,27 @@ public enum NativeProject {
   }
   /// Delete resumable speech only AFTER the final export has been verified.
   /// Return failures instead of hiding an incomplete cleanup from the user.
-  public static func cleanupCompletedSpeech(_ project: URL, exported: URL) throws -> [String] {
+  /// "Автор - Название" from the book's metadata for exported file names (the rule of
+  /// CloudClient.bookBase); empty when the book has neither.
+  public static func exportBase(_ manifest: Object) -> String {
+    let book = NativeIO.object(manifest["book"])
+    func clean(_ value: String) -> String {
+      value.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) && !"/\\:*?\"<>|".unicodeScalars.contains($0) }
+        .map(String.init).joined().trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    let t = clean(NativeIO.string(book["title"])), a = clean(NativeIO.string(book["author"]))
+    let combined = a.isEmpty ? t : t.isEmpty ? a : a + " - " + t
+    return String(combined.prefix(180)).trimmingCharacters(in: .whitespacesAndNewlines)
+  }
+  /// Result file → its name in the exported folder: "Автор - Название.m4b/.epub" for `base`,
+  /// the result's own names otherwise.
+  public static func exportNames(base: String) -> [String: String] {
+    var names = ["audiobook.m4b": "audiobook.m4b", "audiobook.epub": "audiobook.epub", "package-report.json": "package-report.json"]
+    if !base.isEmpty { names["audiobook.m4b"] = base + ".m4b"; names["audiobook.epub"] = base + ".epub" }
+    return names
+  }
+  public static func cleanupCompletedSpeech(_ project: URL, exported: URL,
+    names: [String: String] = exportNames(base: "")) throws -> [String] {
     let fm = FileManager.default, result = project.appendingPathComponent("result")
     let report = try NativeIO.load(result.appendingPathComponent("package-report.json"))
     guard NativeIO.string(report["state"]) == "complete" else {
@@ -72,7 +92,7 @@ public enum NativeProject {
     }
     for name in ["audiobook.m4b", "audiobook.epub", "package-report.json"] {
       guard try NativeIO.hashFile(result.appendingPathComponent(name))
-        == NativeIO.hashFile(exported.appendingPathComponent(name)) else {
+        == NativeIO.hashFile(exported.appendingPathComponent(names[name] ?? name)) else {
         throw StudioError("Очистка запрещена: копия результата не проверена · " + name)
       }
     }

@@ -117,6 +117,18 @@ final class CoreTests: XCTestCase {
     for name in keep { XCTAssertTrue(FileManager.default.fileExists(atPath: project.appendingPathComponent(name).path)) }
     XCTAssertTrue(FileManager.default.fileExists(atPath: m4b.path))
     XCTAssertTrue(try NativeProject.cleanupCompletedSpeech(project, exported: exported).isEmpty)
+    // Saved from the window the files carry the book's author and title.
+    let manifest: Object = ["book": ["title": "Сон смешного человека", "author": "Федор Михайлович Достоевский"]]
+    let base = NativeProject.exportBase(manifest)
+    XCTAssertEqual(base, "Федор Михайлович Достоевский - Сон смешного человека")
+    XCTAssertEqual(NativeProject.exportBase(["book": ["title": "A/B: C?", "author": ""]]), "AB C")
+    let names = NativeProject.exportNames(base: base)
+    XCTAssertEqual(names["audiobook.m4b"], base + ".m4b"); XCTAssertEqual(names["package-report.json"], "package-report.json")
+    for (from, to) in names where from != to {
+      try FileManager.default.moveItem(at: exported.appendingPathComponent(from), to: exported.appendingPathComponent(to))
+    }
+    XCTAssertThrowsError(try NativeProject.cleanupCompletedSpeech(project, exported: exported))
+    XCTAssertTrue(try NativeProject.cleanupCompletedSpeech(project, exported: exported, names: names).isEmpty)
   }
   func testBatchPlannerKeepsEveryIDAndSpeaker() throws {
     let rows: [Object] = (0..<15).map { i in

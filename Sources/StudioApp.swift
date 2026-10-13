@@ -643,11 +643,12 @@ struct StoryCharacter: Identifiable {
     func chooseBuildDestination() -> String? {
         let panel = NSSavePanel()
         panel.title = "Куда сохранить аудиокнигу?"
-        panel.message = "Будет создана папка с двумя файлами: audiobook.m4b и audiobook.epub. Укажите имя папки и место сохранения."
+        panel.message = "Будет создана папка с двумя файлами: M4B и EPUB, названными по автору и названию книги. Укажите имя папки и место сохранения."
         panel.prompt = "Создать папку и собрать"
         panel.canCreateDirectories = true
         panel.directoryURL = URL(fileURLWithPath: UserDefaults.standard.string(forKey: "buildOutputFolder") ?? output)
-        panel.nameFieldStringValue = URL(fileURLWithPath: book).deletingPathExtension().lastPathComponent + " — аудиокнига"
+        panel.nameFieldStringValue = bookBase().isEmpty
+            ? URL(fileURLWithPath: book).deletingPathExtension().lastPathComponent + " — аудиокнига" : bookBase()
         // An existing folder was confirmed with «Заменить» in the panel; the engine moves it to the
         // Trash only after the new book is assembled, so a failed build keeps it.
         guard panel.runModal() == .OK, let url = panel.url else { return nil }
@@ -656,10 +657,18 @@ struct StoryCharacter: Identifiable {
         return url.path
     }
 
+    /// "Автор - Название" from the project's book metadata, as the files will be named.
+    func bookBase() -> String {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: project).appendingPathComponent("roles/manifest.json")),
+              let manifest = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let book = manifest["book"] as? [String: Any] else { return "" }
+        return CloudClient.bookBase(title: book["title"] as? String ?? "", author: book["author"] as? String ?? "")
+    }
+
     func build(destination: String? = nil) {
         guard let destination = destination ?? chooseBuildDestination() else { return }
         saveThen {
-            var r = self.request("build"); r["destination"] = destination
+            var r = self.request("build"); r["destination"] = destination; r["named_files"] = true
             r["replace"] = FileManager.default.fileExists(atPath: destination)
             self.launch(r)
         }
