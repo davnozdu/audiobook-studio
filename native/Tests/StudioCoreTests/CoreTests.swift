@@ -426,6 +426,20 @@ final class CoreTests: XCTestCase {
     XCTAssertFalse(NativeIO.string(profile["speaking_style"]).isEmpty)
   }
 
+  func testReserveVoicesHaveOwnGenderAndTimbre() async throws {
+    let female = NativeDirector.reserveVoice(7, female: true), male = NativeDirector.reserveVoice(8)
+    XCTAssertEqual(NativeIO.string(female["id"]), "other_voices_female")
+    XCTAssertEqual(NativeIO.string(female["voice_gender"]), "female")
+    XCTAssertEqual(NativeIO.string(male["id"]), "other_voices")
+    // Without an answering LLM unresolved lines still get the male reserve voice,
+    // with its own neutral timbre rather than the narrator template.
+    let resolved = try await NativeDirector([:]).resolve(["voices": [["id": "narrator", "voice_id": "voice_001"]],
+      "segments": [["id": "seg000001", "paragraph_id": "p1", "speaker": NSNull(), "text": "— Да."]]],
+      source: ["paragraphs": [["id": "p1", "text": "— Да."]]])
+    let other = NativeIO.objects(resolved["voices"]).first { NativeIO.string($0["id"]) == "other_voices" }
+    XCTAssertEqual(NativeIO.string(NativeIO.objects(resolved["segments"])[0]["speaker"]), "other_voices")
+    XCTAssertTrue(NativeIO.string(NativeIO.object(other?["character_profile"])["voice_description"]).hasPrefix("Neutral adult"))
+  }
   func testEveryVoiceDetailInvalidatesDirection() throws {
     let profile: Object = [
       "age": "Пожилой, 70 лет", "personality": "Сдержанный",
