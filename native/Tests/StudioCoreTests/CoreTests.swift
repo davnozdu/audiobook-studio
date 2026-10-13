@@ -3,6 +3,149 @@ import XCTest
 @testable import StudioCore
 
 final class CoreTests: XCTestCase {
+  func testUnicodeNumbersAndOverlongOrdinalNeverTrap() throws {
+    let ru = try RussianText(rules)
+    for (unicode, ascii) in [("١٢:٣٠", "12:30"), ("٢٥%", "25%"), ("٢١.٠١.٢٠٢٤", "21.01.2024"), ("Стоимость １２ рублей.", "Стоимость 12 рублей."), ("Номер ١٢٣٤٥.", "Номер 12345.")] {
+      XCTAssertEqual(try ru.normalize(unicode), try ru.normalize(ascii))
+    }
+    XCTAssertEqual(try ru.normalize("https://example.invalid/١٢"), "https://example.invalid/١٢")
+    XCTAssertThrowsError(try ru.normalize("999999999999999999999999999-й"))
+    XCTAssertThrowsError(try ru.integer(Int.min))
+    XCTAssertEqual(RussianText.plural(Int.min, ["a", "b", "c"]), "c")
+  }
+  func testSACCOverflowIsRejectedBeforeArithmetic() throws {
+    let file = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? fm.removeItem(at: file) }
+    var data = Data("SACC".utf8)
+    data += NativeWAV.little(UInt32(1)); data += NativeWAV.little(UInt32(1))
+    data += NativeWAV.little(UInt64(Int.max)); data += NativeWAV.little(UInt64(Int.max))
+    try data.write(to: file)
+    XCTAssertThrowsError(try AccentDictionary(file))
+  }
+  func testPCMDeclaredSizeBoundsDecompression() throws {
+    let file = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? fm.removeItem(at: file) }
+    for (version, mode, algorithm) in [("SPC2", UInt8(3), NSData.CompressionAlgorithm.lzma), ("SPC1", UInt8(1), NSData.CompressionAlgorithm.lzfse)] {
+      var data = Data(version.utf8); data += NativeWAV.little(UInt32(24000)); data += NativeWAV.little(UInt64(1)); data.append(mode)
+      data += try (Data(count: 4 * 1024 * 1024) as NSData).compressed(using: algorithm) as Data
+      try data.write(to: file)
+      XCTAssertThrowsError(try SpeechPCM.read(file))
+    }
+  }
+  func testArchiveBudgetRejectsBeforeExtraction() throws {
+    let root = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? fm.removeItem(at: root) }
+    let source = root.appendingPathComponent("source"), archive = root.appendingPathComponent("book.zip"), output = root.appendingPathComponent("output")
+    try fm.createDirectory(at: source, withIntermediateDirectories: true)
+    try Data(count: 2 * 1024 * 1024).write(to: source.appendingPathComponent("large"))
+    try NativeIO.zip(source, to: archive)
+    XCTAssertThrowsError(try NativeIO.unpack(archive, to: output, budget: ArchiveBudget(expandedBytes: 1024, memberBytes: 1024, members: 100)))
+    XCTAssertFalse(fm.fileExists(atPath: output.path))
+    XCTAssertThrowsError(try NativeIO.archiveSize(archive, budget: ArchiveBudget(expandedBytes: 4 * 1024 * 1024, memberBytes: 4 * 1024 * 1024, members: 0)))
+    try NativeIO.unpack(archive, to: output)
+    XCTAssertEqual(try Data(contentsOf: output.appendingPathComponent("large")).count, 2 * 1024 * 1024)
+  }
+  func testZIP64ProjectBudgetReadsLargeDeclaredSizes() throws {
+    let file = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? fm.removeItem(at: file) }
+    let large: UInt64 = 5 * 1024 * 1024 * 1024
+    var directory = Data(count: 46)
+    directory.replaceSubrange(0..<4, with: NativeWAV.little(UInt32(0x02014b50)))
+    directory.replaceSubrange(24..<28, with: NativeWAV.little(UInt32.max))
+    directory.replaceSubrange(28..<30, with: NativeWAV.little(UInt16(1)))
+    directory.replaceSubrange(30..<32, with: NativeWAV.little(UInt16(12)))
+    directory.append(97); directory += NativeWAV.little(UInt16(1)); directory += NativeWAV.little(UInt16(8)); directory += NativeWAV.little(large)
+    var record = Data(count: 56)
+    record.replaceSubrange(0..<4, with: NativeWAV.little(UInt32(0x06064b50)))
+    record.replaceSubrange(4..<12, with: NativeWAV.little(UInt64(44)))
+    record.replaceSubrange(24..<32, with: NativeWAV.little(UInt64(1)))
+    record.replaceSubrange(32..<40, with: NativeWAV.little(UInt64(1)))
+    record.replaceSubrange(40..<48, with: NativeWAV.little(UInt64(directory.count)))
+    var locator = NativeWAV.little(UInt32(0x07064b50)); locator += NativeWAV.little(UInt32(0)); locator += NativeWAV.little(UInt64(directory.count)); locator += NativeWAV.little(UInt32(1))
+    var end = Data(count: 22)
+    end.replaceSubrange(0..<4, with: NativeWAV.little(UInt32(0x06054b50)))
+    end.replaceSubrange(8..<10, with: NativeWAV.little(UInt16.max)); end.replaceSubrange(10..<12, with: NativeWAV.little(UInt16.max))
+    end.replaceSubrange(12..<16, with: NativeWAV.little(UInt32.max)); end.replaceSubrange(16..<20, with: NativeWAV.little(UInt32.max))
+    try (directory + record + locator + end).write(to: file)
+    XCTAssertEqual(try NativeIO.archiveSize(file, budget: .project), large)
+    XCTAssertThrowsError(try NativeIO.archiveSize(file, budget: ArchiveBudget(expandedBytes: large, memberBytes: large - 1, members: 10)))
+  }
+  func testForgedZIPSizeCannotExpandUnbounded() throws {
+    let root = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? fm.removeItem(at: root) }
+    let source = root.appendingPathComponent("source"), archive = root.appendingPathComponent("bad.zip"), output = root.appendingPathComponent("output")
+    try fm.createDirectory(at: source, withIntermediateDirectories: true)
+    try Data(count: 2 * 1024 * 1024).write(to: source.appendingPathComponent("large"))
+    try NativeIO.zip(source, to: archive)
+    var data = try Data(contentsOf: archive)
+    // Lie only in the central directory; actual compressed body still expands to 2 MiB.
+    var index = 0
+    while index + 46 <= data.count {
+      if data[index..<index + 4] == Data([0x50, 0x4b, 0x01, 0x02]),
+         data[index + 24..<index + 28] == NativeWAV.little(UInt32(2 * 1024 * 1024)) {
+        data.replaceSubrange(index + 24..<index + 28, with: NativeWAV.little(UInt32(1)))
+      }
+      index += 1
+    }
+    try data.write(to: archive)
+    XCTAssertThrowsError(try NativeIO.unpack(archive, to: output))
+    XCTAssertFalse(fm.fileExists(atPath: output.path))
+  }
+  func testProjectRoundTripNeverRewritesBookText() throws {
+    let root = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? fm.removeItem(at: root) }
+    let project = root.appendingPathComponent("original"), archive = root.appendingPathComponent("book.studioproject")
+    try fm.createDirectory(at: project, withIntermediateDirectories: true)
+    let text = "studio-project://example"
+    try Data("book".utf8).write(to: project.appendingPathComponent("book.epub"))
+    let paragraph: Object = ["id": "p1", "chapter_id": "c1", "text": text]
+    let segment: Object = ["id": "s1", "paragraph_id": "p1", "chapter_id": "c1", "speaker": "v1", "text": text, "source": ["char_start": 0, "char_end": text.unicodeScalars.count]]
+    try NativeIO.write(project.appendingPathComponent("roles/source.json"), ["chapters": [["id": "c1"]], "paragraphs": [paragraph]])
+    try NativeIO.write(project.appendingPathComponent("roles/manifest.json"), ["book": ["input_sha256": try NativeIO.hashFile(project.appendingPathComponent("book.epub"))], "voices": [["id": "v1"]], "segments": [segment]])
+    let music = project.appendingPathComponent("music.wav"); try Data([1]).write(to: music)
+    try NativeProject.export(project, destination: archive, settings: ["music": music.path, "description": "studio-project://unchanged"])
+    let opened = try NativeProject.open(archive, output: root)
+    let (manifest, source) = try NativeProject.verify(opened)
+    XCTAssertEqual(NativeIO.string(NativeIO.objects(source["paragraphs"])[0]["text"]), text)
+    XCTAssertEqual(NativeIO.string(NativeIO.objects(manifest["segments"])[0]["text"]), text)
+    let settings = try NativeIO.load(opened.appendingPathComponent("studio-settings.json"))
+    XCTAssertEqual(settings["description"] as? String, "studio-project://unchanged")
+    XCTAssertTrue(fm.fileExists(atPath: NativeIO.string(settings["music"])), "music=\(settings["music"] ?? "missing"), root=\(opened.path)")
+  }
+  func testExportNamesFitFilesystemBytes() throws {
+    let root = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try fm.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? fm.removeItem(at: root) }
+    let title = String(repeating: "👨‍👩‍👧‍👦", count: 40)
+    let base = NativeProject.exportBase(["book": ["title": title]])
+    XCTAssertTrue(base.utf8.count <= 180)
+    try Data([1]).write(to: root.appendingPathComponent(base + ".m4b"))
+    let projectName = NativeIO.fileStem(String(repeating: "a", count: 250)) + "-12345678"
+    try fm.createDirectory(at: root.appendingPathComponent(projectName), withIntermediateDirectories: true)
+  }
+  func stressFixture(_ root: URL, script: String) throws -> URL {
+    try NativeIO.write(root.appendingPathComponent("silero/metadata.json"), [:])
+    try NativeIO.write(root.appendingPathComponent("resources/stress_dictionary.json"), [:])
+    var data = Data("SACC".utf8); data += NativeWAV.little(UInt32(1)); data += NativeWAV.little(UInt32(0)); data += NativeWAV.little(UInt64(28)); data += NativeWAV.little(UInt64(28))
+    try data.write(to: root.appendingPathComponent("resources/russian_accents_full.sacc"))
+    let helper = root.appendingPathComponent("helper")
+    try ("#!/bin/sh\n" + script).write(to: helper, atomically: true, encoding: .utf8)
+    try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helper.path)
+    return helper
+  }
+  func testStressRequestAndShutdownHaveDeadlines() throws {
+    let root = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? fm.removeItem(at: root) }
+    var helper = try stressFixture(root, script: "trap '' TERM\nread line\nprintf '{}\\n'\nwhile :; do /bin/sleep 1; done\n")
+    let start = Date()
+    do { let stress = try NativeStress(resources: root, helper: helper); _ = try stress.request(["test": 1]) }
+    XCTAssertTrue(Date().timeIntervalSince(start) < 4)
+    helper = try stressFixture(root, script: "trap '' TERM\nread line\nwhile :; do /bin/sleep 1; done\n")
+    let stress = try NativeStress(resources: root, helper: helper)
+    let before = Date()
+    XCTAssertThrowsError(try stress.request(["test": 1], timeout: 0.1))
+    XCTAssertTrue(Date().timeIntervalSince(before) < 2)
+  }
   func testPCMStreamPreservesExactOrderPausesAndFinalSamples() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }

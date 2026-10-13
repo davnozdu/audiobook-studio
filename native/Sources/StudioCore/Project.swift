@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 public enum NativeProject {
   /// Rebuild speech blocks inside contiguous spans of the same speaker, manner and paragraph.
@@ -74,7 +75,7 @@ public enum NativeProject {
     }
     let t = clean(NativeIO.string(book["title"])), a = clean(NativeIO.string(book["author"]))
     let combined = a.isEmpty ? t : t.isEmpty ? a : a + " - " + t
-    return String(combined.prefix(180)).trimmingCharacters(in: .whitespacesAndNewlines)
+    return NativeIO.fileStem(combined)
   }
   /// Result file → its name in the exported folder: "Автор - Название.m4b/.epub" for `base`,
   /// the result's own names otherwise.
@@ -215,10 +216,24 @@ public enum NativeProject {
     return value
   }
   static func rewrite(_ root: URL, _ change: (String) throws -> String) throws {
-    let enumerator = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)!
+    guard let resolved = realpath(root.path, nil) else { throw StudioError("Не удалось прочитать проект") }
+    let canonical = URL(fileURLWithPath: String(cString: resolved)); free(resolved)
+    guard let enumerator = FileManager.default.enumerator(at: canonical, includingPropertiesForKeys: nil) else { throw StudioError("Не удалось прочитать проект") }
     for case let file as URL in enumerator where file.pathExtension == "json" {
-      let value = try JSONSerialization.jsonObject(with: Data(contentsOf: file))
-      try NativeIO.write(file, transform(value, change))
+      let relative = file.pathComponents.dropFirst(canonical.pathComponents.count).joined(separator: "/")
+      guard ["roles/manifest.json", "studio-settings.json"].contains(relative) else { continue }
+      var value = try NativeIO.load(file)
+      if relative == "roles/manifest.json" {
+        var voices = NativeIO.objects(value["voices"])
+        for index in voices.indices {
+          var ref = NativeIO.object(voices[index]["custom_reference"])
+          if let path = ref["path"] as? String { ref["path"] = try change(path); voices[index]["custom_reference"] = ref }
+        }
+        value["voices"] = voices
+      } else if relative == "studio-settings.json" {
+        if let music = value["music"] as? String { value["music"] = try change(music) }
+      } else { continue }
+      try NativeIO.write(file, value)
     }
   }
   public static func export(_ project: URL, destination: URL, settings: Object) throws {
@@ -272,9 +287,9 @@ public enum NativeProject {
   }
   public static func open(_ archive: URL, output: URL) throws -> URL {
     let root = output.appendingPathComponent(
-      archive.deletingPathExtension().lastPathComponent + "-" + UUID().uuidString.prefix(8))
+      NativeIO.fileStem(archive.deletingPathExtension().lastPathComponent) + "-" + UUID().uuidString.prefix(8))
     do {
-      try NativeIO.unpack(archive, to: root)
+      try NativeIO.unpack(archive, to: root, budget: .project)
       try rewrite(root) { text in
         guard text.hasPrefix("studio-project://") else { return text }
         let relative = String(text.dropFirst("studio-project://".count))

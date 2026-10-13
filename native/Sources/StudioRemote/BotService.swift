@@ -22,7 +22,7 @@ import Combine
             if FileManager.default.fileExists(atPath: file.path) { config = try JSONDecoder().decode(RemoteConfig.self, from: Data(contentsOf: file)) }
             if config.dropboxID.isEmpty { config.dropboxID = RemoteRegistration.values["dropboxID"] ?? "" }
             if config.googleID.isEmpty { config.googleID = RemoteRegistration.values["googleID"] ?? "" }
-            state = try store.load(); state.recover(); try persist()
+            state = try store.load(); try store.validateJobFolders(state); state.recover(); try persist()
             // Books already in the cloud need no local copy (also cleans jobs finished by older versions).
             for job in state.jobs where job.phase == .complete { Self.removeLocalCopy(store.jobFolder(job.id)) }
         } catch { fatal = true; message = "Не удалось прочитать очередь. Файл сохранён; автоматический запуск заблокирован." }
@@ -417,6 +417,7 @@ import Combine
         }
     }
     func execute(_ id: String) async throws {
+        try store.validateJobFolders(state)
         let folder = store.jobFolder(id), result = folder.appendingPathComponent("export")
         let input = folder.appendingPathComponent("input." + (Self.bookExtension(try job(id).name) ?? "epub"))
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)

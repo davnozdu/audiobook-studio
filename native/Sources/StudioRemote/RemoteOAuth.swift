@@ -80,6 +80,18 @@ public struct RemoteConfig: Codable {
         guard let c = continuation else { return }
         continuation = nil; timeout?.cancel(); listener?.cancel(); c.resume(with: result)
     }
+    func requestLine(_ connection: NWConnection, buffer: Data = Data(), completion: @escaping (Data?) -> Void) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: max(1, 8192 - buffer.count)) { [weak self] data, _, done, error in
+            Task { @MainActor in
+                guard let self else { connection.cancel(); return }
+                var accumulated = buffer; accumulated.append(data ?? Data())
+                if let end = accumulated.range(of: Data("\r\n".utf8)) {
+                    completion(Data(accumulated.prefix(upTo: end.lowerBound)))
+                } else if error != nil || done || accumulated.count >= 8192 { completion(nil) }
+                else { self.requestLine(connection, buffer: accumulated, completion: completion) }
+            }
+        }
+    }
     func receive(authorization: URL, state: String) async throws -> String {
         try await withTaskCancellationHandler(operation: {
             try await withCheckedThrowingContinuation { c in
@@ -97,7 +109,7 @@ public struct RemoteConfig: Codable {
                     } }
                     server.newConnectionHandler = { [weak self] connection in
                         connection.start(queue: .main)
-                        connection.receive(minimumIncompleteLength: 1, maximumLength: 8192) { data, _, _, _ in
+                        Task { @MainActor in self?.requestLine(connection) { data in
                             Task { @MainActor in
                                 guard let self else { connection.cancel(); return }
                                 let line = String(data: data ?? Data(), encoding: .utf8)?.components(separatedBy: "\r\n").first ?? ""
@@ -112,7 +124,7 @@ public struct RemoteConfig: Codable {
                                 connection.send(content: response, completion: .contentProcessed { _ in connection.cancel() })
                                 if valid { self.finish(code.isEmpty ? .failure(RemoteError("Авторизация отменена")) : .success(code)) }
                             }
-                        }
+                        } }
                     }
                     server.start(queue: .main)
                     timeout = Task { [weak self] in

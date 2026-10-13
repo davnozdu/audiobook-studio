@@ -141,7 +141,7 @@ public struct NativeModels {
         Thread.sleep(forTimeInterval: 1)
       } while process.isRunning
       process.waitUntilExit()
-      NativeIO.emit("child", ["pid": 0])
+      NativeIO.emit("child", ["pid": process.processIdentifier, "ended": true])
       if process.terminationStatus != 0 {
         // curl 33: server rejected resuming; 416: stale range beyond the remote file.
         let detail = (try? String(contentsOf: errorURL, encoding: .utf8)) ?? ""

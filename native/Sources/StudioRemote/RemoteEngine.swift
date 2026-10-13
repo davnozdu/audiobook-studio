@@ -2,16 +2,18 @@ import Foundation
 import Darwin
 
 @MainActor public final class RemoteEngine {
-    var process: Process?, child: Int32 = 0
+    var process: Process?, children: Set<Int32> = []
+    var stopping = false
     public init() {}
     public var running: Bool { process?.isRunning == true }
     public func stop() {
-        guard let p = process, p.isRunning else { return }
-        let pid = p.processIdentifier, child = self.child
-        if child > 0 { kill(-child, SIGTERM); kill(child, SIGTERM) }
-        kill(-pid, SIGTERM); p.terminate()
+        guard let p = process else { return }
+        stopping = true
+        let pid = p.processIdentifier, children = self.children
+        for child in children { kill(-child, SIGTERM); kill(child, SIGTERM) }
+        if p.isRunning { kill(-pid, SIGTERM); p.terminate() }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-            if child > 0, kill(-child, 0) == 0 { kill(-child, SIGKILL) }
+            for child in children { if kill(-child, 0) == 0 { kill(-child, SIGKILL) }; if kill(child, 0) == 0 { kill(child, SIGKILL) } }
             if kill(-pid, 0) == 0 { kill(-pid, SIGKILL) }
             if p.isRunning { kill(pid, SIGKILL) }
         }
@@ -19,11 +21,11 @@ import Darwin
     public func run(executable: URL, request: [String: Any], temporary: URL,
                     event: @escaping ([String: Any]) -> Void) async throws {
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: temporary); process = nil; child = 0 }
+        defer { try? FileManager.default.removeItem(at: temporary); process = nil; children.removeAll() }
         let payload = try RemoteJSON.data(request)
         var buffer = Data(), reportedError = false
         let p = Process(), input = Pipe(), output = Pipe(), errors = Pipe()
-        process = p; p.executableURL = executable; p.standardInput = input; p.standardOutput = output; p.standardError = errors
+        stopping = false; process = p; p.executableURL = executable; p.standardInput = input; p.standardOutput = output; p.standardError = errors
         var env = ProcessInfo.processInfo.environment; env.removeValue(forKey: "OLLAMA_API_KEY")
         env["TMPDIR"] = temporary.path + "/"; env["AUDIOBOOK_FFMPEG"] = request["ffmpeg"] as? String; env["AUDIOBOOK_FFPROBE"] = request["ffprobe"] as? String
         p.environment = env; p.qualityOfService = .userInitiated
@@ -43,7 +45,12 @@ import Darwin
                             while let newline = buffer.firstIndex(of: 10) {
                                 let line = buffer.prefix(upTo: newline); buffer.removeSubrange(...newline)
                                 guard let object = try? RemoteJSON.object(Data(line)) else { continue }
-                                if object["type"] as? String == "child" { self.child = (object["pid"] as? NSNumber)?.int32Value ?? 0 }
+                                if object["type"] as? String == "child", let n = object["pid"] as? NSNumber,
+                                   n.int64Value > 1, n.int64Value <= Int64(Int32.max) {
+                                    let pid = n.int32Value
+                                    if object["ended"] as? Bool == true { self.children.remove(pid) }
+                                    else { self.children.insert(pid); if self.stopping { self.stop() } }
+                                }
                                 if object["type"] as? String == "error" { reportedError = true }
                                 event(object)
                             }
@@ -58,13 +65,17 @@ import Darwin
             }
         }, onCancel: { Task { @MainActor in self.stop() } })
         } catch {
-            if Task.isCancelled { await withCheckedContinuation { c in DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) { c.resume() } }; throw CancellationError() }
+            if !children.isEmpty { stop() }
+            if Task.isCancelled || !children.isEmpty { await withCheckedContinuation { c in DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) { c.resume() } } }
+            if Task.isCancelled { throw CancellationError() }
             throw error
         }
-        if Task.isCancelled {
+        if !children.isEmpty { stop() }
+        if Task.isCancelled || !children.isEmpty {
             // Let process-group cancellation finish before releasing the exclusive engine reservation.
             await withCheckedContinuation { c in DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) { c.resume() } }
-            throw CancellationError()
+            if Task.isCancelled { throw CancellationError() }
+            throw RemoteError("Движок оставил незавершённые дочерние процессы. Обработка остановлена.")
         }
     }
 }

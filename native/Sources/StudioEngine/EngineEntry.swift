@@ -186,14 +186,14 @@ final class Engine {
         throw StudioError("Выберите книгу EPUB или FB2")
       }
       let project = URL(fileURLWithPath: NativeIO.string(request["output"])).appendingPathComponent(
-        NativeFB2.baseName(book) + "-" + UUID().uuidString.prefix(8))
+        NativeIO.fileStem(NativeFB2.baseName(book)) + "-" + UUID().uuidString.prefix(8))
       try fm.createDirectory(
         at: project.appendingPathComponent("roles"), withIntermediateDirectories: true)
       if fb2 {
         // The original stays untouched beside a working EPUB copy; the read-along EPUB is
         // still assembled at the end from the spoken text and audio.
         NativeIO.stage("Чтение FB2 и подготовка рабочей копии EPUB")
-        try fm.copyItem(at: book, to: project.appendingPathComponent("original-" + book.lastPathComponent))
+        try fm.copyItem(at: book, to: project.appendingPathComponent("original-" + NativeIO.fileStem(book.deletingPathExtension().lastPathComponent) + "." + book.pathExtension))
         try NativeFB2.convert(book, to: project.appendingPathComponent("book.epub"))
       } else {
         try fm.copyItem(at: book, to: project.appendingPathComponent("book.epub"))

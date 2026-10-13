@@ -55,16 +55,19 @@ public final class RemoteKeychain: RemoteSecrets {
 public final class RemoteHTTP {
     public let session: URLSession
     public init(session: URLSession = .shared) { self.session = session }
-    public func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+    public func send(_ request: URLRequest, retrySafe: Bool? = nil) async throws -> (Data, HTTPURLResponse) {
+        // A lost POST response does not establish whether its side effect happened.
+        let safe = retrySafe ?? ["GET", "HEAD", "PUT", "DELETE", "OPTIONS"].contains(request.httpMethod ?? "GET")
+        let attempts = safe ? 4 : 1
         var last: Error = RemoteError("Сервис временно недоступен")
-        for attempt in 0..<4 {
+        for attempt in 0..<attempts {
             try Task.checkCancellation()
             do {
                 let (data, response) = try await session.data(for: request)
                 guard let http = response as? HTTPURLResponse else { throw RemoteError("Некорректный HTTP-ответ") }
                 if http.statusCode != 429 && http.statusCode < 500 { return (data, http) }
                 last = RemoteError("Сервис временно недоступен (HTTP \(http.statusCode))")
-                if attempt < 3 {
+                if attempt + 1 < attempts {
                     let delay = min(30, max(1, Double(http.value(forHTTPHeaderField: "Retry-After") ?? "") ?? pow(2, Double(attempt))))
                     try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000)); continue
                 }
@@ -73,7 +76,7 @@ public final class RemoteHTTP {
                 if Task.isCancelled { throw CancellationError() }
                 // Never surface request URLs: Telegram URLs contain the bot token.
                 last = RemoteError("Сетевая ошибка. Задание и готовые файлы сохранены.")
-                if attempt < 3 { try await Task.sleep(nanoseconds: UInt64(1 << attempt) * 1_000_000_000) }
+                if attempt + 1 < attempts { try await Task.sleep(nanoseconds: UInt64(1 << attempt) * 1_000_000_000) }
             }
         }
         throw last
@@ -98,16 +101,44 @@ public final class TelegramClient {
         guard object["ok"] as? Bool == true else { throw RemoteError("Telegram отклонил запрос. Проверьте подключение бота.") }
         return object["result"] ?? [:]
     }
-    public func send(_ reply: RemoteReply) async throws {
-        var body: [String: Any] = ["chat_id": reply.chatID, "text": String(reply.text.prefix(3900)), "link_preview_options": ["is_disabled": true]]
-        if let parseMode = reply.parseMode { body["parse_mode"] = parseMode }
-        if !reply.buttons.isEmpty {
-            body["reply_markup"] = ["inline_keyboard": reply.buttons.map { $0.map { button -> [String: String] in
-                if let url = button.url { return ["text": button.text, "url": url] }
-                return ["text": button.text, "callback_data": button.data]
-            } }]
+    /// Long HTML falls back to plain text before splitting, preserving link targets.
+    static func messageParts(_ reply: RemoteReply) -> [(text: String, mode: String?)] {
+        if reply.text.utf16.count <= 3900 { return [(reply.text, reply.parseMode)] }
+        var text = reply.text
+        if reply.parseMode == "HTML" {
+            let links = try! NSRegularExpression(pattern: #"<a\s+href="([^"]*)">(.*?)</a>"#, options: [.dotMatchesLineSeparators])
+            let ns = text as NSString
+            for match in links.matches(in: text, range: NSRange(location: 0, length: ns.length)).reversed() {
+                let replacement = ns.substring(with: match.range(at: 2)) + " · " + ns.substring(with: match.range(at: 1))
+                text = (text as NSString).replacingCharacters(in: match.range, with: replacement)
+            }
+            text = text.replacingOccurrences(of: "<[^>]*>", with: "", options: .regularExpression)
+            for (entity, plain) in [("&lt;", "<"), ("&gt;", ">"), ("&quot;", "\""), ("&#39;", "'"), ("&amp;", "&")] {
+                text = text.replacingOccurrences(of: entity, with: plain)
+            }
         }
-        _ = try await call("sendMessage", body)
+        var parts: [(text: String, mode: String?)] = [], current = "", length = 0
+        for scalar in text.unicodeScalars {
+            let width = scalar.value > 0xffff ? 2 : 1
+            if length + width > 3900 { parts.append((current, nil)); current = ""; length = 0 }
+            current.unicodeScalars.append(scalar); length += width
+        }
+        if !current.isEmpty { parts.append((current, nil)) }
+        return parts
+    }
+    public func send(_ reply: RemoteReply) async throws {
+        let parts = Self.messageParts(reply)
+        for (index, part) in parts.enumerated() {
+            var body: [String: Any] = ["chat_id": reply.chatID, "text": part.text, "link_preview_options": ["is_disabled": true]]
+            if let mode = part.mode { body["parse_mode"] = mode }
+            if index == parts.count - 1 && !reply.buttons.isEmpty {
+                body["reply_markup"] = ["inline_keyboard": reply.buttons.map { $0.map { button -> [String: String] in
+                    if let url = button.url { return ["text": button.text, "url": url] }
+                    return ["text": button.text, "callback_data": button.data]
+                } }]
+            }
+            _ = try await call("sendMessage", body)
+        }
     }
     public func download(_ fileID: String, to destination: URL) async throws {
         let file = try await call("getFile", ["file_id": fileID]) as? [String: Any] ?? [:]

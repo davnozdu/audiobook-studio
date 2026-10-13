@@ -12,7 +12,8 @@ import CryptoKit
             if expires < Date() { access = try await oauth.token(provider, config: config); expires = Date().addingTimeInterval(3000) }
             var r = URLRequest(url: url); r.httpMethod = method; r.httpBody = data; r.timeoutInterval = 180
             r.setValue("Bearer " + access, forHTTPHeaderField: "Authorization"); headers.forEach { r.setValue($1, forHTTPHeaderField: $0) }
-            let result = try await http.send(r)
+            let safePost = ["get_metadata", "list_folder", "continue", "list_shared_links", "append_v2", "finish"].contains(url.lastPathComponent)
+            let result = try await http.send(r, retrySafe: method != "POST" || safePost)
             if result.1.statusCode == 401 && attempt == 0 { expires = .distantPast; continue }
             return result
         }
@@ -156,7 +157,13 @@ import CryptoKit
         }
         let t = clean(title), a = clean(author)
         let combined = a.isEmpty ? t : t.isEmpty ? a : a + " - " + t
-        return String(combined.prefix(180)).trimmingCharacters(in: .whitespacesAndNewlines)
+        var result = ""
+        for character in combined {
+            let part = String(character)
+            if result.utf8.count + part.utf8.count > 180 { break }
+            result += part
+        }
+        return result.trimmingCharacters(in: .whitespacesAndNewlines)
     }
     func googleRoot(create: Bool) async throws -> String {
         let name = "Audiobook Studio"
@@ -211,9 +218,35 @@ import CryptoKit
         guard hash.size > 0 else { throw RemoteError("Пустой файл результата") }
         let fingerprint = String(hash.size) + ":" + (provider == .dropbox ? hash.dropbox : hash.md5)
         var bound = saved
-        if !bound.fingerprint.isEmpty && bound.fingerprint != fingerprint { bound = RemoteUpload() }
+        if bound.fingerprint != fingerprint {
+            // Keep a legacy in-progress session (its server offset is queried), but never its completion claim.
+            if bound.fingerprint.isEmpty && bound.link.isEmpty && bound.fileID.isEmpty {
+                bound.offset = 0
+            } else { bound = RemoteUpload() }
+        }
         bound.fingerprint = fingerprint; try checkpoint(bound)
-        if !bound.link.isEmpty { return bound }
+        if !bound.link.isEmpty {
+            if provider == .googleDrive, !bound.fileID.isEmpty {
+                var info = URLComponents(string: "https://www.googleapis.com/drive/v3/files/" + bound.fileID)!
+                info.queryItems = [.init(name: "fields", value: "id,size,md5Checksum,trashed")]
+                let (data, response) = try await request(info.url!, method: "GET")
+                if response.statusCode == 200 {
+                    let metadata = try RemoteJSON.object(data)
+                    if metadata["trashed"] as? Bool != true,
+                       Int64(metadata["size"] as? String ?? "") == hash.size,
+                       metadata["md5Checksum"] as? String == hash.md5,
+                       metadata["id"] as? String == bound.fileID {
+                        bound.link = "https://drive.google.com/file/d/" + bound.fileID + "/view"
+                        bound.offset = hash.size; try checkpoint(bound); return bound
+                    }
+                } else if response.statusCode != 404 { throw RemoteError("Не удалось проверить ранее загруженный файл") }
+                bound = RemoteUpload(); bound.fingerprint = fingerprint
+            } else {
+                // Dropbox always checks the current path and hash below, even for a saved link.
+                bound.link = ""
+            }
+            try checkpoint(bound)
+        }
         let name = remoteName?.isEmpty == false ? remoteName! : file.lastPathComponent
         if provider == .dropbox { return try await dropbox(file, folder, name, hash, bound, checkpoint) }
         return try await google(file, folder, name, hash, bound, checkpoint)
@@ -223,10 +256,20 @@ import CryptoKit
         var state = saved
         let path = folder + "/" + remoteName
         // Recover a completed commit before starting/restarting a session. Verify content, never accept another file.
-        if let metadata = try? await api("files/get_metadata", ["path": path]),
-           RemoteJSON.integer(metadata, "size") == hash.size, RemoteJSON.string(metadata, "content_hash") == hash.dropbox {
-            state.fileID = RemoteJSON.string(metadata, "id"); state.offset = hash.size
+        let (metadataData, metadataStatus) = try await request(URL(string: "https://api.dropboxapi.com/2/files/get_metadata")!, method: "POST",
+            data: RemoteJSON.data(["path": path]), headers: ["Content-Type": "application/json"])
+        guard metadataStatus.statusCode == 200 || metadataStatus.statusCode == 409 else {
+            throw RemoteError("Не удалось проверить ранее загруженный файл Dropbox")
         }
+        let metadata = metadataStatus.statusCode == 200 ? try RemoteJSON.object(metadataData) : [:]
+        if RemoteJSON.integer(metadata, "size") == hash.size, RemoteJSON.string(metadata, "content_hash") == hash.dropbox,
+           !RemoteJSON.string(metadata, "id").isEmpty {
+            state.fileID = RemoteJSON.string(metadata, "id"); state.offset = hash.size
+        } else {
+            if !state.fileID.isEmpty { state.session = ""; state.offset = 0 }
+            state.fileID = ""; state.link = ""
+        }
+        try checkpoint(state)
         let handle = try FileHandle(forReadingFrom: file); defer { try? handle.close() }
         var resets = 0
         while state.fileID.isEmpty {
@@ -294,7 +337,7 @@ import CryptoKit
     }
     func google(_ file: URL, _ folder: String, _ remoteName: String, _ hash: (size: Int64, md5: String, dropbox: String), _ saved: RemoteUpload,
                 _ checkpoint: (RemoteUpload) throws -> Void) async throws -> RemoteUpload {
-        var state = saved; var restarts = 0
+        var state = saved; var restarts = 0; var stalled = 0; var highWater: Int64 = -1
         let handle = try FileHandle(forReadingFrom: file); defer { try? handle.close() }
         func verified(_ data: Data) throws {
             let metadata = try RemoteJSON.object(data)
@@ -347,6 +390,10 @@ import CryptoKit
             if uploaded.statusCode == 200 || uploaded.statusCode == 201 { try verified(result); break }
             guard uploaded.statusCode == 308 else { throw RemoteError("Загрузка Google Drive: HTTP \(uploaded.statusCode). Прогресс сохранён.") }
             state.offset = try Self.googleOffset(uploaded.value(forHTTPHeaderField: "Range"), size: hash.size); try checkpoint(state)
+            if state.offset > highWater { highWater = state.offset; stalled = 0 }
+            else { stalled += 1 }
+            guard stalled < 4 else { throw RemoteError("Google Drive не продвигает загрузку. Файлы и прогресс сохранены; повторите позже.") }
+            if stalled > 0 { try await Task.sleep(nanoseconds: UInt64(stalled) * 1_000_000_000) }
         }
         return state
     }

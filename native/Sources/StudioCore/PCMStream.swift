@@ -8,9 +8,11 @@ extension NativeIO {
   /// SIGTERM, then SIGKILL if the consumer is still alive after `grace` seconds: a hung or
   /// TERM-ignoring child must not keep the failed build waiting forever.
   static func stop(_ process: Process, grace: TimeInterval) {
-    if process.isRunning { process.terminate() }
+    guard process.processIdentifier > 1 else { return }
+    if process.isRunning { kill(-process.processIdentifier, SIGTERM); process.terminate() }
     let deadline = Date().addingTimeInterval(grace)
     while process.isRunning, Date() < deadline { usleep(20_000) }
+    if kill(-process.processIdentifier, 0) == 0 { kill(-process.processIdentifier, SIGKILL) }
     if process.isRunning { kill(process.processIdentifier, SIGKILL) }
     process.waitUntilExit()
   }
@@ -33,7 +35,7 @@ extension NativeIO {
     process.standardOutput = FileHandle.nullDevice; process.standardError = errors
     try process.run()
     emit("child", ["pid": process.processIdentifier])
-    defer { emit("child", ["pid": 0]) }
+    defer { emit("child", ["pid": process.processIdentifier, "ended": true]) }
     try input.fileHandleForReading.close()
     do {
       try produce(input.fileHandleForWriting)

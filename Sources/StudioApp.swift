@@ -356,7 +356,7 @@ struct StoryCharacter: Identifiable {
         didSet { UserDefaults.standard.set(backgroundPriority, forKey: "backgroundPriority"); applyPriority() }
     }
     private let menuBar = MenuBarController()
-    private var childPID: Int32 = 0
+    private var childPIDs: Set<Int32> = []
     private var audioPlayer: AVAudioPlayer?
     private var playbackCompletion: PlaybackCompletion?
     private var playingAudio = ""
@@ -433,7 +433,7 @@ struct StoryCharacter: Identifiable {
     }
 
     func applyPriority() {
-        for pid in [process?.processIdentifier ?? 0, childPID] where pid > 0 {
+        for pid in [process?.processIdentifier ?? 0] + Array(childPIDs) where pid > 0 {
             let task = Process(); task.executableURL = URL(fileURLWithPath: "/usr/bin/taskpolicy")
             task.arguments = [backgroundPriority ? "-b" : "-B", "-p", String(pid)]
             task.standardOutput = FileHandle.nullDevice; task.standardError = FileHandle.nullDevice
@@ -776,7 +776,7 @@ struct StoryCharacter: Identifiable {
     func launch(_ request: [String: Any], after: (() -> Void)? = nil) {
         guard !busy else { return }
         busy = true; cancelling = false; receivedError = false; pending = after
-        childPID = 0; updateMenuBar()
+        childPIDs.removeAll(); updateMenuBar()
         fraction = 0; speed = nil; eta = nil; completed = ""; buffer = Data()
         if request["action"] as? String == "build" { remainingSynthesisSeconds = nil }
         syncWake()
@@ -822,7 +822,7 @@ struct StoryCharacter: Identifiable {
             errors.fileHandleForReading.readabilityHandler = nil
             DispatchQueue.main.async {
                 self.consume(rest)
-                self.busy = false; self.process = nil; self.childPID = 0; self.updateMenuBar()
+                self.busy = false; self.process = nil; self.childPIDs.removeAll(); self.updateMenuBar()
                 self.syncWake()
                 self.appendLog("Движок завершён · память моделей и GPU освобождена")
                 let next = self.pending; self.pending = nil
@@ -898,7 +898,12 @@ struct StoryCharacter: Identifiable {
                 generatedText = event["text"] as? String ?? ""
                 generatedDescription = event["description"] as? String ?? ""
                 if let cid = event["character"] as? String, !cid.isEmpty { previewByCharacter[cid] = generatedSample }
-            case "child": childPID = (event["pid"] as? NSNumber)?.int32Value ?? 0; applyPriority()
+            case "child":
+                if let n = event["pid"] as? NSNumber, n.int64Value > 1, n.int64Value <= Int64(Int32.max) {
+                    if event["ended"] as? Bool == true { childPIDs.remove(n.int32Value) }
+                    else { childPIDs.insert(n.int32Value) }
+                }
+                applyPriority()
             case "project": project = event["path"] as? String ?? project
             case "progress":
                 status = event["message"] as? String ?? status; fraction = event["fraction"] as? Double ?? 0
@@ -937,12 +942,12 @@ struct StoryCharacter: Identifiable {
     func stopProcessGroup() {
         guard let p = process, p.isRunning else { return }
         let pid = p.processIdentifier
-        let child = childPID
-        if child > 0 { kill(-child, SIGTERM); kill(child, SIGTERM) }
+        let children = childPIDs
+        for child in children { kill(-child, SIGTERM); kill(child, SIGTERM) }
         kill(-pid, SIGTERM); p.terminate()
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
             // NSTask creates separate process groups for the worker and its active child.
-            if child > 0, kill(-child, 0) == 0 { kill(-child, SIGKILL) }
+            for child in children { if kill(-child, 0) == 0 { kill(-child, SIGKILL) }; if kill(child, 0) == 0 { kill(child, SIGKILL) } }
             if kill(-pid, 0) == 0 { kill(-pid, SIGKILL) }
             if p.isRunning { p.interrupt(); kill(pid, SIGKILL) }
         }

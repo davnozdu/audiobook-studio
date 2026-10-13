@@ -94,12 +94,23 @@ public enum NativeIO {
     }
     return String(String.UnicodeScalarView(scalars[start..<end]))
   }
+  /// Reserve room for extensions/suffixes; both UTF-8 and UTF-16 stay within FS limits.
+  public static func fileStem(_ text: String, maxBytes: Int = 180) -> String {
+    var result = ""
+    for character in text {
+      let part = String(character)
+      if result.utf8.count + part.utf8.count > maxBytes { break }
+      result += part
+    }
+    return result.trimmingCharacters(in: .whitespacesAndNewlines)
+  }
   public static func xml(_ text: String) -> String {
     text.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;")
       .replacingOccurrences(of: ">", with: "&gt;").replacingOccurrences(of: "\"", with: "&quot;")
   }
   public static func capture(
-    _ executable: URL, _ arguments: [String], cwd: URL? = nil, events: Bool = true
+    _ executable: URL, _ arguments: [String], cwd: URL? = nil, events: Bool = true,
+    monitor: (() throws -> Void)? = nil
   ) throws -> (Data, Data) {
     let process = Process()
     let output = Pipe()
@@ -121,6 +132,20 @@ public enum NativeIO {
       }
     }
     try process.run()
+    let monitorLock = NSLock()
+    var monitorFinished = false, monitorError: Error?
+    let timer = monitor == nil ? nil : DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+    timer?.schedule(deadline: .now(), repeating: .milliseconds(100))
+    timer?.setEventHandler {
+      monitorLock.lock(); defer { monitorLock.unlock() }
+      guard !monitorFinished else { return }
+      do { try monitor?() } catch {
+        monitorError = error
+        if process.isRunning { kill(-process.processIdentifier, SIGKILL); kill(process.processIdentifier, SIGKILL) }
+      }
+    }
+    timer?.resume()
+    defer { monitorLock.lock(); monitorFinished = true; monitorLock.unlock(); timer?.cancel() }
     if events { emit("child", ["pid": process.processIdentifier]) }
     let data = output.fileHandleForReading.readDataToEndOfFile()
     process.waitUntilExit()
@@ -128,7 +153,9 @@ public enum NativeIO {
     errors.fileHandleForReading.readabilityHandler = nil
     capturedError.append(errors.fileHandleForReading.readDataToEndOfFile())
     lock.unlock()
-    if events { emit("child", ["pid": 0]) }
+    if events { emit("child", ["pid": process.processIdentifier, "ended": true]) }
+    monitorLock.lock(); let failure = monitorError; monitorFinished = true; monitorLock.unlock()
+    if let failure { throw failure }
     guard process.terminationStatus == 0 else {
       let detail = String(data: capturedError, encoding: .utf8) ?? ""
       throw StudioError(executable.lastPathComponent + ": " + String(detail.suffix(1500)))
@@ -158,10 +185,26 @@ public enum NativeIO {
     }
     return members
   }
-  public static func unpack(_ url: URL, to folder: URL) throws {
+  public static func unpack(_ url: URL, to folder: URL, budget: ArchiveBudget = .book) throws {
+    let expanded = try archiveSize(url, budget: budget)
     _ = try archiveMembers(url)
-    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-    try run(URL(fileURLWithPath: "/usr/bin/ditto"), ["-x", "-k", url.path, folder.path])
+    let fm = FileManager.default
+    var ancestor = folder.deletingLastPathComponent()
+    while !fm.fileExists(atPath: ancestor.path), ancestor.path != "/" { ancestor.deleteLastPathComponent() }
+    let free = (try fm.attributesOfFileSystem(forPath: ancestor.path)[.systemFreeSize] as? NSNumber)?.uint64Value ?? 0
+    guard expanded <= free, free - expanded >= 256 * 1024 * 1024 else { throw StudioError("Недостаточно места для распаковки книги") }
+    guard !fm.fileExists(atPath: folder.path) else { throw StudioError("Папка распаковки уже существует") }
+    do {
+      try fm.createDirectory(at: folder, withIntermediateDirectories: true)
+      // Darwin sh expresses RLIMIT_FSIZE in KiB; only this child receives the hard per-file limit.
+      let limit = min(budget.memberBytes, expanded)
+      let blocks = limit / 1024 + (limit % 1024 == 0 ? 0 : 1)
+      let actualBudget = ArchiveBudget(expandedBytes: expanded, memberBytes: limit, members: budget.members)
+      _ = try capture(URL(fileURLWithPath: "/bin/sh"),
+        ["-c", "ulimit -f \"$1\" || exit 1; exec /usr/bin/ditto -x -k \"$2\" \"$3\"", "archive", String(max(1, blocks)), url.path, folder.path],
+        monitor: { try verifyArchiveOutput(folder, budget: actualBudget) })
+      try verifyArchiveOutput(folder, budget: actualBudget)
+    } catch { try? fm.removeItem(at: folder); throw error }
   }
   public static func zip(_ folder: URL, to url: URL, epub: Bool = false) throws {
     let temp = url.deletingLastPathComponent().appendingPathComponent(UUID().uuidString + ".zip")

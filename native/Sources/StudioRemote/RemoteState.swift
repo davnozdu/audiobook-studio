@@ -56,7 +56,7 @@ public struct RemoteJob: Codable, Identifiable {
         var lines = ["📚 <b>\(Self.escapedHTML(name))</b>", "\(icon) \(Self.escapedHTML(phase.title))"]
         if !stage.isEmpty { lines.append("🧭 \(Self.escapedHTML(stage))") }
         if total > 0 {
-            let percent = min(100, max(0, Int(Double(completed) / Double(total) * 100)))
+            let percent = min(100, max(0, Int(min(100, max(0, Double(completed) / Double(total) * 100)))))
             let filled = percent / 10
             lines.append("\(String(repeating: "▰", count: filled))\(String(repeating: "▱", count: 10 - filled))  <b>\(percent)%</b>")
             lines.append("🗣 Реплики: \(completed) из \(total)")
@@ -166,7 +166,11 @@ public final class RemoteStateStore {
     public func load() throws -> RemoteState {
         let file = folder.appendingPathComponent("queue.json")
         if !FileManager.default.fileExists(atPath: file.path) { return RemoteState() }
-        return try JSONDecoder().decode(RemoteState.self, from: Data(contentsOf: file))
+        let state = try JSONDecoder().decode(RemoteState.self, from: Data(contentsOf: file))
+        guard Set(state.jobs.map(\.id)).count == state.jobs.count,
+              state.jobs.allSatisfy({ UUID(uuidString: $0.id) != nil && $0.completed >= 0 && $0.total >= 0 && $0.fraction.isFinite })
+        else { throw RemoteError("Некорректные идентификаторы или счётчики очереди") }
+        return state
     }
     public func save(_ state: RemoteState) throws {
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true,
@@ -175,7 +179,18 @@ public final class RemoteStateStore {
         try JSONEncoder().encode(state).write(to: file, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
     }
-    public func jobFolder(_ id: String) -> URL { folder.appendingPathComponent("jobs/" + id) }
+    public func jobFolder(_ id: String) -> URL {
+        let safeID = UUID(uuidString: id)?.uuidString.lowercased() ?? "invalid-id"
+        return folder.appendingPathComponent("jobs/" + safeID)
+    }
+    public func validateJobFolders(_ state: RemoteState) throws {
+        let root = folder.resolvingSymlinksInPath().appendingPathComponent("jobs").path + "/"
+        for job in state.jobs {
+            guard UUID(uuidString: job.id) != nil, jobFolder(job.id).resolvingSymlinksInPath().path.hasPrefix(root) else {
+                throw RemoteError("Папка задания выходит за пределы очереди")
+            }
+        }
+    }
 }
 public struct RemoteError: LocalizedError {
     public var message: String

@@ -1,4 +1,5 @@
 import Foundation
+import Compression
 
 /// Small per-utterance container for the resumable speech cache.
 ///
@@ -80,7 +81,21 @@ public enum SpeechPCM {
     try data.write(to: file, options: .atomic)
   }
 
+  static func decompress(_ payload: Data, bytes: Int, algorithm: compression_algorithm) throws -> Data {
+    var result = Data(count: bytes + 1)
+    let decoded = result.withUnsafeMutableBytes { output in
+      payload.withUnsafeBytes { input in
+        compression_decode_buffer(output.bindMemory(to: UInt8.self).baseAddress!, bytes + 1,
+          input.bindMemory(to: UInt8.self).baseAddress!, payload.count, nil, algorithm)
+      }
+    }
+    guard decoded == bytes else { throw StudioError("Оборванный или слишком большой сжатый кеш реплики") }
+    result.count = bytes
+    return result
+  }
   public static func read(_ file: URL) throws -> [Float] {
+    let size = try file.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+    guard size > 17, size <= 4096 * 1920 * 4 + 17 else { throw StudioError("Некорректный размер сжатого кеша") }
     let data = try Data(contentsOf: file)
     guard data.count > 17, [Data("SPC1".utf8), Data("SPC2".utf8)].contains(data.prefix(4)) else {
       throw StudioError("Повреждён сжатый кеш реплики")
@@ -95,12 +110,12 @@ public enum SpeechPCM {
     }
     if data.prefix(4) == Data("SPC2".utf8) {
       guard mode == 1 || mode == 3 else { throw StudioError("Неизвестный формат сжатой реплики") }
-      let planes = mode == 3 ? try (payload as NSData).decompressed(using: .lzma) as Data : payload
+      let planes = mode == 3 ? try decompress(payload, bytes: Int(count) * 2, algorithm: COMPRESSION_LZMA) : payload
       guard planes.count == Int(count) * 2 else { throw StudioError("Оборван сжатый кеш реплики") }
       return decode(planes, count: Int(count)).map { Float($0) / scale }
     }
     guard mode <= 2 else { throw StudioError("Неизвестный формат сжатой реплики") }
-    let decoded = mode > 0 ? try (payload as NSData).decompressed(using: .lzfse) as Data : payload
+    let decoded = mode > 0 ? try decompress(payload, bytes: Int(count) * 4, algorithm: COMPRESSION_LZFSE) : payload
     guard decoded.count == Int(count) * 4 else { throw StudioError("Оборван сжатый кеш реплики") }
     let raw = mode == 2 ? transpose(decoded, inverse: true) : decoded
     return try NativeWAV.samples(raw)

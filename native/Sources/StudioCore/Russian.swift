@@ -40,12 +40,16 @@ public struct RussianText {
     words.components(separatedBy: " ").contains(word)
   }
   public static func plural(_ n: Int, _ words: [String]) -> String {
-    let n = abs(n)
+    let n = n.magnitude
     return (11...14).contains(n % 100)
       ? words[2] : n % 10 == 1 ? words[0] : (2...4).contains(n % 10) ? words[1] : words[2]
   }
+  static func checkedInteger(_ value: String) throws -> Int {
+    guard let n = Int(value) else { throw StudioError("Число за пределами поддерживаемого диапазона") }
+    return n
+  }
   public func integer(_ number: Int, case c: Int = 0, feminine: Bool = false) throws -> String {
-    guard abs(number) < 1_000_000_000_000 else {
+    guard number > -1_000_000_000_000, number < 1_000_000_000_000 else {
       throw StudioError("Число за пределами поддерживаемого диапазона")
     }
     if number < 0 { return "минус " + (try integer(-number, case: c, feminine: feminine)) }
@@ -222,6 +226,11 @@ public struct RussianText {
       protected.append(g[0])
       return "\u{e000}" + String(UnicodeScalar(0xe100 + protected.count - 1)!) + "\u{e001}"
     }
+    text = String(text.unicodeScalars.map { scalar -> String in
+      guard CharacterSet.decimalDigits.contains(scalar), let n = Character(String(scalar)).wholeNumberValue,
+        (0...9).contains(n) else { return String(scalar) }
+      return String(n)
+    }.joined())
     text = NativeIO.replace("[^\\S\\n\\r]|[\\u200b\\u0085]", text, " ")
     for dash in "—–‐‑‒⁃−﹣－" { text = text.replacingOccurrences(of: String(dash), with: "-") }
     text = Self.symbols(text)
@@ -410,7 +419,7 @@ public struct RussianText {
       "\\b(\\d+)-(ыми|ого|ому|ый|ая|ое|ую|ой|ых|ым|ом|го|му|ми|й|я|е|ю|х|м)\\b", text
     ) { g, _, _ in
       try ordinal(
-        Int(g[1])!,
+        try Self.checkedInteger(g[1]),
         [
           "й": "ый", "я": "ая", "е": "ое", "ю": "ую", "го": "ого", "му": "ому", "м": "ом",
           "х": "ых", "ми": "ыми",

@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 public final class AccentDictionary {
   let data: Data, count: Int, offsets: Int, records: Int
@@ -19,7 +20,8 @@ public final class AccentDictionary {
     count = try Self.integer(data, 8, 4)
     offsets = try Self.integer(data, 12, 8)
     records = try Self.integer(data, 20, 8)
-    guard offsets >= 28, records >= offsets + count * 4, records <= data.count else {
+    guard offsets >= 28, offsets <= data.count, records >= offsets, records <= data.count,
+      count <= (records - offsets) / 4 else {
       throw StudioError("Некорректная структура SACC")
     }
   }
@@ -86,26 +88,49 @@ public final class NativeStress {
     process.standardInput = input
     process.standardOutput = output
     process.standardError = FileHandle.standardError
+    guard fcntl(input.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1) != -1 else {
+      throw StudioError("Не удалось подготовить канал ударений")
+    }
     try process.run()
     NativeIO.emit("child", ["pid": process.processIdentifier])
   }
   deinit {
     try? input.fileHandleForWriting.close()
-    if process.isRunning { process.terminate() }
-    process.waitUntilExit()
-    NativeIO.emit("child", ["pid": 0])
+    NativeIO.stop(process, grace: 2)
+    NativeIO.emit("child", ["pid": process.processIdentifier, "ended": true])
   }
-  public func request(_ value: Object) throws -> Object {
+  public func request(_ value: Object, timeout: TimeInterval = 120) throws -> Object {
+    guard timeout.isFinite, timeout > 0, timeout <= 600 else { throw StudioError("Некорректный таймаут ударений") }
+    let lock = NSLock(), timer = DispatchSource.makeTimerSource(queue: .global())
+    var finished = false, expired = false
+    let worker = process
+    timer.schedule(deadline: .now() + timeout)
+    timer.setEventHandler {
+      lock.lock(); defer { lock.unlock() }
+      guard !finished else { return }
+      expired = true
+      if worker.isRunning { kill(-worker.processIdentifier, SIGKILL); kill(worker.processIdentifier, SIGKILL) }
+    }
+    timer.resume()
+    defer { lock.lock(); finished = true; lock.unlock(); timer.cancel() }
+    func failure() -> StudioError {
+      lock.lock(); defer { lock.unlock() }
+      return StudioError(expired ? "Движок ударений не ответил вовремя" : "Нативный движок ударений завершился раньше времени")
+    }
     var data = try JSONSerialization.data(withJSONObject: value)
     data.append(10)
     // The engine ignores SIGPIPE, so a crashed helper surfaces here as a write error.
     do { try input.fileHandleForWriting.write(contentsOf: data) } catch {
-      throw StudioError("Нативный движок ударений завершился раньше времени")
+      throw failure()
     }
     while pending.firstIndex(of: 10) == nil {
       let chunk = output.fileHandleForReading.availableData
       guard !chunk.isEmpty else {
-        throw StudioError("Нативный движок ударений завершился раньше времени")
+        throw failure()
+      }
+      guard pending.count + chunk.count <= 8 * 1024 * 1024 else {
+        NativeIO.stop(process, grace: 2)
+        throw StudioError("Слишком большой ответ движка ударений")
       }
       pending.append(chunk)
     }

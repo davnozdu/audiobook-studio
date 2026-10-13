@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import XCTest
 import CryptoKit
 @testable import StudioRemote
@@ -22,6 +23,121 @@ final class MockHTTP: URLProtocol {
     override func stopLoading() {}
 }
 final class RemoteTests: XCTestCase {
+    @MainActor func testSemanticQueueCorruptionNeverDeletesOrOverwrites() throws {
+        let f = try folder(); defer { try? FileManager.default.removeItem(at: f) }
+        let victim = f.appendingPathComponent("victim")
+        try FileManager.default.createDirectory(at: victim, withIntermediateDirectories: true)
+        try Data([1]).write(to: victim.appendingPathComponent("sentinel"))
+        var state = RemoteState(), job = RemoteJob(chatID: 1, messageID: 1, fileID: "x", name: "x", provider: .dropbox)
+        job.id = "../victim"; job.phase = .complete; state.jobs = [job]
+        let store = RemoteStateStore(f); try store.save(state)
+        let bytes = try Data(contentsOf: f.appendingPathComponent("queue.json"))
+        let bot = BotService(folder: f, secrets: MemorySecrets())
+        XCTAssertTrue(bot.fatal)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: victim.path))
+        XCTAssertEqual(try Data(contentsOf: f.appendingPathComponent("queue.json")), bytes)
+        job.id = UUID().uuidString.lowercased(); state.jobs = [job, job]; try store.save(state)
+        XCTAssertThrowsError(try store.load())
+        state.jobs = [job]; try store.save(state)
+        try FileManager.default.createDirectory(at: f.appendingPathComponent("jobs"), withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: store.jobFolder(job.id), withDestinationURL: victim)
+        XCTAssertThrowsError(try store.validateJobFolders(try store.load()))
+    }
+    @MainActor func testExtremeStatusAndHTMLMessagesStayBounded() throws {
+        var job = RemoteJob(chatID: 1, messageID: 1, fileID: "x", name: "x", provider: .dropbox)
+        job.completed = Int.max; job.total = 1
+        XCTAssertTrue(job.status().contains("100%"))
+        let text = "<b>" + String(repeating: "😀&amp;", count: 1500) + "</b> <a href=\"https://example.invalid/a?x=1&amp;y=2\">EPUB</a>"
+        let parts = TelegramClient.messageParts(RemoteReply(1, text, parseMode: "HTML"))
+        XCTAssertTrue(parts.count > 1)
+        XCTAssertTrue(parts.allSatisfy { $0.mode == nil && $0.text.utf16.count <= 3900 })
+        let joined = parts.map(\.text).joined()
+        XCTAssertTrue(joined.contains("https://example.invalid/a?x=1&y=2"))
+        XCTAssertEqual(joined.components(separatedBy: "😀").count - 1, 1500)
+        let short = TelegramClient.messageParts(RemoteReply(1, "<b>Готово</b>", parseMode: "HTML"))
+        XCTAssertEqual(short[0].text, "<b>Готово</b>"); XCTAssertEqual(short[0].mode, "HTML")
+        XCTAssertTrue(CloudClient.bookBase(title: String(repeating: "😀", count: 180), author: "").utf8.count <= 180)
+    }
+    @MainActor func testHTTPNeverAutomaticallyRepeatsCreationPOST() async throws {
+        defer { MockHTTP.handler = nil }
+        let cfg = URLSessionConfiguration.ephemeral; cfg.protocolClasses = [MockHTTP.self]
+        let session = URLSession(configuration: cfg); defer { session.invalidateAndCancel() }
+        var calls = 0
+        MockHTTP.handler = { _ in calls += 1; return (503, [:], Data()) }
+        var request = URLRequest(url: URL(string: "https://example.invalid/create")!); request.httpMethod = "POST"
+        do { _ = try await RemoteHTTP(session: session).send(request); XCTFail("Failed creation must throw") } catch {}
+        XCTAssertEqual(calls, 1)
+    }
+    @MainActor func testDropboxMismatchForcesVerifiedReupload() async throws {
+        let f = try folder(); defer { try? FileManager.default.removeItem(at: f); MockHTTP.handler = nil }
+        let file = f.appendingPathComponent("book.m4b"); try Data("content".utf8).write(to: file); let hash = try CloudClient.hashes(file)
+        let cfg = URLSessionConfiguration.ephemeral; cfg.protocolClasses = [MockHTTP.self]
+        let session = URLSession(configuration: cfg); defer { session.invalidateAndCancel() }
+        let cloud = CloudClient(provider: .dropbox, config: RemoteConfig(), secrets: MemorySecrets(), http: RemoteHTTP(session: session)); cloud.access = "fixture"; cloud.expires = .distantFuture
+        var starts = 0, finishes = 0
+        MockHTTP.handler = { request in
+            let route = request.url!.lastPathComponent
+            if route == "get_metadata" { return (200, [:], try RemoteJSON.data(["id": "foreign", "size": hash.size + 1, "content_hash": "wrong"])) }
+            if route == "start" { starts += 1; return (200, [:], try RemoteJSON.data(["session_id": "new-session"])) }
+            if route == "finish" { finishes += 1; return (200, [:], try RemoteJSON.data(["id": "new-id", "size": hash.size, "content_hash": hash.dropbox])) }
+            return (200, [:], try RemoteJSON.data(["url": "https://example.invalid/new"]))
+        }
+        var saved = RemoteUpload(); saved.fileID = "old-id"; saved.fingerprint = "\(hash.size):\(hash.dropbox)"
+        let result = try await cloud.upload(file: file, folder: "/Test", saved: saved) { _ in }
+        XCTAssertEqual(starts, 1); XCTAssertEqual(finishes, 1); XCTAssertEqual(result.fileID, "new-id")
+        XCTAssertEqual(result.link, "https://example.invalid/new")
+    }
+    @MainActor func testUnboundAndDeletedGoogleLinksAreNotTrusted() async throws {
+        let f = try folder(); defer { try? FileManager.default.removeItem(at: f); MockHTTP.handler = nil }
+        let file = f.appendingPathComponent("book.m4b"); try Data("content".utf8).write(to: file); let hash = try CloudClient.hashes(file)
+        let cfg = URLSessionConfiguration.ephemeral; cfg.protocolClasses = [MockHTTP.self]
+        let session = URLSession(configuration: cfg); defer { session.invalidateAndCancel() }
+        let cloud = CloudClient(provider: .googleDrive, config: RemoteConfig(), secrets: MemorySecrets(), http: RemoteHTTP(session: session)); cloud.access = "fixture"; cloud.expires = .distantFuture
+        var confirmations = 0, creations = 0
+        MockHTTP.handler = { request in
+            if request.httpMethod == "GET" {
+                if request.url!.path.hasSuffix("old-id") { confirmations += 1; return (404, [:], Data()) }
+                return (200, [:], try RemoteJSON.data(["files": []]))
+            }
+            if request.httpMethod == "POST" { creations += 1; return (200, ["Location": "https://www.googleapis.com/upload/drive/v3/files?upload_id=test"], Data()) }
+            if request.value(forHTTPHeaderField: "Content-Range")?.contains("*") == true { return (308, [:], Data()) }
+            return (200, [:], try RemoteJSON.data(["id": "new-id", "size": String(hash.size), "md5Checksum": hash.md5]))
+        }
+        for fingerprint in ["", "\(hash.size):\(hash.md5)"] {
+            var saved = RemoteUpload(); saved.link = "https://example.invalid/old"; saved.fileID = "old-id"; saved.fingerprint = fingerprint
+            let result = try await cloud.upload(file: file, folder: "folder", saved: saved) { _ in }
+            XCTAssertEqual(result.fileID, "new-id"); XCTAssertFalse(result.link.contains("/old"))
+        }
+        XCTAssertEqual(creations, 2); XCTAssertEqual(confirmations, 1)
+    }
+    @MainActor func testGoogleNoProgressFailsWithBoundedRequests() async throws {
+        let f = try folder(); defer { try? FileManager.default.removeItem(at: f); MockHTTP.handler = nil }
+        let file = f.appendingPathComponent("book.m4b"); try Data("content".utf8).write(to: file); let hash = try CloudClient.hashes(file)
+        let cfg = URLSessionConfiguration.ephemeral; cfg.protocolClasses = [MockHTTP.self]
+        let session = URLSession(configuration: cfg); defer { session.invalidateAndCancel() }
+        let cloud = CloudClient(provider: .googleDrive, config: RemoteConfig(), secrets: MemorySecrets(), http: RemoteHTTP(session: session)); cloud.access = "fixture"; cloud.expires = .distantFuture
+        var requests = 0
+        MockHTTP.handler = { _ in requests += 1; return (308, ["Range": "bytes=0-0"], Data()) }
+        var saved = RemoteUpload(); saved.session = "https://www.googleapis.com/upload/drive/v3/files?upload_id=test"; saved.fingerprint = "\(hash.size):\(hash.md5)"
+        do { _ = try await cloud.upload(file: file, folder: "folder", saved: saved) { _ in }; XCTFail("Stalled upload must fail") }
+        catch let error as RemoteError { XCTAssertTrue(error.message.contains("не продвигает")) }
+        XCTAssertTrue(requests <= 10); XCTAssertTrue(FileManager.default.fileExists(atPath: file.path))
+    }
+    @MainActor func testCancellationKeepsEveryRegisteredChild() async throws {
+        let f = try folder(); defer { try? FileManager.default.removeItem(at: f) }
+        let helper = Process(); helper.executableURL = URL(fileURLWithPath: "/bin/sh"); helper.arguments = ["-c", "trap '' TERM; exec /bin/sleep 30"]
+        helper.standardOutput = FileHandle.nullDevice; helper.standardError = FileHandle.nullDevice; try helper.run()
+        defer { if helper.isRunning { kill(-helper.processIdentifier, SIGKILL); kill(helper.processIdentifier, SIGKILL) }; helper.waitUntilExit() }
+        let script = f.appendingPathComponent("engine")
+        let contents = "#!/bin/sh\ncat >/dev/null\nprintf '{\"type\":\"child\",\"pid\":\(helper.processIdentifier)}\\n'\nprintf '{\"type\":\"child\",\"pid\":999999}\\n'\nprintf '{\"type\":\"child\",\"pid\":999999,\"ended\":true}\\n'\nexec /bin/sleep 30\n"
+        try Data(contents.utf8).write(to: script); try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
+        let engine = RemoteEngine()
+        let task = Task { try await engine.run(executable: script, request: [:], temporary: f.appendingPathComponent("tmp")) { _ in } }
+        for _ in 0..<100 { if engine.children == [helper.processIdentifier] { break }; try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertEqual(engine.children, [helper.processIdentifier]); task.cancel()
+        do { try await task.value; XCTFail("Cancelled task returned success") } catch is CancellationError {} catch { XCTFail("Wrong cancellation error") }
+        XCTAssertFalse(helper.isRunning); XCTAssertFalse(engine.running)
+    }
     func testLegacyCloudConfigPreservesCredentialKeys() throws {
         let data = Data(#"{"enabled":true,"provider":"googleDrive","dropboxID":"old-dropbox","googleID":"old-google","connections":{"googleDrive":"existing"}}"#.utf8)
         let config = try JSONDecoder().decode(RemoteConfig.self, from: data)
@@ -167,7 +283,23 @@ final class RemoteTests: XCTestCase {
     }
     @MainActor func testUploadedBookIsSavedCompleteWhenLocalCopyIsRemoved() async throws {
         let f = try folder(); defer { try? FileManager.default.removeItem(at: f) }
-        let bot = BotService(folder: f, secrets: MemorySecrets()); bot.config.connections["dropbox"] = "account"
+        defer { MockHTTP.handler = nil }
+        let secrets = MemorySecrets(); secrets.values["dropboxRefresh"] = "fixture"
+        let cfg = URLSessionConfiguration.ephemeral; cfg.protocolClasses = [MockHTTP.self]
+        let session = URLSession(configuration: cfg); defer { session.invalidateAndCancel() }
+        let hash = try CloudClient.hashes({ let file = f.appendingPathComponent("hash-fixture"); try Data("{}".utf8).write(to: file); return file }())
+        MockHTTP.handler = { request in
+            if request.url!.path == "/oauth2/token" { return (200, [:], try RemoteJSON.data(["access_token": "fixture"])) }
+            if request.url!.path.hasSuffix("get_metadata") { return (200, [:], try RemoteJSON.data(["id": "verified", "size": hash.size, "content_hash": hash.dropbox])) }
+            // Decode JSON streamed by URLSession to keep links deterministic for both files.
+            var data = request.httpBody ?? Data()
+            if let stream = request.httpBodyStream { stream.open(); defer { stream.close() }; var buffer = [UInt8](repeating: 0, count: 4096)
+                while true { let n = stream.read(&buffer, maxLength: buffer.count); if n <= 0 { break }; data.append(contentsOf: buffer.prefix(n)) }
+            }
+            let path = RemoteJSON.string(try RemoteJSON.object(data), "path")
+            return (200, [:], try RemoteJSON.data(["url": "https://dropbox.test/" + URL(fileURLWithPath: path).lastPathComponent]))
+        }
+        let bot = BotService(folder: f, secrets: secrets, http: RemoteHTTP(session: session)); bot.config.connections["dropbox"] = "account"
         var job = RemoteJob(chatID: 1, messageID: 1, fileID: "x", name: "book.epub", provider: .dropbox)
         job.account = "account"; job.phase = .uploading; job.cloudFolder = "/Audiobook Studio/book"; job.project = "/p"
         for name in ["audiobook.m4b", "audiobook.epub"] { var upload = RemoteUpload(); upload.link = "https://dropbox.test/" + name; job.uploads[name] = upload }
@@ -180,7 +312,7 @@ final class RemoteTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: bot.store.jobFolder(job.id).path))
         let saved = try RemoteStateStore(f).load().jobs[0]
         XCTAssertEqual(saved.phase, .complete); XCTAssertEqual(saved.project, ""); XCTAssertEqual(saved.result, "")
-        XCTAssertEqual(saved.uploads["audiobook.m4b"]?.link, "https://dropbox.test/audiobook.m4b")
+        XCTAssertEqual(saved.uploads["audiobook.m4b"]?.link, "https://dropbox.test/book.m4b")
     }
     @MainActor func testSameBookTwiceGetsItsOwnCloudFolder() async throws {
         defer { MockHTTP.handler = nil }
