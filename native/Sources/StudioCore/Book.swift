@@ -159,11 +159,16 @@ public enum NativeBook {
       "paragraphs": paragraphs, "chapters": chapters,
     ]
   }
+  /// Marks that may follow a sentence's final punctuation: every closing quote the dialogue
+  /// markup knows („Конец.“, ‹Конец.›, ‘Конец.’ as well as «Конец.»), the apostrophe and brackets.
+  static let sentenceClosers = CharacterSet(charactersIn: "')]").union(
+    CharacterSet(NativeDirector.quotePairs.values.flatMap { $0 }))
+
   public static func split(_ text: String, maximum: Int = 240) -> [(Int, Int)] {
     precondition(maximum > 0)
     let scalars = Array(text.unicodeScalars)
     let whitespace = CharacterSet.whitespacesAndNewlines
-    let closers = CharacterSet(charactersIn: "»”\"')]")
+    let closers = sentenceClosers
     func sentenceEnd(_ index: Int) -> Int? {
       guard ".!?…".unicodeScalars.contains(scalars[index]) else { return nil }
       var end = index + 1
@@ -204,7 +209,7 @@ public enum NativeBook {
   }
   public static func sentenceFinished(_ text: String) -> Bool {
     let ending = text.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines
-      .union(CharacterSet(charactersIn: "»”\"')]-—–")))
+      .union(sentenceClosers).union(CharacterSet(charactersIn: "-—–")))
     return ending.last.map { ".!?…".contains($0) } ?? false
   }
   public static func epub(
@@ -245,6 +250,7 @@ public enum NativeBook {
     var nav = ""
     var durations = ""
     let total = (timeline.last?["clip_end"] as? Double) ?? 0
+    var written = 0
     for chapter in chapters {
       let cid = NativeIO.string(chapter["id"])
       let chapterTitle = NativeIO.xml(NativeIO.string(chapter["title"]))
@@ -270,7 +276,7 @@ public enum NativeBook {
           body += NativeIO.xml(try NativeIO.scalarSlice(original[pid] ?? "", cursor, start))
         }
         body += "<span id=\"\(sid)\">\(NativeIO.xml(NativeIO.string(segment["text"])))</span>"
-        cursor = end
+        cursor = end; written += 1
         guard let row = timing[sid], let begin = row["audio_start"] as? Double,
           let finish = row["clip_end"] as? Double
         else { throw StudioError("Нет времени для реплики \(sid)") }
@@ -293,6 +299,7 @@ public enum NativeBook {
       durations +=
         "<meta property=\"media:duration\" refines=\"#overlay-\(cid)\">\(last-first)s</meta>"
     }
+    guard written == segments.count else { throw StudioError("EPUB не содержит все реплики книги") }
     let opf =
       "<?xml version=\"1.0\"?><package xmlns=\"http://www.idpf.org/2007/opf\" version=\"3.0\" unique-identifier=\"book-id\" prefix=\"media: http://www.idpf.org/epub/vocab/overlays/#\"><metadata xmlns:dc=\"http://purl.org/dc/elements/1.1/\"><dc:identifier id=\"book-id\">urn:uuid:\(UUID().uuidString)</dc:identifier><dc:title>\(title)</dc:title><dc:creator>\(NativeIO.xml(NativeIO.string(book["author"])))</dc:creator><dc:language>ru</dc:language><meta property=\"dcterms:modified\">\(ISO8601DateFormatter().string(from: Date()))</meta><meta property=\"media:duration\">\(total)s</meta><meta property=\"media:active-class\">tts-active</meta>\(cover == nil ? "" : "<meta name=\"cover\" content=\"cover-image\"/>")\(durations)</metadata><manifest>\(items)</manifest><spine>\(spine)</spine></package>"
     try Data(opf.utf8).write(to: temp.appendingPathComponent("EPUB/package.opf"))

@@ -34,6 +34,11 @@ final class CoreTests: XCTestCase {
     XCTAssertEqual(try Data(contentsOf: out), data)
     XCTAssertThrowsError(try NativeIO.stream(URL(fileURLWithPath: "/usr/bin/false"), []) { try $0.write(contentsOf: data) })
     XCTAssertThrowsError(try NativeIO.stream(URL(fileURLWithPath: "/usr/bin/tee"), [out.path]) { _ in throw StudioError("producer failed") })
+    // A consumer that ignores SIGTERM is killed after the grace period instead of hanging the build.
+    let started = Date()
+    XCTAssertThrowsError(try NativeIO.stream(URL(fileURLWithPath: "/bin/sh"), ["-c", "trap '' TERM; while :; do sleep 0.1; done"]) { _ in
+      throw StudioError("producer failed") })
+    XCTAssertTrue(Date().timeIntervalSince(started) < 15)
   }
   func testTenAndTwentyHourBooksKeepAllSegmentsAnd64BitSizes() throws {
     for hours in [10, 20] {
@@ -294,6 +299,13 @@ final class CoreTests: XCTestCase {
     XCTAssertEqual(try spans.map { try NativeIO.scalarSlice(text, $0.0, $0.1) }.joined(separator: " "), text)
     XCTAssertTrue(NativeBook.sentenceFinished(first))
     XCTAssertFalse(NativeBook.sentenceFinished("хотя в"))
+    // Every closing quote the dialogue markup knows ends a sentence after . ! ? …
+    for quoted in ["«Конец.»", "„Конец!“", "„Конец?”", "‹Конец…›", "‚Конец.‘", "‘Конец.’", "“Конец.”", "\"Конец.\"", "(Конец.)"] {
+      XCTAssertTrue(NativeBook.sentenceFinished(quoted), quoted)
+    }
+    XCTAssertFalse(NativeBook.sentenceFinished("„Конец,“"))
+    let nested = String(repeating: "слово ", count: 48) + "„конец.“"
+    XCTAssertEqual(NativeBook.split(nested + " Далее.").count, 2)
   }
   func testOldSpeechBlocksRejoinOnlyWithinOneRole() throws {
     let text = String(repeating: "слово ", count: 40) + "конец. Реплика другого."
@@ -844,6 +856,20 @@ final class CoreTests: XCTestCase {
     try NativeProject.export(p, destination: archive, settings: ["music_enabled": false])
     let opened = try NativeProject.open(archive, output: folder)
     _ = try NativeProject.verify(opened)
+    // A chapter record lost from the registry would drop its lines from the EPUB only.
+    let sourceFile = p.appendingPathComponent("roles/source.json")
+    let intact = try NativeIO.load(sourceFile)
+    var source = intact
+    source["chapters"] = []
+    try NativeIO.write(sourceFile, source)
+    XCTAssertThrowsError(try NativeProject.verify(p))
+    let segments = NativeIO.objects(manifest["segments"])
+    let timeline = segments.map { ["segment_id": $0["id"]!, "audio_start": 0.0, "clip_end": 1.0] as Object }
+    let audio = folder.appendingPathComponent("a.m4a"); try Data("a".utf8).write(to: audio)
+    XCTAssertThrowsError(try NativeBook.epub(manifest, source: source, timeline: timeline, audio: audio,
+      output: folder.appendingPathComponent("lost.epub")))
+    _ = try NativeBook.epub(manifest, source: intact, timeline: timeline, audio: audio, output: folder.appendingPathComponent("ok.epub"))
+    try NativeIO.write(sourceFile, intact)
     manifest["segments"] = []
     try NativeIO.write(p.appendingPathComponent("roles/manifest.json"), manifest)
     XCTAssertThrowsError(try NativeProject.verify(p))

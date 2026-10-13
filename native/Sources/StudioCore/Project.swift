@@ -109,6 +109,12 @@ public enum NativeProject {
       voiceIDs.allSatisfy({ !NativeIO.regex("^[a-z][a-z0-9_]*$", $0).isEmpty }),
       Set(rows.map { NativeIO.string($0["id"]) }).count == rows.count
     else { throw StudioError("Некорректный реестр ролей или абзацев") }
+    // The EPUB is written chapter by chapter from this registry: a missing or repeated chapter
+    // would silently drop or duplicate its lines there while the M4B still has them.
+    let chapterIDs = NativeIO.objects(source["chapters"]).map { NativeIO.string($0["id"]) }
+    guard Set(chapterIDs).count == chapterIDs.count, !chapterIDs.contains(""),
+      Set(rows.map { NativeIO.string($0["chapter_id"]) }).isSubset(of: Set(chapterIDs))
+    else { throw StudioError("Реестр глав не покрывает все абзацы книги") }
     let segments = NativeIO.objects(manifest["segments"])
     guard Set(segments.map { NativeIO.string($0["id"]) }).count == segments.count else {
       throw StudioError("Повторяющийся ID реплики")

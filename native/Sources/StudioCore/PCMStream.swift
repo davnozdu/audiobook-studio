@@ -5,6 +5,15 @@ extension NativeIO {
   /// Bounded stdin pipe; stderr is spooled separately so neither pipe deadlocks.
   /// Closing stdin signals EOF. A failed producer terminates the consumer and
   /// never returns a successful result, even if FFmpeg wrote a partial file.
+  /// SIGTERM, then SIGKILL if the consumer is still alive after `grace` seconds: a hung or
+  /// TERM-ignoring child must not keep the failed build waiting forever.
+  static func stop(_ process: Process, grace: TimeInterval) {
+    if process.isRunning { process.terminate() }
+    let deadline = Date().addingTimeInterval(grace)
+    while process.isRunning, Date() < deadline { usleep(20_000) }
+    if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+    process.waitUntilExit()
+  }
   public static func stream(_ executable: URL, _ arguments: [String],
     produce: (FileHandle) throws -> Void) throws -> Data {
     let process = Process(), input = Pipe()
@@ -31,8 +40,7 @@ extension NativeIO {
       try input.fileHandleForWriting.close()
     } catch {
       try? input.fileHandleForWriting.close()
-      if process.isRunning { process.terminate() }
-      process.waitUntilExit()
+      stop(process, grace: 5)
       throw error
     }
     process.waitUntilExit()
