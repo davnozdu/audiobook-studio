@@ -198,7 +198,9 @@ final class Engine {
       }
       try NativeIO.beginLog(project)
       NativeIO.emit("project", ["path": project.path])
-      try await NativeDirector(request).prepare(
+      // The project exists now: invalid LLM answers of this first analysis are kept for diagnosis.
+      var directed = request; directed["project"] = project.path
+      try await NativeDirector(directed).prepare(
         project, book: project.appendingPathComponent("book.epub"))
       let (manifest, _) = try NativeProject.verify(project)
       try writeManifest(manifest, at: project)

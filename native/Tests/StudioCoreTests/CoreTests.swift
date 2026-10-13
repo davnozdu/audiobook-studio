@@ -544,6 +544,16 @@ final class CoreTests: XCTestCase {
       XCTAssertThrowsError(try NativeDirector.validateSpeakers(
         bad, chunk: [paragraph], fragments: split, allowed: ["hero", "narrator"]))
     }
+    // Sparse answer: only characters' fragments are listed, everything else is the calm narrator.
+    let sparse = try NativeDirector.validateSpeakers(["paragraphs": [[
+      "id": "p00001", "speech": [["n": 1, "speaker": "hero", "manner": "joyful"], ["n": 3, "speaker": "hero", "manner": "joyful"], ["n": 4, "speaker": "hero"]]]]],
+      chunk: [paragraph], fragments: split, allowed: ["hero", "narrator"])
+    XCTAssertEqual(NativeIO.objects(sparse[0]["spans"]).map { NativeIO.string($0["speaker"]) + ":" + NativeIO.string($0["manner"]) },
+      ["hero:joyful", "narrator:calm", "hero:joyful", "hero:calm"])
+    XCTAssertEqual(NativeIO.objects(try NativeDirector.validateSpeakers(["paragraphs": [["id": "p00001", "speech": []]]],
+      chunk: [paragraph], fragments: split, allowed: ["hero", "narrator"])[0]["spans"]).map { NativeIO.string($0["speaker"]) }, ["narrator"])
+    XCTAssertThrowsError(try NativeDirector.validateSpeakers(["paragraphs": [["id": "p00001", "speech": [["n": 9, "speaker": "hero"]]]]],
+      chunk: [paragraph], fragments: split, allowed: ["hero", "narrator"]))
     // Manner splits a speaker's span; narrator is always calm; a broken list is calm, not an error.
     let toned = try NativeDirector.validateSpeakers(["paragraphs": [[
       "id": "p00001", "speakers": ["hero", "narrator", "hero", "hero"],
