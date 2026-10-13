@@ -392,19 +392,24 @@ final class CoreTests: XCTestCase {
     XCTAssertEqual(NativeDirector.fragments("— Нет! Не отдам! — вскричал он.").count, 2)   // short lines stay whole
   }
   func testBookThatPrintsYoKeepsItsOwnYe() throws {
-    // Detection: no ё at all; ё throughout; a lone ё in a name while ещё/её are printed with е.
+    // Detection: no ё at all; ё throughout; ё only here and there (еще, ее, шел printed with е).
     XCTAssertFalse(NativeStress.hasYo("Он еще шел по дороге и думал о ней."))
     XCTAssertTrue(NativeStress.hasYo("Он ещё шёл по дороге. Её не было. Ещё раз всё проверил, ещё."))
     XCTAssertFalse(NativeStress.hasYo("Фёдор Михайлович. Он еще шел, ее не было, еще раз, еще."))
     XCTAssertTrue(NativeStress.hasYo("Пётр пришёл."))   // too few telling words: any ё counts
-    // A predicted ё goes onto the book's е as a stress mark when the book prints ё itself.
+    XCTAssertTrue(NativeStress.hasYo("Е\u{308}лка. Все готово."))   // ё written as е + U+0308
+    // A book that prints ё: a predicted ё never changes the author's е, nor turns into е́.
     XCTAssertEqual(NativeStress.transfer("осел", "осёл"), "осёл")
-    XCTAssertEqual(NativeStress.transfer("осел", "осёл", keepYo: true), "осе\u{301}л")
-    XCTAssertEqual(NativeStress.transfer("все", "всё", keepYo: true), "все")       // one vowel: no mark
-    XCTAssertEqual(NativeStress.transfer("Федора", "Фёдора", keepYo: true), "Фе\u{301}дора")
+    XCTAssertEqual(NativeStress.transfer("осел", "осёл", keepYo: true), "осел")
+    XCTAssertEqual(NativeStress.transfer("узнает", "узнаёт", keepYo: true), "узнает")
+    XCTAssertEqual(NativeStress.transfer("узнает", "узна\u{301}ет", keepYo: true), "узна\u{301}ет")
+    XCTAssertEqual(NativeStress.transfer("все", "всё", keepYo: true), "все")
     XCTAssertEqual(NativeStress.transfer("замок", "замок", keepYo: true), "замок")
-    XCTAssertEqual(ProperNames.apply("Пришел Семен.", stresses: ["семен": "Семён"], keepYo: true), "Пришел Семе\u{301}н.")
+    XCTAssertEqual(ProperNames.apply("Пришел Семен.", stresses: ["семен": "Семён"], keepYo: true), "Пришел Семен.")
     XCTAssertEqual(ProperNames.apply("Пришел Семен.", stresses: ["семен": "Семён"]), "Пришел Семён.")
+    // A word the author printed with ё keeps its stress through the name layer.
+    XCTAssertEqual(ProperNames.authored("Берёза росла. Ма\u{301}рия"), ["береза", "мария"])
+    XCTAssertEqual(ProperNames.apply("Берёза", stresses: ["береза": "бёреза"], keep: ProperNames.authored("Берёза")), "Берёза")
   }
   func testStressArbitrationPrefersCommonReadingsAndMajority() throws {
     let uzhe = ["уже\u{301}", "у\u{301}же"], zamok = ["за\u{301}мок", "замо\u{301}к"]

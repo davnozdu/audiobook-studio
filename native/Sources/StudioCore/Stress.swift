@@ -153,8 +153,9 @@ public final class NativeStress {
   /// Puts the predicted stress on the book's own letters. A predicted 'ё' replaces the
   /// book's 'е' (books are often printed without 'ё'); 'ё' is always stressed, so no mark
   /// follows it. One-vowel words get no mark, as Silero does without stress_single_vowel.
-  /// With `keepYo` (the book already prints every 'ё') the book's 'е' stays 'е' and takes the
-  /// stress mark instead: a predicted 'ё' is always the stressed vowel (осел → осе́л, not осёл).
+  /// With `keepYo` (the book already prints its 'ё') a prediction that would turn the book's 'е'
+  /// into 'ё' leaves the word exactly as printed: the author wrote 'е', and the stress of the
+  /// 'е' reading is a different one (узна́ет, not узнае́т). Homographs pick their 'е' reading first.
   static func transfer(_ original: String, _ prediction: String, keepYo: Bool = false) -> String {
     guard plain(original) == plain(prediction) else { return original }
     // Letters only: an existing mark in the original would take a letter's place and cut the
@@ -172,11 +173,7 @@ public final class NativeStress {
       guard index < scalars.count else { return original }
       var letter = scalars[index]
       if scalar == "ё" || scalar == "Ё", letter == "е" || letter == "Е" {
-        if keepYo {
-          out.append(letter); out.append("\u{301}")
-          index += 1; afterYo = true
-          continue
-        }
+        if keepYo { return original }
         letter = letter == "е" ? "ё" : "Ё"
       }
       afterYo = letter == "ё" || letter == "Ё"
@@ -302,18 +299,28 @@ public final class NativeStress {
   /// True when the text uses 'ё' throughout. Any 'ё' counts, unless the commonest words that
   /// always take it (ещё, её) are mostly printed with 'е': a lone 'ё' in a name or an epigraph does
   /// not make a book printed without 'ё' complete.
+  /// Words that always take ё in a text that prints it; their е-spelling betrays a book printed
+  /// without ё or with ё only here and there (всё, узнаёт).
+  static let yoForms: Set<String> = ["ещё", "её", "нём", "идёт", "пришёл", "шёл", "нашёл", "ушёл", "вошёл",
+    "подошёл", "зашёл", "пошёл", "чёрт", "чёрный", "тёмный", "лёгкий", "жёлтый", "твёрдый", "счёт", "лёд",
+    "мёд", "берёза", "звёзды", "слёзы", "ребёнок", "ребёнка", "всё-таки", "ёлка", "живёт", "даёт", "берёт"]
+  static let yeForms: Set<String> = Set(yoForms.map { $0.replacingOccurrences(of: "ё", with: "е") })
   public static func hasYo(_ text: String) -> Bool {
-    let lower = text.lowercased()
+    // Composed form: «е» + U+0308 is the same ё.
+    let lower = text.precomposedStringWithCanonicalMapping.lowercased()
     guard lower.unicodeScalars.contains("ё") else { return false }
     var with = 0, without = 0
-    for word in lower.components(separatedBy: CharacterSet.letters.inverted) {
-      switch word {
-      case "ещё", "её": with += 1
-      case "еще", "ее": without += 1
-      default: break
-      }
+    for word in lower.components(separatedBy: CharacterSet.letters.union(CharacterSet(charactersIn: "-")).inverted) {
+      if yoForms.contains(word) { with += 1 } else if yeForms.contains(word) { without += 1 }
     }
     return with + without < 3 || Double(with) >= 0.9 * Double(with + without)
+  }
+  /// A homograph's readings usable here: in a book that prints ё, only those without a new ё
+  /// (осе́л, узна́ет); all of them otherwise, or if none is without ё.
+  func readingsKeeping(_ readings: [String]) -> [String] {
+    guard bookHasYo else { return readings }
+    let plain = readings.filter { !$0.contains("ё") }
+    return plain.isEmpty ? readings : plain
   }
   /// Name forms with 'ё' that the dictionaries miss or confuse with common words.
   static let yoNames: [String: String] = {
@@ -502,12 +509,13 @@ public final class NativeStress {
     var disputes: [Int: [String]] = [:]
     for (j, i) in homoPositions.enumerated() {
       let original = ns.substring(with: matches[i].range)
-      let variants = homographs[original.lowercased()] ?? []
+      let all = homographs[original.lowercased()] ?? []
       let p = homoPreds[j]
-      guard variants.indices.contains(p) else {
+      guard all.indices.contains(p) else {
         throw StudioError("Нет варианта ударения омографа")
       }
-      predictions[i] = variants[p]
+      let variants = readingsKeeping(all)
+      predictions[i] = variants.contains(all[p]) ? all[p] : variants[0]
       // Every homograph goes to the optional LLM check, not only uncertain ones: the model is
       // confidently wrong too (за́мок/замо́к, все/всё, бе́лки/белки́, сре́ду/среду́, о́рган/орга́н).
       _ = homoProbabilities
@@ -523,7 +531,7 @@ public final class NativeStress {
     for i in ruled {
       let original = ns.substring(with: matches[i].range)
       var readings: [String] = []
-      for variant in homographs[original.lowercased()] ?? [] {
+      for variant in readingsKeeping(homographs[original.lowercased()] ?? []) {
         let reading = Self.transfer(original, variant, keepYo: bookHasYo)
         if !readings.contains(reading) { readings.append(reading) }
       }
@@ -531,7 +539,11 @@ public final class NativeStress {
     }
     var replacements = compounds
     for (i, m) in matches.enumerated() {
-      if let target = predictions[i] {
+      if var target = predictions[i] {
+        // A context rule may name the ё reading; a book that prints ё takes its е reading.
+        if bookHasYo, target.contains("ё"), let readings = homographs[ns.substring(with: m.range).lowercased()] {
+          target = readingsKeeping(readings)[0]
+        }
         replacements.append((m.range, Self.transfer(ns.substring(with: m.range), target, keepYo: bookHasYo)))
       }
     }

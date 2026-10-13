@@ -481,10 +481,13 @@ final class Engine {
     // A book that already prints 'ё' keeps its own 'е': no second, guessed placement of 'ё'.
     let own = StressRules.userDictionary(NativeIO.string(request["stress_dictionary"]))
     if !own.isEmpty { NativeIO.emit("log", ["message": "Свой словарь ударений: \(own.count) слов"]) }
-    let bookHasYo = NativeStress.hasYo(NativeIO.objects(source["paragraphs"]).map { NativeIO.string($0["text"]) }.joined(separator: "\n"))
+    let bookText = NativeIO.objects(source["paragraphs"]).map { NativeIO.string($0["text"]) }.joined(separator: "\n")
+    let bookHasYo = NativeStress.hasYo(bookText)
     NativeIO.emit("log", ["message": bookHasYo
-      ? "В книге уже расставлена ё — повторная расстановка пропущена, ударения ставятся на буквы книги"
-      : "В книге нет ё — буква ё расставляется по словарю и модели ударений"])
+      ? "В книге уже расставлена ё — повторная расстановка пропущена, буквы книги не меняются"
+      : bookText.precomposedStringWithCanonicalMapping.lowercased().contains("ё")
+        ? "Ё в книге стоит выборочно (ещё, её и другие напечатаны через е) — недостающая ё расставляется"
+        : "В книге нет ё — буква ё расставляется по словарю и модели ударений"])
     do {
       let ru = try RussianText(resources.appendingPathComponent("supertonic_rules.json"))
       let helper = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
@@ -576,7 +579,8 @@ final class Engine {
     // LLM's names, the dictionary and the model. The own words come last so nothing overwrites them.
     if !own.isEmpty {
       for i in rows.indices {
-        rows[i]["tts_text"] = ProperNames.apply(NativeIO.string(rows[i]["tts_text"]), stresses: own, keepYo: bookHasYo,
+        // The user's own entry is an explicit decision: its ё is placed even in a book that prints ё.
+        rows[i]["tts_text"] = ProperNames.apply(NativeIO.string(rows[i]["tts_text"]), stresses: own, keepYo: false,
           namesOnly: false, keep: ProperNames.authored(NativeIO.string(rows[i]["text"])))
       }
     }

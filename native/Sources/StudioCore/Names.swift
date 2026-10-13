@@ -44,11 +44,14 @@ public enum ProperNames {
       && NativeIO.regex("(?<![аеёиоуыэюяАЕЁИОУЫЭЮЯ])\\u0301", answer).isEmpty
   }
 
-  /// Plain forms of the words the book itself prints with a stress mark: those stay as printed.
+  /// Plain forms of the words the book itself prints with a stress mark or ё: their stress is
+  /// the author's, and they stay as printed.
   public static func authored(_ text: String) -> Set<String> {
     let ns = text as NSString
-    return Set(NativeIO.regex(word.replacingOccurrences(of: "ё]", with: "ё\\u0301]"), text)
-      .map { ns.substring(with: $0.range) }.filter { $0.unicodeScalars.contains("\u{301}") }.map(NativeStress.plain))
+    return Set(NativeIO.regex(word.replacingOccurrences(of: "ё]", with: "ё\\u0301]"), text.precomposedStringWithCanonicalMapping)
+      .map { ns.substring(with: $0.range) }
+      .filter { $0.unicodeScalars.contains("\u{301}") || $0.unicodeScalars.contains("ё") || $0.unicodeScalars.contains("Ё") }
+      .map(NativeStress.plain))
   }
 
   /// Replaces the occurrences whose plain form is known; the book's letter case is kept. With
