@@ -174,13 +174,26 @@ final class CoreTests: XCTestCase {
       ["id": "g", "speaker": "narrator", "text": "Глава вторая", "paragraph_id": "p3", "chapter_id": "c2"]]
     let counts = Dictionary(uniqueKeysWithValues: rows.map { (NativeIO.string($0["id"]), 2400) })
     let (timeline, _) = try SpeechBatch.timeline(rows, frameCounts: counts, pauses: SpeechBatch.Pauses())
-    // role change mid-sentence, role change, sentence, colon (as a comma), paragraph, chapter, end of book;
-    // the defaults keep the former sentence/paragraph/comma values and add the chapter pause.
-    XCTAssertEqual(timeline.map { ($0["pause_frames"] as! Int) / 24 }, [180, 180, 450, 100, 800, 2000, 2000])
-    let custom = SpeechBatch.Pauses(["comma": 200, "sentence": 700, "paragraph": 1200, "chapter": 3500, "bogus": 1])
+    // role change mid-sentence (the voice-change minimum), role change, sentence, colon in one voice
+    // (as a comma), paragraph, chapter, end of book.
+    XCTAssertEqual(timeline.map { ($0["pause_frames"] as! Int) / 24 }, [350, 350, 450, 100, 800, 2000, 2000])
+    let custom = SpeechBatch.Pauses(["comma": 200, "sentence": 700, "paragraph": 1200, "chapter": 3500, "speaker": 500, "bogus": 1])
     XCTAssertEqual(try SpeechBatch.timeline(rows, frameCounts: counts, pauses: custom).0.map { ($0["pause_frames"] as! Int) / 24 },
-      [280, 280, 700, 200, 1200, 3500, 3500])
+      [500, 500, 700, 200, 1200, 3500, 3500])
     XCTAssertEqual(SpeechBatch.Pauses(["sentence": 99999]), SpeechBatch.Pauses())  // out of range keeps the default
+    // A voice change never gets less than the minimum, even with zero boundary pauses.
+    let zero = SpeechBatch.Pauses(["comma": 0, "sentence": 0, "paragraph": 0, "chapter": 0])
+    XCTAssertEqual(try SpeechBatch.timeline(rows, frameCounts: counts, pauses: zero).0.map { ($0["pause_frames"] as! Int) / 24 },
+      [350, 350, 350, 0, 0, 0, 0])
+    // "— ответил князь: ‖ — Князей…": a colon before another voice is the end of the author's sentence.
+    let colon: [Object] = [
+      ["id": "a", "speaker": "narrator", "text": "— тотчас же ответил князь:", "paragraph_id": "p1", "chapter_id": "c1"],
+      ["id": "b", "speaker": "prince", "text": "— князей Мышкиных теперь и совсем нет,", "paragraph_id": "p1", "chapter_id": "c1"],
+      ["id": "c", "speaker": "prince", "text": "кроме меня.", "paragraph_id": "p1", "chapter_id": "c1"]]
+    let colonCounts = Dictionary(uniqueKeysWithValues: colon.map { (NativeIO.string($0["id"]), 2400) })
+    XCTAssertEqual(try SpeechBatch.timeline(colon, frameCounts: colonCounts, pauses: SpeechBatch.Pauses()).0.map { ($0["pause_frames"] as! Int) / 24 },
+      [450, 100, 2000])
+    XCTAssertTrue(NativeBook.introducesSpeech("сказал он: — ")); XCTAssertFalse(NativeBook.introducesSpeech("сказал он,"))
   }
   func testMontageAcceptsTheLongestPauseTheSettingsAllow() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

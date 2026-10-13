@@ -212,6 +212,11 @@ public enum NativeBook {
       .union(sentenceClosers).union(CharacterSet(charactersIn: "-—–")))
     return ending.last.map { ".!?…".contains($0) } ?? false
   }
+  /// Ends with a colon (closing quotes, dashes and spaces aside): what follows is quoted speech.
+  public static func introducesSpeech(_ text: String) -> Bool {
+    text.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines
+      .union(sentenceClosers).union(CharacterSet(charactersIn: "-—–"))).last == ":"
+  }
   public static func epub(
     _ manifest: Object, source: Object, timeline: [Object], audio: URL, output: URL,
     cover: (data: Data, ext: String)? = nil

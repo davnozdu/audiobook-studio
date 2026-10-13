@@ -316,7 +316,7 @@ struct StoryCharacter: Identifiable {
     }()
     // Silence after a line by boundary kind, in milliseconds (about 0.3 s of the line's own edge
     // silence is heard on top). Changing them rebuilds only the montage, not the speech.
-    static let pauseDefaults = ["comma": 100, "sentence": 450, "paragraph": 800, "chapter": 2000]
+    static let pauseDefaults = ["comma": 100, "sentence": 450, "paragraph": 800, "chapter": 2000, "speaker": 350]
     @Published var pauses: [String: Int] = (UserDefaults.standard.dictionary(forKey: "pauses") as? [String: Int])
         .map { Studio.pauseDefaults.merging($0) { _, saved in saved } } ?? Studio.pauseDefaults {
         didSet { UserDefaults.standard.set(pauses, forKey: "pauses") }
@@ -1356,15 +1356,15 @@ struct SettingsView: View {
             BotSettingsView(bot: studio.bot)
             Divider()
             Text("Паузы при чтении").font(.headline)
-            Text("Тишина, которую приложение добавляет между фрагментами. Внутри фразы паузы на запятых делает сама модель. К каждому значению добавляется около 0,3 с естественной тишины на краях реплики.").font(.caption).foregroundStyle(.secondary)
-            ForEach([("comma", "Внутри предложения (запятая, «— сказал он, —»)"), ("sentence", "Между предложениями"),
-                     ("paragraph", "Между абзацами"), ("chapter", "После главы")], id: \.0) { key, title in
+            Text("Тишина, которую приложение добавляет между фрагментами. Внутри фразы паузы на запятых делает сама модель; её собственная тишина на краях реплики звучит сверх этих значений.").font(.caption).foregroundStyle(.secondary)
+            ForEach([("comma", "Внутри предложения одного голоса (запятая)"), ("speaker", "Смена голоса, не меньше («— сказал он, —»)"),
+                     ("sentence", "Между предложениями"), ("paragraph", "Между абзацами"), ("chapter", "После главы")], id: \.0) { key, title in
                 Stepper(value: Binding(get: { studio.pauses[key] ?? Studio.pauseDefaults[key]! },
                                        set: { studio.pauses[key] = $0 }), in: 0...5000, step: 50) {
                     Text("\(title): \(studio.pauses[key] ?? Studio.pauseDefaults[key]!) мс")
                 }
             }
-            Text("При смене говорящего внутри фразы добавляется ещё 80 мс. Изменение пауз не требует новой озвучки: при следующей сборке пересобирается только монтаж.").font(.caption).foregroundStyle(.secondary)
+            Text("Когда один персонаж сменяет другого, пауза не бывает короче значения «Смена голоса»; после двоеточия перед чужой репликой — как между предложениями. Изменение пауз не требует новой озвучки: при следующей сборке пересобирается только монтаж.").font(.caption).foregroundStyle(.secondary)
             Button("Паузы по умолчанию") { studio.pauses = Studio.pauseDefaults }.disabled(studio.pauses == Studio.pauseDefaults)
             Divider()
             Text("Поведение приложения").font(.headline)

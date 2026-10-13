@@ -26,13 +26,17 @@ public enum SpeechBatch {
     return jobs
   }
 
-  /// Silence added after a line, by the kind of boundary that follows it (milliseconds). About
-  /// 0.3 s of the line's own edge silence (kept by trimming) is heard on top of these values.
   /// Longest silence between lines (the settings slider's range); the montage accepts the same.
   public static let maxPauseMS = 5000
 
+  /// Silence added after a line, by the kind of boundary that follows it (milliseconds). The
+  /// line's own edge silence comes on top, but trimming does not guarantee any, so every audible
+  /// boundary is guaranteed here.
   public struct Pauses: Equatable {
     public var comma = 100, sentence = 450, paragraph = 800, chapter = 2000
+    /// Least silence whenever the voice changes, whatever the punctuation: two characters must
+    /// never run into each other ("— Мышкин, ‖ — отвечал тот").
+    public var speaker = 350
     public init() {}
     /// Values from the app settings; missing or out-of-range entries keep the defaults.
     public init(_ settings: Any?) {
@@ -43,16 +47,21 @@ public enum SpeechBatch {
       }
       comma = value("comma", comma); sentence = value("sentence", sentence)
       paragraph = value("paragraph", paragraph); chapter = value("chapter", chapter)
+      speaker = value("speaker", speaker)
     }
     /// Pause after `row` given the next row (nil at the end of the book).
     func after(_ row: Object, next: Object?) -> Int {
       guard let next else { return chapter }
-      if NativeIO.string(next["chapter_id"]) != NativeIO.string(row["chapter_id"]) { return chapter }
-      if NativeIO.string(next["paragraph_id"]) != NativeIO.string(row["paragraph_id"]) { return paragraph }
       let text = NativeIO.string(row["text"])
-      if NativeBook.sentenceFinished(text) { return sentence }
-      // A role change inside a sentence ("— сказал он, —") needs a little more air than a comma.
-      return NativeIO.string(next["speaker"]) == NativeIO.string(row["speaker"]) ? comma : comma + 80
+      let changes = NativeIO.string(next["speaker"]) != NativeIO.string(row["speaker"])
+      let boundary: Int
+      if NativeIO.string(next["chapter_id"]) != NativeIO.string(row["chapter_id"]) { boundary = chapter }
+      else if NativeIO.string(next["paragraph_id"]) != NativeIO.string(row["paragraph_id"]) { boundary = paragraph }
+      else if NativeBook.sentenceFinished(text) { boundary = sentence }
+      // "— ответил князь: ‖ — Князей…": the author's words are over and another voice speaks.
+      else if changes && NativeBook.introducesSpeech(text) { boundary = sentence }
+      else { boundary = comma }
+      return changes ? max(boundary, speaker) : boundary
     }
   }
 
