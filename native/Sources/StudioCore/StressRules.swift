@@ -21,6 +21,7 @@ public enum StressRules {
       "ходата́йство", "опто́вый", "че́рпать", "балова́ть", "бало́ванный", "жалюзи́", "дефи́с", "досу́г",
       "портфе́ль", "угля́", "щаве́ля", "наме́рение", "обеспе́чение", "о́трочество", "зна́мение", "и́здавна",
       "алфави́т", "мусоропрово́д", "газопрово́д", "цепо́чка", "кладова́я", "прину́дить", "заку́порить",
+      "нача́ть", "приня́ть", "поня́ть", "заня́ть", "подня́ть", "отня́ть", "наня́ть",
     ]
     return Dictionary(marked.map { (NativeStress.plain($0), $0) }, uniquingKeysWith: { a, _ in a })
   }()
@@ -54,6 +55,13 @@ public enum StressRules {
       return last ? Array(found.suffix(2)) : Array(found.prefix(2))
     }
     let next = words(after, last: false), previous = words(before, last: true)
+    // «все, кто / кому…» are people; «всё, что / чего…» is everything.
+    let relative = after.lowercased().trimmingCharacters(in: .whitespaces)
+    if relative.hasPrefix(",") {
+      let word = relative.dropFirst().trimmingCharacters(in: .whitespaces).components(separatedBy: CharacterSet.letters.inverted).first ?? ""
+      if ["кто", "кому", "кого", "кем", "ком"].contains(word) { return "все" }
+      if ["что", "чего", "чему", "чем"].contains(word) { return "всё" }
+    }
     func pluralVerb(_ w: String) -> Bool {
       w.count >= 4 && !notVerbs.contains(w) && ["ли", "лись", "ют", "ут", "ят", "ются", "утся", "ятся"].contains { w.hasSuffix($0) }
     }

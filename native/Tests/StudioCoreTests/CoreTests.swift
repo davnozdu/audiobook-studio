@@ -434,6 +434,7 @@ final class CoreTests: XCTestCase {
     // Orthoepic norms and the user's own words.
     XCTAssertEqual(StressRules.orthoepy["звонит"], "звони\u{301}т")
     XCTAssertEqual(StressRules.orthoepy["началось"], "начало\u{301}сь")
+    XCTAssertEqual(StressRules.orthoepy["начать"], "нача\u{301}ть")
     let own = StressRules.userDictionary("за\u{301}мок\nЛе\u{301}бедев\nз+амок\nвойна\u{301}\nе\u{308}лка\n  творо\u{301}г \nвсё\nплохо\nдва\u{301}ра\u{301}за\nhello")
     XCTAssertEqual(own, ["замок": "за\u{301}мок", "лебедев": "ле\u{301}бедев", "творог": "творо\u{301}г", "все": "всё",
       "война": "война\u{301}", "елка": "ёлка"])
@@ -487,6 +488,7 @@ final class CoreTests: XCTestCase {
       ("пусть угасающую, но ", " же традицию.", "всё"), ("— ", " ясно. Гарри, вы забрали", "всё"),
       ("а они ", " продолжают рожать.", "все"), ("На ", " было определено.", "всё"),
       ("Ну-ка, ", ", ну-ка, разом!", nil), ("если ", " так, то", nil), ("через пять минут ", " ушли", "все"),
+      ("Почти ", ", кому я рассказывал", "все"), ("Вот ", ", что я знаю", "всё"),
     ]
     for (before, after, expected) in cases {
       XCTAssertEqual(StressRules.allOrEverything(before: before, after: after), expected, before + "|" + after)
