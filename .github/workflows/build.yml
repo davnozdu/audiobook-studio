@@ -80,4 +80,8 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/*.zip dist/appcast.xml --title "Audiobook Studio $VERSION" --generate-notes
+        # A version with a suffix (1.0.1-beta.2) is a pre-release: GitHub never serves it as
+        # releases/latest, so the Sparkle feed of installed copies stays on the last stable release.
+        run: |
+          if [[ "$VERSION" == *-* ]]; then KIND=--prerelease; else KIND=--latest; fi
+          gh release create "$GITHUB_REF_NAME" dist/*.zip dist/appcast.xml --title "Audiobook Studio $VERSION" --generate-notes $KIND
