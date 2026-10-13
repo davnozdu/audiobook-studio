@@ -69,7 +69,16 @@ public enum SpeechRecovery {
     var issue = "Пустой результат модели"
     for attempt in 0..<3 {
       try Task.checkCancellation()
-      let raw = try await operation(spoken, max(0, seed) + attempt * 104729)
+      let raw: [Float]
+      do { raw = try await operation(spoken, max(0, seed) + attempt * 104729) }
+      catch is CancellationError { throw CancellationError() }
+      catch {
+        // The model throws when it reaches the token limit without EOS: another seed may finish.
+        issue = error.localizedDescription
+        NativeIO.emit("log", ["message": issue + " · " + label + " · попытка \(attempt+1)/3"])
+        if attempt < 2 { NativeIO.stage("Повтор генерации · " + label + " · попытка \(attempt+2)/3") }
+        continue
+      }
       if !raw.allSatisfy({ $0.isFinite }) {
         issue = "Повреждённые аудиоданные модели"
       } else if activeTail(raw) {

@@ -130,7 +130,9 @@ public final class NativeStress {
   /// follows it. One-vowel words get no mark, as Silero does without stress_single_vowel.
   static func transfer(_ original: String, _ prediction: String) -> String {
     guard plain(original) == plain(prediction) else { return original }
-    let scalars = Array(original.unicodeScalars)
+    // Letters only: an existing mark in the original would take a letter's place and cut the
+    // word ("за́мок" → "за́́мо"). The prediction carries the stress.
+    let scalars = Array(original.unicodeScalars.filter { $0.value != 0x301 })
     var out = String.UnicodeScalarView()
     var index = 0
     var afterYo = false

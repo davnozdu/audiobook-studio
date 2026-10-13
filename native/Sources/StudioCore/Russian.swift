@@ -425,9 +425,17 @@ public struct RussianText {
         noun)
       var female =
         !masculine && !neuter
-        && (Self.contains(
+        && Self.contains(
           "запись записи страница страницы книга книги минута минуты секунда секунды строка строки глава главы женщина женщины девушка девушки копейка копейки ночь дверь жизнь смерть любовь мышь площадь тетрадь вещь память новость кость часть мысль степень дочь мать сеть роль цель соль боль ель осень",
-          noun) || noun.hasSuffix("а") || noun.hasSuffix("я"))
+          noun)
+      // The noun's ending shows its gender only together with the numeral's own form: after
+      // 1 the nominative (одна книга), after 2–4 the genitive singular, where masculine and
+      // neuter nouns end in -а/-я (два часа, два дня, два окна) and feminine ones in -ы/-и.
+      let last = abs(n) % 10, teen = abs(n) % 100 / 10 == 1
+      if c == 0 && !masculine && !neuter && !teen {
+        if last == 1 { female = female || noun.hasSuffix("а") || noun.hasSuffix("я") }
+        if (2...4).contains(last) { female = female || noun.hasSuffix("ы") || noun.hasSuffix("и") }
+      }
       if c != 0 && !masculine && !neuter {
         female =
           female

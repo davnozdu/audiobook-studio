@@ -92,11 +92,30 @@ public enum StudioQwenSampler {
         return MLXArray(values).reshaped(1, vocab)
     }
 
+    /// Gumbel noise [batch, vocab] from each lane's own seed, the step and the code group
+    /// (lowbias32 hash, computed on the GPU for all lanes at once): a lane draws the same numbers
+    /// whatever its batch neighbours are, so a line's result does not depend on batch composition.
+    public static func gumbel(seeds: MLXArray, step: Int, group: Int, vocab: Int) -> MLXArray {
+        let index = MLXArray(UInt32(0) ..< UInt32(vocab)).reshaped(1, vocab)
+        let salt = UInt32(truncatingIfNeeded: step &* 0x85EB_CA77) &+ UInt32(truncatingIfNeeded: (group + 1) &* 0xC2B2_AE3D)
+        var x = seeds * UInt32(0x9E37_79B1) + index + MLXArray(salt)
+        x = x ^ (x >> UInt32(16)); x = x * UInt32(0x7FEB_352D)
+        x = x ^ (x >> UInt32(15)); x = x * UInt32(0x846C_A68B)
+        x = x ^ (x >> UInt32(16))
+        let uniform = (x >> UInt32(8)).asType(.float32) * Float(1.0 / 16_777_216) + Float(1.0 / 33_554_432)
+        return -MLX.log(-MLX.log(uniform))
+    }
+    /// Per-lane seeds as a [batch, 1] UInt32 array for `gumbel`.
+    public static func laneSeeds(_ seeds: [UInt64]) -> MLXArray {
+        MLXArray(seeds.map { UInt32(truncatingIfNeeded: $0 ^ ($0 >> 32)) }).reshaped(seeds.count, 1)
+    }
+
     /// logits [batch, time, vocab] -> tokens [batch, 1] (Int32). Finished lanes get `fill`.
+    /// Sampling is Gumbel-max over the filtered scores, i.e. categorical(scores / temperature).
     public static func sample(_ logits: MLXArray, finished: MLXArray, fill: Int32,
         temperature: Float, topK: Int, suppress: MLXArray? = nil,
         seen: MLXArray? = nil, repetitionPenalty: Float = 1, eos: Int? = nil,
-        key: MLXArray) -> MLXArray {
+        seeds: MLXArray, step: Int, group: Int) -> MLXArray {
         var scores = logits[0..., (-1)..., 0...].squeezed(axis: 1).asType(.float32)
         let batch = scores.dim(0), vocab = scores.dim(1)
         if let suppress { scores = scores + suppress }
@@ -119,7 +138,7 @@ public enum StudioQwenSampler {
                 let isEOS = MLXArray(0 ..< Int32(vocab)).reshaped(1, vocab) .== Int32(eos)
                 scores = which(isEOS, eosLogit, scores)
             }
-            tokens = categorical(scores / temperature, key: key)
+            tokens = argMax(scores / temperature + gumbel(seeds: seeds, step: step, group: group, vocab: vocab), axis: -1)
         }
         tokens = which(finished, MLXArray(fill), tokens.asType(.int32))
         return tokens.reshaped(batch, 1)
@@ -223,7 +242,7 @@ extension Qwen3TTSModel {
         let suppressMain = StudioQwenSampler.suppression(vocab: vocab, tokens: special)
         let suppressEarly = StudioQwenSampler.suppression(vocab: vocab, tokens: special + [eos])
         let cache = talker.makeCache(), codeCache = talker.codePredictor.makeCache()
-        var key = MLX.key(seeds.reduce(UInt64(0x9E37_79B9_7F4A_7C15)) { $0 &* 1_000_003 &+ $1 })
+        let laneSeeds = StudioQwenSampler.laneSeeds(seeds)
         var finished = MLXArray.zeros([lanes], type: Bool.self)
         var seen = MLXArray.zeros([lanes, vocab], type: Float.self)
         var codes = [[MLXArray]](repeating: [], count: lanes)
@@ -251,12 +270,10 @@ extension Qwen3TTSModel {
             let (logits, hidden) = talker(input,
                 positionIds: StudioQwenBatchLayout.positions(lengths: lengths, step: step),
                 mask: StudioQwenBatchLayout.mask(lengths: lengths, step: step).asType(input.dtype), cache: cache)
-            var draws = MLX.split(key: key, into: talkerConfig.numCodeGroups + 1)
-            key = draws.removeLast()
             let nextToken = StudioQwenSampler.sample(logits, finished: finished, fill: Int32(talkerConfig.codecPadId),
                 temperature: parameters.temperature, topK: parameters.topK,
                 suppress: step < 2 ? suppressEarly : suppressMain, seen: seen,
-                repetitionPenalty: parameters.repetitionPenalty ?? 1.05, eos: eos, key: draws[0])
+                repetitionPenalty: parameters.repetitionPenalty ?? 1.05, eos: eos, seeds: laneSeeds, step: step, group: 0)
             var codeTokens = [nextToken]
             let codeHidden = hidden[0..., (-1)..., 0...]
             for item in codeCache { _ = item.trim(item.offset) }
@@ -266,7 +283,7 @@ extension Qwen3TTSModel {
                     : talker.codePredictor.codecEmbedding[group - 1](codeTokens.last!)
                 let (predicted, _, _) = talker.codePredictor(codeInput, cache: codeCache, generationStep: group)
                 codeTokens.append(StudioQwenSampler.sample(predicted, finished: finished, fill: 0,
-                    temperature: parameters.temperature, topK: parameters.topK, key: draws[group + 1]))
+                    temperature: parameters.temperature, topK: parameters.topK, seeds: laneSeeds, step: step, group: group + 1))
             }
             let frame = concatenated(codeTokens, axis: 1)
             var embedding = talker.getInputEmbeddings()(nextToken)
@@ -381,9 +398,22 @@ extension Qwen3TTSModel {
         let seenRows = MLXArray([Float](repeating: 0, count: 6) + [1, 0, 0, 0, 0, 0] + [Float](repeating: 0, count: 6)).reshaped(3, 6)
         let picked = StudioQwenSampler.sample(rows, finished: MLXArray([false, false, true]), fill: 9,
             temperature: 0, topK: 0, suppress: StudioQwenSampler.suppression(vocab: 6, tokens: [1]),
-            seen: seenRows, repetitionPenalty: 1.05, key: MLX.key(1)).asArray(Int32.self)
+            seen: seenRows, repetitionPenalty: 1.05, seeds: StudioQwenSampler.laneSeeds([1, 2, 3]), step: 0, group: 0).asArray(Int32.self)
         let sampled = StudioQwenSampler.sample(rows, finished: MLXArray([false, false, false]), fill: 9,
-            temperature: 0.01, topK: 1, key: MLX.key(2)).asArray(Int32.self)
+            temperature: 0.01, topK: 1, seeds: StudioQwenSampler.laneSeeds([1, 2, 3]), step: 0, group: 0).asArray(Int32.self)
+        // A lane's draw depends only on its own seed: swapping or dropping neighbours changes nothing.
+        let flat = MLXArray.zeros([2, 1, 64], type: Float.self)
+        let ab = StudioQwenSampler.sample(flat, finished: MLXArray([false, false]), fill: 0, temperature: 1, topK: 0,
+            seeds: StudioQwenSampler.laneSeeds([11, 22]), step: 5, group: 3).asArray(Int32.self)
+        let ba = StudioQwenSampler.sample(flat, finished: MLXArray([false, false]), fill: 0, temperature: 1, topK: 0,
+            seeds: StudioQwenSampler.laneSeeds([22, 11]), step: 5, group: 3).asArray(Int32.self)
+        let alone = StudioQwenSampler.sample(flat[0 ..< 1], finished: MLXArray([false]), fill: 0, temperature: 1, topK: 0,
+            seeds: StudioQwenSampler.laneSeeds([11]), step: 5, group: 3).asArray(Int32.self)
+        let noise = StudioQwenSampler.gumbel(seeds: StudioQwenSampler.laneSeeds([7]), step: 1, group: 0, vocab: 4096).asArray(Float.self)
+        guard ab == [ba[1], ba[0]], alone == [ab[0]], noise.allSatisfy({ $0.isFinite }),
+              Set(noise.map { Int($0 * 4) }).count > 8 else {
+            throw AudioGenerationError.invalidInput("Qwen batch noise depends on neighbours or is degenerate")
+        }
         let remembered = StudioQwenSampler.remember(MLXArray.zeros([3, 6], type: Float.self),
             tokens: MLXArray([Int32(2), 5, 4]).reshaped(3, 1), finished: MLXArray([false, false, true]), eos: 5)
         guard picked == [3, 2, 9], sampled == [1, 0, 4],

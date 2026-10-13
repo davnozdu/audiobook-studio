@@ -762,6 +762,10 @@ final class Engine {
       let similarity = Double(dot / max(norms, 1e-12))
       let accepted = similarity >= Self.mannerIdentityThreshold
       if accepted { mannerAccepted.insert(key) }
+      // A rejected sample is never read: drop its conditioning. Its source array stays in
+      // referenceArrays, because upstream caches by ObjectIdentifier and a freed address could
+      // be reused by another voice.
+      else { voicesReady.removeValue(forKey: key) }
       try NativeIO.write(references[key]!.0.deletingPathExtension().appendingPathExtension("identity.json"),
         ["pair": (referenceHashes[key] ?? "") + ":" + (referenceHashes[main] ?? ""), "similarity": similarity])
       NativeIO.emit("log", ["message": String(format: "Манера [%@]: сходство с основным голосом %.3f · %@", key, similarity,

@@ -118,6 +118,29 @@ final class CoreTests: XCTestCase {
     XCTAssertTrue(try SpeechBatch.plan(rows, pending: pending, maximum: 1).allSatisfy { $0.count == 1 })
     XCTAssertThrowsError(try SpeechBatch.plan(rows, pending: [100]))
   }
+  func testNarratorDirectionKeepsCancellation() async throws {
+    let task = Task {
+      try await NativeDirector([:]).narratorProfile(["id": "narrator"], source: ["title": "К", "author": "А",
+        "paragraphs": [["id": "p1", "text": "Текст."]]], paragraphIDs: ["p1"])
+    }
+    task.cancel()
+    do { _ = try await task.value; XCTFail("cancellation became a template fallback") } catch is CancellationError {}
+  }
+  func testSampleRetriesWhenModelThrows() async throws {
+    var calls = 0
+    let samples = try await SpeechRecovery.generate(text: "Проба голоса.", seed: 5, label: "образец") { _, _ in
+      calls += 1
+      if calls < 3 { throw StudioError("Qwen reached the audio token limit before finishing the utterance") }
+      return [Float](repeating: 0.1, count: 4800) + [Float](repeating: 0, count: 2400)
+    }
+    XCTAssertEqual(calls, 3); XCTAssertFalse(samples.isEmpty)
+    var cancelled = 0
+    do {
+      _ = try await SpeechRecovery.generate(text: "Проба.", seed: 5, label: "образец") { _, _ in cancelled += 1; throw CancellationError() }
+      XCTFail("cancellation was swallowed")
+    } catch is CancellationError {}
+    XCTAssertEqual(cancelled, 1)
+  }
   func testBatchRecoveryRetriesOnlyUnfinishedLane() async throws {
     let complete = [Float](repeating: 0.1, count: 4800) + [Float](repeating: 0, count: 2400)
     var calls: [[Int]] = [], attemptSeeds: [[Int]] = [], saved: [Int] = []
@@ -554,6 +577,13 @@ final class CoreTests: XCTestCase {
     XCTAssertEqual(try ru.integer(1234), "одна тысяча двести тридцать четыре")
     XCTAssertEqual(try ru.normalize("25%"), "двадцать пять процентов")
     XCTAssertEqual(try ru.normalize("Глава IV"), "Глава четвёртая")
+    // Genitive after 2–4: -а/-я is masculine or neuter, -ы/-и feminine.
+    for (input, output) in [("За 2 часа.", "За два часа."), ("Купил 2 карандаша.", "Купил два карандаша."),
+      ("Взял 2 билета.", "Взял два билета."), ("Через 2 дня.", "Через два дня."), ("За 2 минуты.", "За две минуты."),
+      ("Прошло 2 недели.", "Прошло две недели."), ("Открыли 2 окна.", "Открыли два окна."),
+      ("Это 1 книга.", "Это одна книга."), ("Прошло 22 года.", "Прошло двадцать два года.")] {
+      XCTAssertEqual(try ru.normalize(input), output)
+    }
     XCTAssertEqual(try ru.normalize("Главы I, II и III"), "Главы первая, вторая и третья")
     XCTAssertEqual(
       try ru.normalize("В 1870 он вернулся."), "В тысяча восемьсот семидесятом он вернулся.")
@@ -610,15 +640,30 @@ final class CoreTests: XCTestCase {
       <aside epub:type="footnote" id="fn1"><p>Сноска.</p></aside><section role="doc-endnotes"><p>Конец.</p></section></body></html>
       """, options: [])
     let all = NativeBook.elements(html)
-    for node in all where NativeBook.isNoteContainer(node) || NativeBook.isNoteReference(node) { node.detach() }
+    let ids = Dictionary(uniqueKeysWithValues: all.compactMap { n in n.attribute(forName: "id")?.stringValue.map { ($0, n) } })
+    for node in all where NativeBook.isNoteContainer(node) || NativeBook.isNoteReference(node, ids: ids) { node.detach() }
     XCTAssertEqual(NativeIO.replace("\\s+", html.rootElement()?.stringValue ?? "", " ").trimmingCharacters(in: .whitespaces),
       "Текст и ещё глава 2.")
+    // Audit: a plain aside and a numbered link to a section are book text, not notes.
+    let plain = try XMLDocument(xmlString: """
+      <html><body><p>См. главу <a href="chapter.xhtml#section2">2</a>.</p><aside><p>Важная авторская вставка.</p></aside>
+      <p>Сноска<sup><a href="#fn7">7</a></sup> и ссылка <sup><a href="notes.xhtml#note12">12</a></sup>.</p><p id="section2">Продолжение.</p></body></html>
+      """, options: [])
+    let plainAll = NativeBook.elements(plain)
+    let plainIDs = Dictionary(uniqueKeysWithValues: plainAll.compactMap { n in n.attribute(forName: "id")?.stringValue.map { ($0, n) } })
+    for node in plainAll where NativeBook.isNoteContainer(node) || NativeBook.isNoteReference(node, ids: plainIDs) { node.detach() }
+    XCTAssertEqual(NativeIO.replace("\\s+", plain.rootElement()?.stringValue ?? "", ""),
+      "См.главу2.Важнаяавторскаявставка.Сноскаиссылка.Продолжение.")
     XCTAssertEqual(ForeignReading.fragments("Это a priori, а не vis inertiae; Übermensch и ressentiment, Fin-Gal."),
       ["a priori", "vis inertiae", "Übermensch", "ressentiment", "Fin-Gal"])
     XCTAssertEqual(ForeignReading.apply("Это a priori и Übermensch.", readings: ["a priori": "а при\u{301}ори"]),
       "Это а при\u{301}ори и Übermensch.")
     XCTAssertTrue(ForeignReading.valid("ю\u{301}бермэнш")); XCTAssertTrue(ForeignReading.valid("вис ине\u{301}рциэ"))
     XCTAssertFalse(ForeignReading.valid("Übermensch")); XCTAssertFalse(ForeignReading.valid("сверх-человек (перевод)"))
+    // Audit: marks alone, a mark after a consonant, or an unstressed polysyllable are rejected.
+    XCTAssertFalse(ForeignReading.valid("\u{301}\u{301}")); XCTAssertFalse(ForeignReading.valid("при\u{301}\u{301}ори"))
+    XCTAssertFalse(ForeignReading.valid("пр\u{301}иори")); XCTAssertFalse(ForeignReading.valid("априори"))
+    XCTAssertTrue(ForeignReading.valid("шлехт")); XCTAssertTrue(ForeignReading.valid("хик ни\u{301}гер эст"))
     let ru = try RussianText(rules)
     XCTAssertEqual(try ru.normalize("См. § 7 и §§ 9"), "См. параграф семь и параграфы девять")
   }
@@ -635,6 +680,10 @@ final class CoreTests: XCTestCase {
     XCTAssertEqual(ProperNames.apply("Рого\u{301}жин и РОГОЖИНА, Федор.", stresses: ["рогожин": "рого\u{301}жин", "рогожина": "рого\u{301}жина", "федор": "фёдор"]),
       "Рого\u{301}жин и РОГО\u{301}ЖИНА, Фёдор.")
     XCTAssertEqual(NativeStress.yoNames["федоровича"], "фёдоровича")
+    // A word already stressed in the book keeps every letter (audit: "за́мок" → "за́́мо").
+    XCTAssertEqual(NativeStress.transfer("за\u{301}мок", "за\u{301}мок"), "за\u{301}мок")
+    XCTAssertEqual(NativeStress.transfer("Мука\u{301}", "му\u{301}ка"), "Му\u{301}ка")
+    XCTAssertEqual(NativeStress.transfer("елка", "ё\u{301}лка"), "ёлка")
     XCTAssertTrue(NativeStress.sentenceStart("Он ушёл. — Федор" as NSString, before: 11, prefix: ""))
     XCTAssertFalse(NativeStress.sentenceStart("Он и Федор" as NSString, before: 5, prefix: ""))
     // Words already stressed (in the book or by the dictionary) are not candidates again.

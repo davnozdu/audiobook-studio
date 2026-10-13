@@ -454,7 +454,7 @@ public final class NativeDirector {
     return profile
   }
   /// Narrator direction from the beginning and middle of the book; nil keeps the template.
-  func narratorProfile(_ voice: Object, source: Object, paragraphIDs: Set<String>) async
+  func narratorProfile(_ voice: Object, source: Object, paragraphIDs: Set<String>) async throws
     -> (profile: Object, gender: String?)?
   {
     let paragraphs = NativeIO.objects(source["paragraphs"])
@@ -488,7 +488,7 @@ public final class NativeDirector {
       }
       return (profile, gender)
     } catch is CancellationError {
-      return nil
+      throw CancellationError()  // user cancellation is not a reason to fall back to the template
     } catch {
       NativeIO.emit("log", ["message": "Профиль рассказчика по книге не получен, используется стандартный: " + error.localizedDescription])
       return nil
@@ -512,7 +512,7 @@ public final class NativeDirector {
         NativeIO.string($0).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
       }
       if id == "narrator", firstAnalysis, !paragraphs.isEmpty,
-        let directed = await narratorProfile(voices[index], source: source, paragraphIDs: paragraphIDs) {
+        let directed = try await narratorProfile(voices[index], source: source, paragraphIDs: paragraphIDs) {
         // The narrator reads the whole book: its delivery follows this book's genre and tone,
         // or the hero's own voice in first-person narration. Later edits are kept below.
         profile = directed.profile

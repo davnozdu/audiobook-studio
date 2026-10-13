@@ -11,12 +11,21 @@ public enum ForeignReading {
   public static func fragments(_ text: String) -> [String] {
     NativeIO.regex(pattern, text).map { (text as NSString).substring(with: $0.range) }
   }
-  /// Cyrillic letters, spaces, hyphens and the combining acute stress mark only.
+  /// Cyrillic words separated by spaces or hyphens; a stress mark only right after a vowel, and
+  /// every word of two or more syllables stressed exactly once (or carrying its stressed 'ё').
   /// NSRegularExpression on UTF-16: String.range(of:options:) treats "я́" as one grapheme.
   public static func valid(_ reading: String) -> Bool {
     let ns = reading as NSString
-    return NativeIO.regex("^[А-Яа-яЁё\\u0301]+(?:[ \\-][А-Яа-яЁё\\u0301]+)*$", reading)
-      .contains { $0.range.location == 0 && $0.range.length == ns.length }
+    guard NativeIO.regex("^[А-Яа-яЁё\\u0301]+(?:[ \\-][А-Яа-яЁё\\u0301]+)*$", reading)
+      .contains(where: { $0.range.location == 0 && $0.range.length == ns.length }),
+      NativeIO.regex("(?<![аеёиоуыэюяАЕЁИОУЫЭЮЯ])\\u0301", reading).isEmpty
+    else { return false }
+    return reading.components(separatedBy: CharacterSet(charactersIn: " -")).allSatisfy { word in
+      let marks = word.unicodeScalars.filter { $0.value == 0x301 }.count
+      let yo = word.unicodeScalars.contains("ё") || word.unicodeScalars.contains("Ё")
+      return NativeStress.vowelCount(word) >= 1 && (NativeStress.vowelCount(word) == 1
+        ? marks == 0 : marks == 1 || (marks == 0 && yo))
+    }
   }
   public static func apply(_ text: String, readings: [String: String]) -> String {
     let ns = NSMutableString(string: text)

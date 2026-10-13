@@ -8,7 +8,8 @@ codec embeddings, codec prefix with speaker embedding) are built once per charac
 Inputs use the official offline ICL layout, left padding, attention masks and
 per-lane positions. Token choice is vectorised over [batch, vocab] with the same
 steps as upstream `sampleToken` (suppression, repetition penalty, EOS-preserving
-top-k, temperature); one random key per step serves all lanes. Repetition history
+top-k, temperature) as Gumbel-max; the noise is a GPU hash of each lane's own seed, step and
+code group, so a line's draws do not depend on its batch neighbours (checked in the self-check). Repetition history
 and EOS flags live on the GPU, so the next step is queued (`asyncEval`) before the
 previous step's tokens are read. Finished lanes stop collecting frames; token-limit
 failures are retried independently while accepted neighbours are saved immediately.

@@ -5,7 +5,7 @@ public enum NativeBook {
   // text mixed with nested blocks still stops extraction instead of being lost.
   static let blocks: Set<String> = [
     "p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "blockquote", "dt", "dd",
-    "div", "section", "article", "td", "th", "caption", "figcaption", "pre", "address",
+    "div", "section", "article", "td", "th", "caption", "figcaption", "pre", "address", "aside",
   ]
   static func elements(_ node: XMLNode) -> [XMLElement] {
     var result: [XMLElement] = []
@@ -61,23 +61,31 @@ public enum NativeBook {
     return (data, ext)
   }
   static func semantics(_ node: XMLElement) -> String {
-    (node.attributes ?? []).filter { ["type", "role"].contains($0.localName ?? "") }
+    (node.attributes ?? []).filter { ["type", "role", "class"].contains($0.localName ?? "") }
       .compactMap { $0.stringValue?.lowercased() }.joined(separator: " ")
   }
-  /// epub:type/role footnote, endnote(s), rearnote, or an aside.
+  /// Only explicitly marked notes (epub:type/role/class footnote, endnote, rearnote). A plain
+  /// aside is the author's text and stays.
   static func isNoteContainer(_ node: XMLElement) -> Bool {
     let kind = semantics(node)
-    return node.localName == "aside" || ["footnote", "endnote", "rearnote"].contains { kind.contains($0) }
+    return ["footnote", "endnote", "rearnote"].contains { kind.contains($0) }
   }
-  /// A marker such as ¹, [12], (3) or * that links to a note, or anything marked noteref.
-  static func isNoteReference(_ node: XMLElement) -> Bool {
+  /// noteref, an FB2-style `type="note"` link, or a marker (¹, [12], (3), *) linking to an element
+  /// that is a note: by its marking in this document or a note-like ID (fn3, note12, _ftn2).
+  /// A link to a chapter or section ("главу 2") stays.
+  static func isNoteReference(_ node: XMLElement, ids: [String: XMLElement]) -> Bool {
     let kind = semantics(node)
     if kind.contains("noteref") || (node.localName == "a" && kind.split(separator: " ").contains("note")) { return true }
+    guard node.localName == "a" || node.localName == "sup" else { return false }
     let text = (node.stringValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-    guard text.range(of: "^[\\[(]?(\\d{1,4}|\\*{1,3}|[a-z])[\\])]?$", options: .regularExpression) != nil else { return false }
-    let links = ([node] + elements(node)).filter { $0.localName == "a" }
-    let toNote = links.contains { ($0.attribute(forName: "href")?.stringValue ?? "").contains("#") }
-    return toNote && (node.localName == "a" || node.localName == "sup")
+    guard NativeIO.regex("^[\\[(]?(?:\\d{1,4}|\\*{1,3}|[a-z])[\\])]?$", text).count == 1 else { return false }
+    return ([node] + elements(node)).filter { $0.localName == "a" }.contains { link in
+      let href = link.attribute(forName: "href")?.stringValue ?? ""
+      guard let hash = href.firstIndex(of: "#") else { return false }
+      let target = String(href[href.index(after: hash)...])
+      if let element = ids[target], isNoteContainer(element) || isNoteContainer(element.parent as? XMLElement ?? element) { return true }
+      return NativeIO.regex("^(?i)(?:_?ftn|_?edn|fn|footnote|endnote|note|sdfootnote|n)[-_]?\\d+$", target).count == 1
+    }
   }
   public static func read(_ epub: URL) throws -> Object {
     let temp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -106,7 +114,11 @@ public enum NativeBook {
         node.detach()
       }
       // Footnotes are not read aloud: note containers and in-text note references go.
-      for node in elements(doc) where isNoteContainer(node) || isNoteReference(node) { node.detach() }
+      let ids = Dictionary(elements(doc).compactMap { node -> (String, XMLElement)? in
+        guard let id = node.attribute(forName: "id")?.stringValue else { return nil }
+        return (id, node)
+      }, uniquingKeysWith: { first, _ in first })
+      for node in elements(doc) where isNoteContainer(node) || isNoteReference(node, ids: ids) { node.detach() }
       let body: XMLNode = elements(doc).first(where: { $0.localName == "body" }) ?? doc
       let leaf = elements(body).filter {
         blocks.contains($0.localName ?? "")
