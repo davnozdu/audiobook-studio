@@ -520,6 +520,15 @@ final class CoreTests: XCTestCase {
     XCTAssertEqual(try parts("— Это — правда."), ["— Это — правда."])
     XCTAssertEqual(try parts("Он сказал: «Пойдём». Все встали."), ["Он сказал:", "«Пойдём».", "Все встали."])
     XCTAssertEqual(try parts("«Да», — ответил он."), ["«Да»,", "— ответил он."])
+    // Quoted terms and titles inside a sentence are not speech (Nietzsche: dozens of «terms»).
+    XCTAssertEqual(try parts("Слово «хороший» и понятие «хорошее и плохое» в «Генеалогии морали» означают разное."),
+      ["Слово «хороший» и понятие «хорошее и плохое» в «Генеалогии морали» означают разное."])
+    // Other quote styles are recognised the same way.
+    XCTAssertEqual(try parts("Он сказал: „Пойдём“. Все встали."), ["Он сказал:", "„Пойдём“.", "Все встали."])
+    XCTAssertEqual(try parts("“Да”, — ответил он."), ["“Да”,", "— ответил он."])
+    XCTAssertEqual(try parts("Он закричал \"Стой! Кто идёт?\" и выстрелил."), ["Он закричал", "\"Стой! Кто идёт?\"", "и выстрелил."])
+    XCTAssertEqual(try parts("Д’Артаньян вошёл."), ["Д’Артаньян вошёл."])
+    XCTAssertEqual(try parts("— «Вперёд!» — крикнул он."), ["— «Вперёд!»", "— крикнул он."])
   }
   func testSpeakerFragmentsRebuildParagraphExactly() throws {
     let text = "— Да 😀! — сказал он. — Идём, — и ничего больше!"
@@ -676,6 +685,14 @@ final class CoreTests: XCTestCase {
     XCTAssertTrue(ForeignReading.valid("шлехт")); XCTAssertTrue(ForeignReading.valid("хик ни\u{301}гер эст"))
     let ru = try RussianText(rules)
     XCTAssertEqual(try ru.normalize("См. § 7 и §§ 9"), "См. параграф семь и параграфы девять")
+    // Typography: decomposed ё, soft hyphen, note marks, decorations, №, fractions, quote styles, ligatures.
+    XCTAssertEqual(try ru.normalize("Е\u{0308}лка и пере\u{00AD}нос¹²."), "Ёлка и перенос.")
+    XCTAssertEqual(try ru.normalize("Слово[12] и знак* и крест†."), "Слово и знак и крест.")
+    XCTAssertEqual(try ru.normalize("* * *"), "")
+    XCTAssertEqual(try ru.normalize("Дом № 5"), "Дом номер пять")
+    XCTAssertEqual(try ru.normalize("Ещё ½ часа."), "Ещё одна вторая часа.")
+    XCTAssertEqual(try ru.normalize("Он сказал „да“ и “нет” и \"может\"."), "Он сказал «да» и «нет» и «может».")
+    XCTAssertEqual(try ru.normalize("ﬁnal"), "final")
   }
   func testNamesStressAndYoAreChecked() {
     let text = "Он видел Рогожина у окна. Рогожин молчал; потом пришёл генерал Епанчин и Фёдор."

@@ -319,25 +319,55 @@ public final class NativeDirector {
   /// Splits a paragraph where Russian dialogue may change between speech and the author's
   /// words: at a dash that follows punctuation and a space ("…, — сказал он. — …") and around
   /// «quotes». Fragments cover every non-space character; the dash starts the next fragment.
+  /// Opening quote → its possible closers, for «», „“/„”, “”, ‹›, ‚‘/‚’, ‘’ and straight "".
+  static let quotePairs: [Unicode.Scalar: Set<Unicode.Scalar>] = [
+    "\u{00AB}": ["\u{00BB}"], "\u{201E}": ["\u{201C}", "\u{201D}"], "\u{201C}": ["\u{201D}"],
+    "\u{2039}": ["\u{203A}"], "\u{201A}": ["\u{2018}", "\u{2019}"], "\u{2018}": ["\u{2019}"], "\"": ["\""],
+  ]
+  /// Top-level quoted spans (opening and closing index). Unclosed quotes are ignored; an
+  /// apostrophe between letters (д’Артаньян) is not a quote.
+  static func quoteSpans(_ s: [Unicode.Scalar]) -> [(Int, Int)] {
+    var stack: [(Int, Set<Unicode.Scalar>)] = [], spans: [(Int, Int)] = []
+    for (i, c) in s.enumerated() {
+      if let top = stack.last, top.1.contains(c) {
+        stack.removeLast()
+        if stack.isEmpty { spans.append((top.0, i)) }
+      } else if let closers = quotePairs[c] {
+        if c == "\u{2018}", i > 0, i + 1 < s.count, s[i - 1].properties.isAlphabetic, s[i + 1].properties.isAlphabetic { continue }
+        stack.append((i, closers))
+      }
+    }
+    return spans
+  }
+  /// Splits a paragraph into speech and author fragments: at a dash after punctuation, and around
+  /// quotes that are speech — at the paragraph start, after a colon or dash, or containing a whole
+  /// sentence. Quoted words, terms and titles inside a sentence stay in the author's fragment.
+  /// Fragments cover every non-space character; the dash starts the next fragment.
   public static func fragments(_ text: String) -> [(Int, Int)] {
     let scalars = Array(text.unicodeScalars)
     let dashes: Set<Unicode.Scalar> = ["\u{2014}", "\u{2013}"]
-    let stops: Set<Unicode.Scalar> = [",", ".", "!", "?", "\u{2026}", ":", ";", "\u{00BB}"]
+    let closers = Set(quotePairs.values.flatMap { $0 })
+    let stops: Set<Unicode.Scalar> = Set([",", ".", "!", "?", "\u{2026}", ":", ";"]).union(closers)
     let spaces = CharacterSet.whitespacesAndNewlines
     var cuts: Set<Int> = []
-    for i in scalars.indices {
-      if dashes.contains(scalars[i]) {
-        var j = i - 1
-        while j >= 0, spaces.contains(scalars[j]) { j -= 1 }
-        if j >= 0, j < i - 1, stops.contains(scalars[j]) { cuts.insert(i) }
-      } else if scalars[i] == "\u{00AB}", i > 0 {
-        cuts.insert(i)
-      } else if scalars[i] == "\u{00BB}" {
-        var j = i + 1
-        while j < scalars.count, stops.contains(scalars[j]) && scalars[j] != "\u{00BB}" { j += 1 }
-        while j < scalars.count, spaces.contains(scalars[j]) { j += 1 }
-        if j < scalars.count, !dashes.contains(scalars[j]) { cuts.insert(j) }
-      }
+    for i in scalars.indices where dashes.contains(scalars[i]) {
+      var j = i - 1
+      while j >= 0, spaces.contains(scalars[j]) { j -= 1 }
+      if j >= 0, j < i - 1, stops.contains(scalars[j]) { cuts.insert(i) }
+    }
+    for (open, close) in quoteSpans(scalars) {
+      var j = open - 1
+      while j >= 0, spaces.contains(scalars[j]) { j -= 1 }
+      let inner = String(String.UnicodeScalarView(scalars[(open + 1)..<close]))
+      let sentence = NativeIO.regex("\\p{L}+", inner).count >= 2
+        && inner.unicodeScalars.contains { ".!?\u{2026}".unicodeScalars.contains($0) }
+      guard j < 0 || scalars[j] == ":" || dashes.contains(scalars[j]) || sentence else { continue }
+      // A dash already opens its fragment; otherwise the quote starts a new one.
+      if j >= 0, !dashes.contains(scalars[j]) { cuts.insert(open) }
+      var k = close + 1
+      while k < scalars.count, stops.contains(scalars[k]), !closers.contains(scalars[k]) { k += 1 }
+      while k < scalars.count, spaces.contains(scalars[k]) { k += 1 }
+      if k < scalars.count, !dashes.contains(scalars[k]) { cuts.insert(k) }
     }
     var result: [(Int, Int)] = []
     var start = 0
@@ -350,6 +380,7 @@ public final class NativeDirector {
     }
     return result
   }
+
   /// Checks one speaker per fragment and joins neighbouring fragments of one speaker into
   /// spans; the spans reproduce the paragraph exactly by construction.
   public static func validateSpeakers(

@@ -183,6 +183,36 @@ public struct RussianText {
     }
     return n
   }
+  /// Typography that must not be read aloud or trip the model, mapped before numbers are read:
+  /// decomposed letters (е + ̈ → ё), soft hyphens and invisible characters, unlinked note marks
+  /// (¹, [12], *, †), decorations, № and fractions, maths signs, ligatures; every quote style
+  /// becomes «ёлочки», the form Russian text and the reading model use.
+  static func symbols(_ input: String) -> String {
+    var text = input.precomposedStringWithCanonicalMapping
+    text = NativeIO.replace("[\\u00AD\\u200C\\u200D\\u2060\\uFEFF]", text, "")
+    text = NativeIO.replace("[\\u00B9\\u00B2\\u00B3\\u2070-\\u2079\\u207A-\\u207F]+", text, "")
+    text = NativeIO.replace("\\[(?:\\d{1,4}|\\*{1,3})\\]|\\{\\d{1,4}\\}", text, "")
+    text = NativeIO.replace("[*†‡•·■□▪▫◦●○◆◇★☆¶|_~^\\\\]+", text, " ")
+    for (sign, words) in [("№№", "номера "), ("№", "номер "), ("½", " одна вторая"), ("⅓", " одна третья"),
+      ("¼", " одна четвёртая"), ("¾", " три четвёртых"), ("⅔", " две третьих"), ("±", " плюс-минус "),
+      ("≈", " примерно "), ("≠", " не равно "), ("≤", " меньше или равно "), ("≥", " больше или равно "),
+      ("÷", " разделить на "), ("×", " на "), ("‰", " промилле"), ("&", " и "),
+      ("ﬁ", "fi"), ("ﬂ", "fl"), ("ﬀ", "ff"), ("ﬃ", "ffi"), ("ﬄ", "ffl")] {
+      text = text.replacingOccurrences(of: sign, with: words)
+    }
+    for (from, to) in [("„", "«"), ("‹", "«"), ("›", "»"), ("”", "»")] { text = text.replacingOccurrences(of: from, with: to) }
+    // “ opens in English style and closes in Russian „…“ style; straight " alternates.
+    var out = "", open = false
+    for ch in text {
+      if ch == "\u{201C}" { out.append(open ? "»" : "«"); open.toggle() }
+      else if ch == "\"" { out.append(open ? "»" : "«"); open.toggle() }
+      else { if ch == "«" { open = true } else if ch == "»" { open = false }; out.append(ch) }
+    }
+    // A removed mark must not leave a gap before punctuation ("крест† ." → "крест.").
+    out = NativeIO.replace("[ \\t]+([,.!?;:\\u2026»)])", out, "$1")
+    out = NativeIO.replace("([«(])[ \\t]+", out, "$1")
+    return NativeIO.replace("[ \\t]{2,}", out, " ")
+  }
   public func normalize(_ input: String) throws -> String {
     var protected: [String] = []
     var text = try Self.sub(
@@ -194,6 +224,7 @@ public struct RussianText {
     }
     text = NativeIO.replace("[^\\S\\n\\r]|[\\u200b\\u0085]", text, " ")
     for dash in "—–‐‑‒⁃−﹣－" { text = text.replacingOccurrences(of: String(dash), with: "-") }
+    text = Self.symbols(text)
     // Section signs in treatises: "§ 23" is read "параграф 23", "§§ 4-6" "параграфы 4-6".
     text = NativeIO.replace("§\\s*§\\s*", text, "параграфы ")
     text = NativeIO.replace("§\\s*", text, "параграф ")

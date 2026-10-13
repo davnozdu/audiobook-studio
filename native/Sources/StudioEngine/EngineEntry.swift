@@ -795,6 +795,15 @@ final class Engine {
         referenceHash: hash, referenceText: reference.1, seed: seed)
       let file = raw.appendingPathComponent(id + ".spcm")
       files.append(file); signatures.append(signature); seeds.append(seed)
+      // Nothing to say (a "* * *" scene break, a lone note mark): the model would read symbols or
+      // return silence that fails three times. A 0.5 s inaudible pause (-94 dBFS) keeps the line in
+      // timing, montage and read-along instead.
+      if NativeIO.regex("[\\p{L}\\p{N}]", SpeechRecovery.text(NativeIO.string(row["tts_text"]))).isEmpty {
+        let pause = (0..<12000).map { $0 % 2 == 0 ? Float(0.00002) : Float(-0.00002) }
+        if SpeechCache.load(file, signature: signature) == nil { try SpeechCache.save(file, samples: pause, signature: signature) }
+        framesByID[id] = pause.count; completed += weight(i)
+        continue
+      }
       if let samples = SpeechCache.load(file, signature: signature) {
         framesByID[id] = samples.count; completed += weight(i)
       } else { pending.insert(i) }
