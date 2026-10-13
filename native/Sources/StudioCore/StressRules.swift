@@ -42,6 +42,33 @@ public enum StressRules {
     return result
   }
 
+  /// все or всё from the neighbouring words of the same clause, when grammar decides it: a plural
+  /// verb next to it (все пришли, вытянут все, все видели), «все до единого», «все готовы» — все;
+  /// «всё же / равно / ещё / ясно», «всё было» — всё. nil leaves the choice to the model and the LLM.
+  public static func allOrEverything(before: String, after: String) -> String? {
+    let clause = CharacterSet(charactersIn: ",.!?;:—–()«»\"")
+    func words(_ text: String, last: Bool) -> [String] {
+      let part = last ? text.components(separatedBy: clause).last ?? "" : text.components(separatedBy: clause).first ?? ""
+      let found = part.lowercased().components(separatedBy: CharacterSet.letters.union(CharacterSet(charactersIn: "-")).inverted)
+        .filter { !$0.isEmpty }
+      return last ? Array(found.suffix(2)) : Array(found.prefix(2))
+    }
+    let next = words(after, last: false), previous = words(before, last: true)
+    func pluralVerb(_ w: String) -> Bool {
+      w.count >= 4 && !notVerbs.contains(w) && ["ли", "лись", "ют", "ут", "ят", "ются", "утся", "ятся"].contains { w.hasSuffix($0) }
+    }
+    if let n = next.first {
+      if ["же", "равно", "ещё", "еще", "ясно", "кончено", "понятно", "правильно", "хорошо", "время"].contains(n) { return "всё" }
+      if n == "до", next.dropFirst().first == "единого" { return "все" }
+      if ["готовы", "согласны", "живы", "здоровы", "вместе"].contains(n) || pluralVerb(n) { return "все" }
+      if n.count >= 4, n.hasSuffix("ло") || n.hasSuffix("лось") { return "всё" }
+    }
+    if let p = previous.last, pluralVerb(p) { return "все" }
+    return nil
+  }
+  static let notVerbs: Set<String> = ["если", "или", "земли", "пыли", "вдали", "неужели", "минут", "салют", "приют",
+    "маршрут", "институт", "абсолют", "уют", "тут", "прут", "валют", "жгут", "кнут", "чуть-чуть"]
+
   static func same(_ a: String, _ b: String) -> Bool {
     a.lowercased().precomposedStringWithCanonicalMapping == b.lowercased().precomposedStringWithCanonicalMapping
   }

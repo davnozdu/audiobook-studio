@@ -479,6 +479,19 @@ final class CoreTests: XCTestCase {
     voice["tts_voice"] = "Light airy tenor, young adult"; voice["tts_delivery"] = "Gentle hesitant warm delivery"
     XCTAssertNotNil(try VoiceDirection.cached(voice))
   }
+  func testAllOrEverythingByGrammar() {
+    // Cases from «Лотерея» that Silero alone got wrong, and the ones it got right.
+    let cases: [(String, String, String?)] = [
+      ("— ", " готовы? — спросил господин", "все"), ("Пока не вытянут ", ", бумажку не разворачивать.", "все"),
+      ("Ты совсем не дал ему выбрать. ", " видели.", "все"), ("Её услышали ", " до единого.", "все"),
+      ("пусть угасающую, но ", " же традицию.", "всё"), ("— ", " ясно. Гарри, вы забрали", "всё"),
+      ("а они ", " продолжают рожать.", "все"), ("На ", " было определено.", "всё"),
+      ("Ну-ка, ", ", ну-ка, разом!", nil), ("если ", " так, то", nil), ("через пять минут ", " ушли", "все"),
+    ]
+    for (before, after, expected) in cases {
+      XCTAssertEqual(StressRules.allOrEverything(before: before, after: after), expected, before + "|" + after)
+    }
+  }
   func testPausesFollowBoundaryKindAndSettings() throws {
     let rows: [Object] = [
       ["id": "a", "speaker": "hero", "text": "— Да,", "paragraph_id": "p1", "chapter_id": "c1"],

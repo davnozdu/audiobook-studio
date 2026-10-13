@@ -404,6 +404,15 @@ public final class NativeStress {
         continue
       }
       guard vowels > 0 else { continue }
+      // все/всё by the grammar of the clause where it decides; the LLM check still votes.
+      if word == "все", !bookHasYo, homographs[word] != nil,
+        let decided = StressRules.allOrEverything(
+          before: String((prefix + ns.substring(to: m.range.location)).suffix(80)),
+          after: String((ns.substring(from: m.range.location + m.range.length) + suffix).prefix(80))) {
+        predictions[i] = decided
+        ruled.append(i)
+        continue
+      }
       if homographs[word] != nil || patterns[word] != nil {
         let before = String(
           cleanContext(prefix + ns.substring(to: m.range.location), start: true).suffix(150))
