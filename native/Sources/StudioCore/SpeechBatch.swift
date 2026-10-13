@@ -28,6 +28,9 @@ public enum SpeechBatch {
 
   /// Silence added after a line, by the kind of boundary that follows it (milliseconds). About
   /// 0.3 s of the line's own edge silence (kept by trimming) is heard on top of these values.
+  /// Longest silence between lines (the settings slider's range); the montage accepts the same.
+  public static let maxPauseMS = 5000
+
   public struct Pauses: Equatable {
     public var comma = 100, sentence = 450, paragraph = 800, chapter = 2000
     public init() {}
@@ -35,7 +38,7 @@ public enum SpeechBatch {
     public init(_ settings: Any?) {
       let o = NativeIO.object(settings)
       func value(_ key: String, _ fallback: Int) -> Int {
-        guard let v = (o[key] as? NSNumber)?.intValue, (0...5000).contains(v) else { return fallback }
+        guard let v = (o[key] as? NSNumber)?.intValue, (0...SpeechBatch.maxPauseMS).contains(v) else { return fallback }
         return v
       }
       comma = value("comma", comma); sentence = value("sentence", sentence)
@@ -74,7 +77,7 @@ public enum SpeechBatch {
         && !NativeBook.sentenceFinished(NativeIO.string(row["text"])) && requested == 450
       let pauseMS = pauses.map { $0.after(row, next: i + 1 < rows.count ? rows[i + 1] : nil) }
         ?? (continuing ? (NativeIO.string(next["speaker"]) == NativeIO.string(row["speaker"]) ? 100 : 180) : requested)
-      let pause = max(0, min(5000, pauseMS)) * 24
+      let pause = max(0, min(maxPauseMS, pauseMS)) * 24
       frames += pause
       timeline.append(["segment_id": ids[i], "speaker": row["speaker"]!,
         "audio_start": begin, "audio_end": finish, "clip_end": Double(frames) / 24000,

@@ -4,7 +4,7 @@ import Foundation
 ///
 /// SPC2 (written): 16-bit PCM — CD quality, quantisation noise at −96 dBFS, far below the final
 /// 96 kbit/s AAC — stored as second-order prediction residuals split into low/high byte planes and
-/// compressed with LZMA. Lossless at 16 bits; measured on speech about 95 MB per hour against
+/// compressed with LZMA. Lossless at 16 bits (Float32 beyond ±1 clips; measured model peaks stay below 0.8); measured on speech about 95 MB per hour against
 /// 283 MB for the former exact Float32 container, so a 20-hour book keeps ~1.9 GB instead of
 /// ~5.7 GB until it is packaged. SPC1 (exact Float32 + LZFSE) is still read.
 public enum SpeechPCM {

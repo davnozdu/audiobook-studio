@@ -402,10 +402,10 @@ import Combine
             defer { ProcessInfo.processInfo.endActivity(wake); worker = nil; activity(false, "Telegram: обработка завершена"); kick() }
             do {
                 try await execute(id)
-                try Task.checkCancellation()
-                try mutate(id) { $0.phase = .complete; $0.finished = Date(); $0.stage = "M4B и EPUB загружены и проверены" }
                 let j = try job(id); reply(j.status(), chat: j.chatID, html: true); try persist()
             } catch {
+                // execute already recorded the book as complete: a later failure must not undo that.
+                if (try? job(id))?.phase == .complete { failStorage(error); return }
                 let cancelled = Task.isCancelled
                 do {
                     try mutate(id) { $0.phase = self.shuttingDown ? .paused : cancelled ? .cancelled : .failed; $0.finished = Date(); $0.eta = nil
@@ -484,9 +484,12 @@ import Combine
             }
         }
         // Both files are uploaded and verified by content hash: the cloud copy is the book now.
-        // Remove the whole local job (input, project, voices, M4B/EPUB); the queue keeps the links.
+        // Record that durably first, then remove the whole local job (input, project, voices,
+        // M4B/EPUB); the queue keeps the links. A crash in between leaves the folder to the start-up
+        // sweep of complete jobs, never an unfinished job without its files.
+        try mutate(id) { $0.phase = .complete; $0.finished = Date(); $0.stage = "M4B и EPUB загружены и проверены"
+            $0.project = ""; $0.result = "" }
         Self.removeLocalCopy(folder)
-        try mutate(id) { $0.project = ""; $0.result = "" }
     }
     /// Deletes a finished job's local folder; failures are left for the next start-up sweep.
     static func removeLocalCopy(_ folder: URL) {

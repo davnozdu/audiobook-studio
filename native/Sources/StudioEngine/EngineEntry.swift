@@ -902,6 +902,11 @@ final class Engine {
             timing: { name, seconds in timings[name, default: 0] += seconds })
         }, accepted: { lane, samples in
           let i = indices[lane]
+          // The 16-bit cache clips at full scale. Measured peaks stay below 0.8; log any overshoot.
+          let peak = samples.reduce(Float(0)) { max($0, abs($1)) }
+          if peak > 1 {
+            NativeIO.emit("log", ["message": String(format: "Реплика %@ · пик %.3f выше 0 dBFS обрезан в кеше", ids[lane], Double(peak))])
+          }
           try SpeechCache.save(files[i], samples: samples, signature: signatures[i])
           framesByID[ids[lane]] = samples.count
           NativeIO.emit("log", ["message": String(format: "Реплика %@ · %.1f с речи · пакет %d", ids[lane], Double(samples.count) / 24000, jobNumber+1)])

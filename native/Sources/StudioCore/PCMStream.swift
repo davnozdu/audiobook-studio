@@ -156,7 +156,7 @@ extension NativeAudio {
       }
       try write(NativeWAV.bytes(samples)); frames += samples.count
       let pause = clip["pause_frames"] as? Int ?? 0
-      guard (0...72000).contains(pause),
+      guard (0...SpeechBatch.maxPauseMS * 24).contains(pause),
         abs(Double(pause) / 24000 - ((clip["clip_end"] as! Double) - (clip["audio_end"] as! Double))) < 0.00001 else {
         throw StudioError("Некорректная пауза · " + id)
       }

@@ -165,6 +165,23 @@ final class RemoteTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: store.jobFolder(open.id).path))    // unfinished: kept to resume
         XCTAssertEqual(BotService.bookExtension("Книга.FB2.zip"), "fb2.zip"); XCTAssertNil(BotService.bookExtension("a.pdf"))
     }
+    @MainActor func testUploadedBookIsSavedCompleteWhenLocalCopyIsRemoved() async throws {
+        let f = try folder(); defer { try? FileManager.default.removeItem(at: f) }
+        let bot = BotService(folder: f, secrets: MemorySecrets()); bot.config.connections["dropbox"] = "account"
+        var job = RemoteJob(chatID: 1, messageID: 1, fileID: "x", name: "book.epub", provider: .dropbox)
+        job.account = "account"; job.phase = .uploading; job.cloudFolder = "/Audiobook Studio/book"; job.project = "/p"
+        for name in ["audiobook.m4b", "audiobook.epub"] { var upload = RemoteUpload(); upload.link = "https://dropbox.test/" + name; job.uploads[name] = upload }
+        bot.state.jobs = [job]
+        let export = bot.store.jobFolder(job.id).appendingPathComponent("export")
+        try FileManager.default.createDirectory(at: export, withIntermediateDirectories: true)
+        for name in ["audiobook.m4b", "audiobook.epub", "remote-complete.json"] { try Data("{}".utf8).write(to: export.appendingPathComponent(name)) }
+        try await bot.execute(job.id)
+        // The queue on disk already says complete (with the links) once the local files are gone.
+        XCTAssertFalse(FileManager.default.fileExists(atPath: bot.store.jobFolder(job.id).path))
+        let saved = try RemoteStateStore(f).load().jobs[0]
+        XCTAssertEqual(saved.phase, .complete); XCTAssertEqual(saved.project, ""); XCTAssertEqual(saved.result, "")
+        XCTAssertEqual(saved.uploads["audiobook.m4b"]?.link, "https://dropbox.test/audiobook.m4b")
+    }
     @MainActor func testSameBookTwiceGetsItsOwnCloudFolder() async throws {
         defer { MockHTTP.handler = nil }
         let configuration = URLSessionConfiguration.ephemeral; configuration.protocolClasses = [MockHTTP.self]

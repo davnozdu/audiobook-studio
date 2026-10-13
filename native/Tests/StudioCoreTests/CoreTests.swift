@@ -177,6 +177,22 @@ final class CoreTests: XCTestCase {
       [280, 280, 700, 200, 1200, 3500, 3500])
     XCTAssertEqual(SpeechBatch.Pauses(["sentence": 99999]), SpeechBatch.Pauses())  // out of range keeps the default
   }
+  func testMontageAcceptsTheLongestPauseTheSettingsAllow() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let rows: [Object] = [
+      ["id": "a", "speaker": "v", "text": "Конец главы.", "paragraph_id": "p1", "chapter_id": "c1"],
+      ["id": "b", "speaker": "v", "text": "Глава вторая.", "paragraph_id": "p2", "chapter_id": "c2"]]
+    for id in ["a", "b"] {
+      try SpeechCache.save(root.appendingPathComponent("audio/segments/" + id + ".spcm"), samples: [0.1, 0.2], signature: id)
+    }
+    // 5000 ms chapter pause plus the comma-based values clamped at the same limit.
+    let pauses = SpeechBatch.Pauses(["chapter": SpeechBatch.maxPauseMS, "comma": SpeechBatch.maxPauseMS])
+    let (timeline, frames) = try SpeechBatch.timeline(rows, frameCounts: ["a": 2, "b": 2], pauses: pauses)
+    XCTAssertEqual(timeline.map { $0["pause_frames"] as! Int }, [120_000, 120_000])
+    let written = try NativeAudio.streamMontage(project: root, segments: rows, timeline: timeline, gains: [:]) { _ in }
+    XCTAssertEqual(written, frames)
+  }
   func testBatchRecoveryRetriesOnlyUnfinishedLane() async throws {
     let complete = [Float](repeating: 0.1, count: 4800) + [Float](repeating: 0, count: 2400)
     var calls: [[Int]] = [], attemptSeeds: [[Int]] = [], saved: [Int] = []

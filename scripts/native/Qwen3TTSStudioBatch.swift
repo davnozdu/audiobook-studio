@@ -102,7 +102,11 @@ public enum StudioQwenSampler {
         x = x ^ (x >> UInt32(16)); x = x * UInt32(0x7FEB_352D)
         x = x ^ (x >> UInt32(15)); x = x * UInt32(0x846C_A68B)
         x = x ^ (x >> UInt32(16))
-        let uniform = (x >> UInt32(8)).asType(.float32) * Float(1.0 / 16_777_216) + Float(1.0 / 33_554_432)
+        // The top 24-bit value lands on 1 - 2^-25, which Float32 rounds to exactly 1.0 (noise +inf,
+        // and NaN on a filtered -inf score). Clamp to the largest Float below 1: only that one value
+        // changes, every other draw stays identical to the cached results.
+        let uniform = MLX.minimum((x >> UInt32(8)).asType(.float32) * Float(1.0 / 16_777_216) + Float(1.0 / 33_554_432),
+                                  MLXArray(Float(1) - Float(1.0 / 16_777_216)))
         return -MLX.log(-MLX.log(uniform))
     }
     /// Per-lane seeds as a [batch, 1] UInt32 array for `gumbel`.
@@ -410,7 +414,9 @@ extension Qwen3TTSModel {
         let alone = StudioQwenSampler.sample(flat[0 ..< 1], finished: MLXArray([false]), fill: 0, temperature: 1, topK: 0,
             seeds: StudioQwenSampler.laneSeeds([11]), step: 5, group: 3).asArray(Int32.self)
         let noise = StudioQwenSampler.gumbel(seeds: StudioQwenSampler.laneSeeds([7]), step: 1, group: 0, vocab: 4096).asArray(Float.self)
-        guard ab == [ba[1], ba[0]], alone == [ab[0]], noise.allSatisfy({ $0.isFinite }),
+        // Seed 17001, step 257, group 13 hashes to 0xffffff2b at index 1365: the uniform's upper edge.
+        let edge = StudioQwenSampler.gumbel(seeds: StudioQwenSampler.laneSeeds([17001]), step: 257, group: 13, vocab: 2048).asArray(Float.self)
+        guard ab == [ba[1], ba[0]], alone == [ab[0]], noise.allSatisfy({ $0.isFinite }), edge.allSatisfy({ $0.isFinite }),
               Set(noise.map { Int($0 * 4) }).count > 8 else {
             throw AudioGenerationError.invalidInput("Qwen batch noise depends on neighbours or is degenerate")
         }
