@@ -42,7 +42,7 @@ public enum VoiceDirection {
   }
 
   public static func signature(_ voice: Object) throws -> String {
-    try NativeIO.hash(NativeIO.json(["version": 5, "rules": readingRules, "profile": input(voice)]))
+    try NativeIO.hash(NativeIO.json(["version": 6, "rules": readingRules, "profile": input(voice)]))
   }
 
   public static func compose(_ reply: Object) throws -> String {
@@ -103,9 +103,9 @@ extension NativeDirector {
       Read ALL fields: age, voice_gender, personality, habits, speaking_style, voice_description. Translate Russian accurately. Explicit voice preferences win.
       Return exactly {"voice":"20-350 characters","delivery":"20-500 characters"}, plain English, short concrete phrases, at most 90 words in total.
       voice, in this order: the most distinctive audible trait first; gender if known; age bracket (child, teenager, young adult, middle-aged, senior 55+, elderly 70+) with approximate age; pitch; timbre and texture.
-      delivery: one habitual emotion, pace, energy and breath, typical intonation.
+      delivery: one habitual emotion, pace, energy and breath, typical intonation. Always ask for expressive, varied intonation with clear emphasis on key words inside sentences, even for calm, dry or ironic characters: the recording is cloned for hours of reading, and a flat sample makes the whole book monotone.
       Make the character physically audible. Age, illness, exhaustion, drinking, smoking, fear or nervousness evidenced in the profile must become strong, explicit voice qualities, for example: elderly = old frail voice, thin and shaky, tremor, breathy weak support, slow; sick = weak, strained, breathy, hoarse; drinker or smoker = husky, raspy, gravelly; nervous = trembling, hurried, uneven breath; powerful = loud, deep, commanding. Use such words only with evidence or an explicit request.
-      State only what is heard. Never use negations or contrasts (not, no, without, rather than, instead of). Never soften evidenced traits (slightly, faint, hint of, a touch of, somewhat, subtle). Never ask for clear diction, clarity, polish, perfect enunciation or fully pronounced endings. Give each character a different voice; do not default males to a warm baritone or females to a gentle voice.
+      State only what is heard. Never describe the delivery as even, flat, steady, monotone, neutral, uniform or merely restrained; translate composure into deliberate pauses and controlled emphasis instead. Never use negations or contrasts (not, no, without, rather than, instead of). Never soften evidenced traits (slightly, faint, hint of, a touch of, somewhat, subtle). Never ask for clear diction, clarity, polish, perfect enunciation or fully pronounced endings. Give each character a different voice; do not default males to a warm baritone or females to a gentle voice.
       Habits involving particles, repetitions, laughter or interjections are text content: describe only their vocal tone. Never ask to add or drop words, laughs, coughs, gasps, singing or sounds. No biographies, scene summaries, metaphors, alternatives, slashes or switches between emotions. Do not include reading rules; the app adds them.
       """ + String(data: try NativeIO.json(payload), encoding: .utf8)!
     var instruction: String?
