@@ -33,7 +33,7 @@ cat .build-tools/native-schemes.json
 NATIVE_SCHEME="$(python3 -c 'import json; d=json.load(open(".build-tools/native-schemes.json")); s=(d.get("workspace") or d.get("project"))["schemes"]; print(next(x for x in ["StudioEngine", "StudioNative", "native", "StudioNative-Package", "native-Package"] if x in s))')"
 (cd native && xcodebuild -resolvePackageDependencies -scheme "$NATIVE_SCHEME" -derivedDataPath ../.build-tools/native-build)
 python3 scripts/patch_qwen_native.py .build-tools/native-build/SourcePackages/checkouts/mlx-audio-swift
-(cd native && xcodebuild build -scheme "$NATIVE_SCHEME" -configuration Release -destination "platform=macOS,arch=arm64" -derivedDataPath ../.build-tools/native-build -disableAutomaticPackageResolution -skipPackageUpdates MACOSX_DEPLOYMENT_TARGET=14.0 CODE_SIGNING_ALLOWED=NO) > .build-tools/native-build.log 2>&1 || { tail -100 .build-tools/native-build.log; exit 1; }
+(cd native && xcodebuild build -scheme "$NATIVE_SCHEME" -configuration Release -destination "platform=macOS,arch=arm64" -derivedDataPath ../.build-tools/native-build -disableAutomaticPackageResolution -skipPackageUpdates MACOSX_DEPLOYMENT_TARGET=14.0 CODE_SIGNING_ALLOWED=NO) > .build-tools/native-build.log 2>&1 || { grep -E "error:" .build-tools/native-build.log | sort -u | head -40; tail -60 .build-tools/native-build.log; exit 1; }
 python3 scripts/patch_qwen_native.py .build-tools/native-build/SourcePackages/checkouts/mlx-audio-swift
 NATIVE_BIN=".build-tools/native-build/Build/Products/Release"
 cp "$NATIVE_BIN/StudioEngine" "$APP/Contents/MacOS/StudioEngine"

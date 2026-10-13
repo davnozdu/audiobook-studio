@@ -313,7 +313,7 @@ extension Qwen3TTSModel {
             if StudioPace.gentle {
                 // The queued step must finish first, or the GPU would keep working through the pause.
                 eval(nextToken)
-                Thread.sleep(forTimeInterval: min(0.25, Date().timeIntervalSince(stepClock) * StudioPace.share))
+                try await Task.sleep(nanoseconds: UInt64(min(0.25, Date().timeIntervalSince(stepClock) * StudioPace.share) * 1_000_000_000))
             }
             stepClock = Date()
         }
