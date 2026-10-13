@@ -24,7 +24,7 @@ public enum ForeignReading {
       let marks = word.unicodeScalars.filter { $0.value == 0x301 }.count
       let yo = word.unicodeScalars.contains("ё") || word.unicodeScalars.contains("Ё")
       return NativeStress.vowelCount(word) >= 1 && (NativeStress.vowelCount(word) == 1
-        ? marks == 0 : marks == 1 || (marks == 0 && yo))
+        ? marks == 0 : yo ? marks == 0 : marks == 1)
     }
   }
   public static func apply(_ text: String, readings: [String: String]) -> String {

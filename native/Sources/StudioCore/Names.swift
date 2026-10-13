@@ -33,21 +33,34 @@ public enum ProperNames {
     return order.map { ($0, found[$0]!) }
   }
 
-  /// Same letters (е may become ё) and exactly one stress mark right after a vowel.
+  /// Same letters (е may become ё), Cyrillic letters, hyphens and the stress mark only, and
+  /// exactly one mark right after a vowel — or none with ё, which is the stressed vowel itself.
   public static func valid(_ answer: String, for form: String) -> Bool {
+    let answer = answer.precomposedStringWithCanonicalMapping
     let marks = answer.unicodeScalars.filter { $0.value == 0x301 }.count
-    let yo = answer.unicodeScalars.contains("ё")
-    // 'ё' is the stressed vowel itself, so it never comes with a second mark (not "Семёна́").
-    return NativeStress.plain(answer) == NativeStress.plain(form) && (yo ? marks == 0 : marks == 1)
+    let yo = answer.unicodeScalars.contains("ё") || answer.unicodeScalars.contains("Ё")
+    return NativeIO.regex("^[А-ЯЁа-яё\\u0301]+(?:-[А-ЯЁа-яё\\u0301]+)*$", answer).count == 1
+      && NativeStress.plain(answer) == NativeStress.plain(form) && (yo ? marks == 0 : marks == 1)
       && NativeIO.regex("(?<![аеёиоуыэюяАЕЁИОУЫЭЮЯ])\\u0301", answer).isEmpty
   }
 
-  /// Replaces every occurrence whose plain form is known; the book's letter case is kept.
-  public static func apply(_ text: String, stresses: [String: String], keepYo: Bool = false) -> String {
+  /// Plain forms of the words the book itself prints with a stress mark: those stay as printed.
+  public static func authored(_ text: String) -> Set<String> {
+    let ns = text as NSString
+    return Set(NativeIO.regex(word.replacingOccurrences(of: "ё]", with: "ё\\u0301]"), text)
+      .map { ns.substring(with: $0.range) }.filter { $0.unicodeScalars.contains("\u{301}") }.map(NativeStress.plain))
+  }
+
+  /// Replaces the occurrences whose plain form is known; the book's letter case is kept. With
+  /// `namesOnly` only capitalised words change (Лу́ка the name, not лука́ the onion); words in
+  /// `keep` (stressed by the author) never change.
+  public static func apply(_ text: String, stresses: [String: String], keepYo: Bool = false,
+    namesOnly: Bool = true, keep: Set<String> = []) -> String {
     let ns = NSMutableString(string: text)
     for match in NativeIO.regex("[А-ЯЁа-яё\\u0301]+(?:-[А-ЯЁа-яё\\u0301]+)*", text).reversed() {
       let original = ns.substring(with: match.range)
-      guard let answer = stresses[NativeStress.plain(original)] else { continue }
+      let key = NativeStress.plain(original)
+      guard let answer = stresses[key], !keep.contains(key), !namesOnly || original.first?.isUppercase == true else { continue }
       let bare = original.replacingOccurrences(of: "\u{301}", with: "")
       let marked = NativeStress.transfer(bare, answer, keepYo: keepYo)
       if marked != bare || original != bare { ns.replaceCharacters(in: match.range, with: marked) }

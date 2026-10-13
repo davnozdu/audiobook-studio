@@ -349,6 +349,11 @@ public final class NativeStress {
     var compounds: [(NSRange, String)] = []
     for m in NativeIO.regex("[А-Яа-яЁё]+(?:-[А-Яа-яЁё]+)+", text) {
       let original = ns.substring(with: m.range)
+      // The user's own word or a norm wins over the dictionary for a hyphenated word too.
+      if !original.unicodeScalars.contains("\u{301}"), let fixed = overrides[Self.plain(original)] {
+        compounds.append((m.range, Self.transfer(original, fixed, keepYo: bookHasYo)))
+        continue
+      }
       guard let entry = try binary.lookup(original.lowercased()),
         Self.plain(entry) == Self.plain(original)
       else { continue }

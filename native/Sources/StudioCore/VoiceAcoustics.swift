@@ -24,16 +24,21 @@ public struct VoiceAcoustics: Equatable {
     for (frame, energy) in energies.enumerated() where energy >= gate {
       active += 1; power += energy
       let offset = frame * hop
-      var best = 0.0, lag = 0
+      var r = [Double](repeating: 0, count: maxLag + 2)
       for l in minLag...maxLag {
         var c = 0.0, e2 = 0.0
         for k in stride(from: offset, to: offset + window, by: 2) {
           c += Double(samples[k] * samples[k + l]); e2 += Double(samples[k + l] * samples[k + l])
         }
-        let r = c / ((energy * Double(window) / 2 * e2).squareRoot() + 1e-12)
-        if r > best { best = r; lag = l }
+        r[l] = c / ((energy * Double(window) / 2 * e2).squareRoot() + 1e-12)
       }
-      if best > 0.6 { pitches.append(Double(rate) / Double(lag)) }
+      // Two or three periods correlate as well as one: take the shortest lag whose peak is
+      // nearly the best, not the longest (350 Hz is not 175 Hz).
+      let best = r[minLag...maxLag].max() ?? 0
+      if best > 0.6, let lag = (minLag...maxLag).first(where: { l in
+        r[l] >= 0.9 * best && r[l] >= r[l - 1] && r[l] >= r[l + 1] }) {
+        pitches.append(Double(rate) / Double(lag))
+      }
     }
     guard active > 0 else { return nil }
     let seconds = Double(active * hop) / Double(rate)
@@ -78,7 +83,8 @@ public struct VoiceAcoustics: Equatable {
   }
 
   /// How far a manner sample moved in its manner's direction (higher is stronger), and whether
-  /// that is clearly audible. Manners without a reliable acoustic sign always pass.
+  /// that is clearly audible: compatible signs alone are not enough, at least one must move
+  /// past a noticeable step. Manners without a reliable acoustic sign always pass.
   public static func strength(_ manner: String, _ d: Change) -> (score: Double, audible: Bool) {
     let tempo = 10 * log2(max(d.tempo, 0.01))   // +1 ≈ 7 % faster
     switch manner {
@@ -93,29 +99,29 @@ public struct VoiceAcoustics: Equatable {
     case "hysterical": return (d.pitch + d.range, d.pitch >= 3 && d.range >= 2)
     case "desperate": return (d.pitch + d.level, d.pitch >= 2)
     case "triumphant": return (d.level + d.pitch, d.level >= 1 || d.pitch >= 1.5)
-    case "threatening": return (-d.pitch - tempo, d.pitch <= 0.5 && d.tempo <= 1)
-    case "cold": return (-d.range - d.pitch, d.range <= 0 && d.pitch <= 1)
+    case "threatening": return (-d.pitch - tempo, d.pitch <= 0.5 && d.tempo <= 1 && (d.pitch <= -1 || d.tempo <= 0.9))
+    case "cold": return (-d.range - d.pitch, d.range <= 0 && d.pitch <= 1 && (d.range <= -1 || d.level <= -1))
     case "solemn": return (-tempo - d.pitch, d.tempo <= 0.95 && d.pitch <= 1)
     case "hesitant": return (d.range - tempo, d.tempo <= 0.95 || d.range >= 1)
     case "embarrassed": return (-d.level + tempo, d.level <= -1 || d.tempo >= 1.05)
-    case "guilty": return (-d.pitch - tempo, d.pitch <= 0.5 && d.tempo <= 1)
+    case "guilty": return (-d.pitch - tempo, d.pitch <= 0.5 && d.tempo <= 1 && (d.pitch <= -1 || d.tempo <= 0.92))
     case "breathless": return (tempo - 10 * d.voiced, d.voiced <= -0.1 || d.tempo >= 1.05)
     case "flirtatious": return (d.range, d.range >= 1)
     case "dreamy": return (-tempo - d.level, d.tempo <= 0.95 && d.level <= 0)
     case "thoughtful": return (-tempo, d.tempo <= 0.95)
-    case "relieved": return (-tempo, d.tempo <= 1)
+    case "relieved": return (-tempo, d.tempo <= 0.95)
     case "indifferent": return (-d.range, d.range <= -1)
     case "weak": return (-d.level, d.level <= -2)
     case "sleepy": return (-tempo - d.level, d.tempo <= 0.9 && d.level <= -1)
     case "drunk": return (d.range - tempo, d.tempo <= 0.9 || d.range >= 2)
-    case "stern": return (-d.pitch - tempo, d.pitch <= 1 && d.tempo <= 1)
+    case "stern": return (-d.pitch - tempo, d.pitch <= 1 && d.tempo <= 1 && (d.pitch <= -1 || d.tempo <= 0.92))
     case "frightened": return (d.pitch - 10 * d.voiced, d.pitch >= 2)
     case "anxious": return (d.pitch + tempo, d.tempo >= 1.05 || d.pitch >= 1.5)
     case "sad": return (-d.pitch - tempo, d.pitch <= 0.5 && d.tempo <= 0.95)
     case "crying": return (d.pitch - 10 * d.voiced, d.pitch >= 1 || d.voiced <= -0.15)
     case "tender": return (-d.level - tempo, d.level <= -1 && d.tempo <= 1)
     case "mocking": return (d.range, d.range >= 1)
-    case "contemptuous": return (-d.pitch - tempo, d.tempo <= 1 && d.pitch <= 1)
+    case "contemptuous": return (-d.pitch - tempo, d.tempo <= 1 && d.pitch <= 1 && (d.tempo <= 0.92 || d.pitch <= -1))
     case "pleading": return (d.pitch, d.pitch >= 1)
     case "whisper": return (-10 * d.voiced - d.level, d.voiced <= -0.3 || d.level <= -6)
     case "muttering": return (-d.range - d.level, d.range <= -1 || d.level <= -3)

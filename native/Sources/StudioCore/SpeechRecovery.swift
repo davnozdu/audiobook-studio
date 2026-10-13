@@ -1,6 +1,11 @@
 import Foundation
 
 public enum SpeechRecovery {
+  /// The seed of a retry: wraps instead of overflowing and is never negative, so an imported
+  /// or huge seed cannot stop the engine; ordinary seeds give the same numbers as before.
+  public static func attemptSeed(_ seed: Int, _ attempt: Int) -> Int {
+    (max(0, seed) &+ attempt &* 104729) & Int.max
+  }
   /// Retry only failed lanes. Persist accepted lanes immediately so a later failure
   /// cannot discard completed speech. nil means the model did not reach that lane's EOS.
   public static func batch(texts: [String], seeds: [Int], labels: [String],
@@ -14,7 +19,7 @@ public enum SpeechRecovery {
     var issues: [Int: String] = [:]
     for attempt in 0..<3 {
       try Task.checkCancellation()
-      let waves = try await operation(pending, pending.map { max(0, seeds[$0]) + attempt * 104729 })
+      let waves = try await operation(pending, pending.map { attemptSeed(seeds[$0], attempt) })
       guard waves.count == pending.count else { throw StudioError("Модель потеряла реплики внутри пакета") }
       var retry: [Int] = []
       for (i, raw) in zip(pending, waves) {
@@ -70,7 +75,7 @@ public enum SpeechRecovery {
     for attempt in 0..<3 {
       try Task.checkCancellation()
       let raw: [Float]
-      do { raw = try await operation(spoken, max(0, seed) + attempt * 104729) }
+      do { raw = try await operation(spoken, attemptSeed(seed, attempt)) }
       catch is CancellationError { throw CancellationError() }
       catch {
         // The model throws when it reaches the token limit without EOS: another seed may finish.

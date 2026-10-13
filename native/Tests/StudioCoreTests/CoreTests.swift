@@ -433,6 +433,47 @@ final class CoreTests: XCTestCase {
     XCTAssertEqual(own, ["замок": "за\u{301}мок", "лебедев": "ле\u{301}бедев", "творог": "творо\u{301}г", "все": "всё",
       "война": "война\u{301}", "елка": "ёлка"])
   }
+  func testBeta4AuditStressAndEmotionFixes() throws {
+    // B4-01: a name's stress changes only capitalised words and never an author's mark.
+    XCTAssertEqual(ProperNames.apply("Лу\u{301}ка купил лука\u{301}.", stresses: ["лука": "лу\u{301}ка"]), "Лу\u{301}ка купил лука\u{301}.")
+    XCTAssertEqual(ProperNames.apply("Лука купил лука.", stresses: ["лука": "лу\u{301}ка"]), "Лу\u{301}ка купил лука.")
+    let authored = "Ма\u{301}рия пришла."
+    XCTAssertEqual(ProperNames.authored(authored), ["мария"])
+    XCTAssertEqual(ProperNames.apply(authored, stresses: ["мария": "Мари\u{301}я"], keep: ProperNames.authored(authored)), authored)
+    // The user's words apply to every word, hyphenated ones included, with or without names.
+    XCTAssertEqual(ProperNames.apply("по-мо\u{301}ему так", stresses: ["по-моему": "по-моему\u{301}"], namesOnly: false), "по-моему\u{301} так")
+    // B4-02: no «+», one mark, ё without a second mark.
+    XCTAssertFalse(ProperNames.valid("мар+и\u{301}я", for: "мария"))
+    XCTAssertFalse(ProperNames.valid("фёд+ор", for: "федор"))
+    XCTAssertFalse(ProperNames.valid("Мари\u{301}\u{301}я", for: "мария"))
+    XCTAssertTrue(ProperNames.valid("Мари\u{301}я", for: "мария"))
+    XCTAssertTrue(ProperNames.valid("Фёдор", for: "федор"))
+    XCTAssertFalse(ForeignReading.valid("сёма\u{301}"))
+    XCTAssertTrue(ForeignReading.valid("сёма"))
+    // B4-07: a damaged cache entry fails the same checks and is asked anew.
+    XCTAssertFalse(ProperNames.valid("лю\u{301}дмила", for: "мария"))
+    XCTAssertFalse(ForeignReading.valid(""))
+    // B4-04: an unchanged sample never counts as an audible emotion.
+    let unchanged = VoiceAcoustics.Change(pitch: 0, range: 0, level: 0, tempo: 1, voiced: 0)
+    for manner in VoiceDirection.manners.keys where manner != "calm" {
+      XCTAssertFalse(VoiceAcoustics.strength(manner, unchanged).audible, manner)
+    }
+    // B4-05: the fundamental, not a multiple of the period.
+    for hz in [110.0, 175, 220, 350, 450] {
+      let tone = (0..<12000).map { Float(0.2 * sin(2 * Double.pi * hz * Double($0) / 24000)) }
+      XCTAssertEqual(VoiceAcoustics.measure(tone, text: "слово")!.pitch, hz, accuracy: hz * 0.03)
+    }
+    // B4-06: a huge or negative seed retries without overflow; ordinary seeds are unchanged.
+    XCTAssertEqual(SpeechRecovery.attemptSeed(17001, 1), 17001 + 104729)
+    XCTAssertTrue(SpeechRecovery.attemptSeed(Int.max, 2) >= 0)
+    XCTAssertEqual(SpeechRecovery.attemptSeed(-5, 0), 0)
+    // B4-08: a profile without its timbre or habit parts is designed again.
+    var voice: Object = ["name": "Князь", "tts_instruction": "Light airy tenor, young adult. Gentle hesitant warm delivery." + VoiceDirection.readingRules]
+    voice["tts_profile_sha256"] = try VoiceDirection.signature(voice)
+    XCTAssertNil(try VoiceDirection.cached(voice))
+    voice["tts_voice"] = "Light airy tenor, young adult"; voice["tts_delivery"] = "Gentle hesitant warm delivery"
+    XCTAssertNotNil(try VoiceDirection.cached(voice))
+  }
   func testPausesFollowBoundaryKindAndSettings() throws {
     let rows: [Object] = [
       ["id": "a", "speaker": "hero", "text": "— Да,", "paragraph_id": "p1", "chapter_id": "c1"],
@@ -662,6 +703,7 @@ final class CoreTests: XCTestCase {
     XCTAssertNoThrow(try VoiceDirection.compose(prohibition))
     var voice: Object = ["voice_gender": "male", "voice_description": description["voice"]!]
     voice["tts_instruction"] = result
+    voice["tts_voice"] = description["voice"]!; voice["tts_delivery"] = description["delivery"]!
     voice["tts_profile_sha256"] = NativeIO.hash(try NativeIO.json(["version": 1, "profile": VoiceDirection.input(voice)]))
     XCTAssertNil(try VoiceDirection.cached(voice))
     voice["tts_profile_sha256"] = try VoiceDirection.signature(voice)
@@ -842,6 +884,7 @@ final class CoreTests: XCTestCase {
     var voice: Object = ["voice_gender": "male", "character_profile": profile]
     voice["tts_instruction"] =
       "Elderly male, low resonant baritone, slow restrained delivery and thoughtful pauses."
+    voice["tts_voice"] = "Elderly male, low resonant baritone"; voice["tts_delivery"] = "Slow restrained delivery, thoughtful pauses"
     voice["tts_profile_sha256"] = try VoiceDirection.signature(voice)
     XCTAssertNotNil(try VoiceDirection.cached(voice))
     for field in VoiceDirection.fields {

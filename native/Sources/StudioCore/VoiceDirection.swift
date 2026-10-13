@@ -140,8 +140,10 @@ public enum VoiceDirection {
 
   public static func cached(_ voice: Object) throws -> String? {
     let instruction = NativeIO.string(voice["tts_instruction"])
+    // The timbre and habit parts build every manner sample; a profile without them is redone.
     return NativeIO.string(voice["tts_profile_sha256"]) == (try signature(voice))
-      && validEnglish(instruction) ? instruction : nil
+      && validEnglish(instruction) && validEnglish(NativeIO.string(voice["tts_voice"]))
+      && validEnglish(NativeIO.string(voice["tts_delivery"])) ? instruction : nil
   }
 }
 

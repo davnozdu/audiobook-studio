@@ -531,7 +531,9 @@ final class Engine {
     let nameForms = ProperNames.collect(rows.map { NativeIO.string($0["text"]) }, names: castNames)
     if !nameForms.isEmpty {
       let cache = project.appendingPathComponent("source/name-stress.json")
+      // A cached answer is checked again: a damaged or edited entry is dropped and asked anew.
       var stresses = NativeIO.object(try? NativeIO.load(cache)).compactMapValues { $0 as? String }
+        .filter { ProperNames.valid($0.value, for: $0.key) }
       let missing = nameForms.filter { stresses[$0.form] == nil }
       if !missing.isEmpty {
         do {
@@ -545,11 +547,21 @@ final class Engine {
         }
       }
       for i in rows.indices {
-        // The user's own words win over the LLM's name stresses too.
-        rows[i]["tts_text"] = ProperNames.apply(NativeIO.string(rows[i]["tts_text"]), stresses: stresses.merging(own) { $1 }, keepYo: bookHasYo)
+        // Names only (capitalised), never over the author's own marks; norms beat the LLM here.
+        rows[i]["tts_text"] = ProperNames.apply(NativeIO.string(rows[i]["tts_text"]),
+          stresses: stresses.merging(StressRules.orthoepy) { $1 }, keepYo: bookHasYo,
+          keep: ProperNames.authored(NativeIO.string(rows[i]["text"])))
       }
       NativeIO.emit("log", ["message": "Имена и названия: \(nameForms.filter { stresses[$0.form] != nil }.count) из \(nameForms.count) форм с ударением от LLM · "
         + nameForms.prefix(10).compactMap { stresses[$0.form] }.joined(separator: ", ")])
+    }
+    // Priority, highest first: the author's printed marks, the user's own words, the norms, the
+    // LLM's names, the dictionary and the model. The own words come last so nothing overwrites them.
+    if !own.isEmpty {
+      for i in rows.indices {
+        rows[i]["tts_text"] = ProperNames.apply(NativeIO.string(rows[i]["tts_text"]), stresses: own, keepYo: bookHasYo,
+          namesOnly: false, keep: ProperNames.authored(NativeIO.string(rows[i]["text"])))
+      }
     }
     // Foreign insertions get a Cyrillic reading in the spoken text only; answers are cached
     // per project, and without an answer the fragment stays as written.
@@ -563,6 +575,7 @@ final class Engine {
     if !foreign.isEmpty {
       let cache = project.appendingPathComponent("source/foreign-readings.json")
       var readings = NativeIO.object(try? NativeIO.load(cache)).compactMapValues { $0 as? String }
+        .filter { ForeignReading.valid($0.value) }
       let missing = foreign.filter { readings[$0.fragment] == nil }
       if !missing.isEmpty {
         do {
@@ -881,7 +894,7 @@ final class Engine {
       guard let reference = references[key], let hash = referenceHashes[key] else {
         throw StudioError("Не подготовлен голос " + key)
       }
-      let seed = max(0, (voices.first(where: { NativeIO.string($0["id"]) == speaker })?["seed"] as? Int ?? 17001) + i)
+      let seed = SpeechRecovery.attemptSeed((voices.first(where: { NativeIO.string($0["id"]) == speaker })?["seed"] as? Int ?? 17001) &+ i, 0)
       let signature = try SpeechCache.signature(text: SpeechRecovery.text(NativeIO.string(row["tts_text"])),
         referenceHash: hash, referenceText: reference.1, seed: seed)
       let file = raw.appendingPathComponent(id + ".spcm")
