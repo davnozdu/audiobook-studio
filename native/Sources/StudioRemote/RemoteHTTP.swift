@@ -112,14 +112,14 @@ public final class TelegramClient {
     public func download(_ fileID: String, to destination: URL) async throws {
         let file = try await call("getFile", ["file_id": fileID]) as? [String: Any] ?? [:]
         let path = RemoteJSON.string(file, "file_path")
-        guard !path.isEmpty, !path.contains(".."), RemoteJSON.integer(file, "file_size") <= 20 * 1024 * 1024 else { throw RemoteError("Telegram Bot API принимает EPUB до 20 МБ") }
+        guard !path.isEmpty, !path.contains(".."), RemoteJSON.integer(file, "file_size") <= 20 * 1024 * 1024 else { throw RemoteError("Telegram Bot API передаёт книги до 20 МБ") }
         guard let url = URL(string: "https://api.telegram.org/file/bot" + token + "/" + path) else { throw RemoteError("Не удалось получить книгу") }
         let temporary: URL, response: URLResponse
         do { (temporary, response) = try await http.session.download(from: url) }
         catch { if Task.isCancelled { throw CancellationError() }; throw RemoteError("Не удалось скачать книгу из Telegram") }
         defer { try? FileManager.default.removeItem(at: temporary) }
         let size = (try temporary.resourceValues(forKeys: [.fileSizeKey])).fileSize ?? 0
-        guard (response as? HTTPURLResponse)?.statusCode == 200, size > 0, size <= 20 * 1024 * 1024 else { throw RemoteError("Не удалось скачать EPUB до 20 МБ") }
+        guard (response as? HTTPURLResponse)?.statusCode == 200, size > 0, size <= 20 * 1024 * 1024 else { throw RemoteError("Не удалось скачать книгу до 20 МБ") }
         try Task.checkCancellation()
         try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
         if FileManager.default.fileExists(atPath: destination.path) { try FileManager.default.removeItem(at: destination) }

@@ -499,7 +499,9 @@ struct StoryCharacter: Identifiable {
     }
     func chooseBook() {
         guard !busy else { return }
-        let panel = NSOpenPanel(); panel.allowedContentTypes = [UTType(filenameExtension: "epub")!]
+        let panel = NSOpenPanel()
+        // EPUB, FB2 and zipped FB2 (.fb2.zip, .fbz); the engine checks the archive contents.
+        panel.allowedContentTypes = ["epub", "fb2", "fbz"].compactMap { UTType(filenameExtension: $0) } + [.zip]
         guard panel.runModal() == .OK, let url = panel.url else { return }
         closeProject {
             self.clearProject(); self.book = url.path

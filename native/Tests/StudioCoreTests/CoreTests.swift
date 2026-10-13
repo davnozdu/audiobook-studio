@@ -558,6 +558,56 @@ final class CoreTests: XCTestCase {
       separator: " ")
     XCTAssertEqual(result, text)
   }
+  func testFB2BecomesEPUBWithoutNotes() throws {
+    let folder = temporary()
+    defer { try? fm.removeItem(at: folder) }
+    let png = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]).base64EncodedString()
+    let fb2 = """
+      <?xml version="1.0" encoding="UTF-8"?>
+      <FictionBook xmlns="http://www.gribuser.ru/xml/fictionbook/2.0" xmlns:l="http://www.w3.org/1999/xlink">
+      <description><title-info><author><first-name>Фридрих</first-name><last-name>Ницше</last-name></author>
+      <book-title>К генеалогии морали</book-title><coverpage><image l:href="#cover.png"/></coverpage><lang>ru</lang></title-info></description>
+      <body><title><p>Фридрих Ницше</p></title>
+      <section><title><p>ПРЕДИСЛОВИЕ</p></title><subtitle>1</subtitle><p>Мы чужды себе<a l:href="#n1" type="note">note 1</a>, <emphasis>мы</emphasis> познающие.</p>
+      <empty-line/><image l:href="#cover.png"/><cite><p>Цитата.</p><text-author>Автор</text-author></cite></section>
+      <section><title><p>РАССМОТРЕНИЕ ПЕРВОЕ</p><p>«ДОБРО И ЗЛО»</p></title><epigraph><p>Эпиграф.</p></epigraph>
+      <poem><stanza><v>Строка один</v><v>Строка два<a l:href="#n2">2</a></v></stanza></poem></section></body>
+      <body name="notes"><section id="n1"><p>Примечание не читается.</p></section><section id="n2"><p>И это.</p></section></body>
+      <binary id="cover.png" content-type="image/png">\(png)</binary></FictionBook>
+      """
+    let input = folder.appendingPathComponent("book.fb2"), output = folder.appendingPathComponent("book.epub")
+    try Data(fb2.utf8).write(to: input)
+    XCTAssertTrue(NativeFB2.accepts(input)); XCTAssertTrue(NativeFB2.accepts(URL(fileURLWithPath: "/x/Книга.FB2.zip")))
+    XCTAssertEqual(NativeFB2.baseName(URL(fileURLWithPath: "/x/Книга.fb2.zip")), "Книга")
+    try NativeFB2.convert(input, to: output)
+    let book = try NativeBook.read(output)
+    XCTAssertEqual(NativeIO.string(book["title"]), "К генеалогии морали")
+    XCTAssertEqual(NativeIO.string(book["author"]), "Фридрих Ницше")
+    XCTAssertEqual(NativeIO.objects(book["paragraphs"]).map { NativeIO.string($0["text"]) }, [
+      "Фридрих Ницше", "ПРЕДИСЛОВИЕ", "1", "Мы чужды себе, мы познающие.", "Цитата.", "Автор",
+      "РАССМОТРЕНИЕ ПЕРВОЕ", "«ДОБРО И ЗЛО»", "Эпиграф.", "Строка один", "Строка два"])
+    XCTAssertEqual(NativeIO.objects(book["chapters"]).map { NativeIO.string($0["title"]) },
+      ["Фридрих Ницше", "ПРЕДИСЛОВИЕ", "РАССМОТРЕНИЕ ПЕРВОЕ"])
+    XCTAssertEqual(NativeBook.cover(output)?.ext, "png")
+  }
+  func testEPUBNotesForeignWordsAndSections() throws {
+    let html = try XMLDocument(xmlString: """
+      <html xmlns:epub="http://www.idpf.org/2007/ops"><body><p>Текст<sup><a href="#fn1">1</a></sup> и<a epub:type="noteref" href="#fn2">*</a> ещё <a href="ch2.xhtml">глава 2</a>.</p>
+      <aside epub:type="footnote" id="fn1"><p>Сноска.</p></aside><section role="doc-endnotes"><p>Конец.</p></section></body></html>
+      """, options: [])
+    let all = NativeBook.elements(html)
+    for node in all where NativeBook.isNoteContainer(node) || NativeBook.isNoteReference(node) { node.detach() }
+    XCTAssertEqual(NativeIO.replace("\\s+", html.rootElement()?.stringValue ?? "", " ").trimmingCharacters(in: .whitespaces),
+      "Текст и ещё глава 2.")
+    XCTAssertEqual(ForeignReading.fragments("Это a priori, а не vis inertiae; Übermensch и ressentiment, Fin-Gal."),
+      ["a priori", "vis inertiae", "Übermensch", "ressentiment", "Fin-Gal"])
+    XCTAssertEqual(ForeignReading.apply("Это a priori и Übermensch.", readings: ["a priori": "а при\u{301}ори"]),
+      "Это а при\u{301}ори и Übermensch.")
+    XCTAssertTrue(ForeignReading.valid("ю\u{301}бермэнш")); XCTAssertTrue(ForeignReading.valid("вис ине\u{301}рциэ"))
+    XCTAssertFalse(ForeignReading.valid("Übermensch")); XCTAssertFalse(ForeignReading.valid("сверх-человек (перевод)"))
+    let ru = try RussianText(rules)
+    XCTAssertEqual(try ru.normalize("См. § 7 и §§ 9"), "См. параграф семь и параграфы девять")
+  }
   func temporary() -> URL {
     let folder = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     try! fm.createDirectory(at: folder, withIntermediateDirectories: true)

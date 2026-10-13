@@ -194,6 +194,9 @@ public struct RussianText {
     }
     text = NativeIO.replace("[^\\S\\n\\r]|[\\u200b\\u0085]", text, " ")
     for dash in "—–‐‑‒⁃−﹣－" { text = text.replacingOccurrences(of: String(dash), with: "-") }
+    // Section signs in treatises: "§ 23" is read "параграф 23", "§§ 4-6" "параграфы 4-6".
+    text = NativeIO.replace("§\\s*§\\s*", text, "параграфы ")
+    text = NativeIO.replace("§\\s*", text, "параграф ")
     for (key, value) in [
       "Wi-Fi": "вай-фай", "hi-fi": "хай-фай", "WIFI": "вайфай", "SIM": "сим", "PIN": "пин",
       "GIF": "гиф", "MIDI": "миди", "т. е.": "то есть", "т.е.": "то есть", "т. д.": "так далее",

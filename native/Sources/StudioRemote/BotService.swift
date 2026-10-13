@@ -177,7 +177,7 @@ import Combine
         if state.ownerID == nil {
             guard !pairing.isEmpty, Date() < pairingExpires, text == "/start " + pairing else { return }
             state.ownerID = id; pairing = ""; pairingLink = ""
-            reply("✨ <b>Бот подключён!</b>\n\n📚 Пришлите EPUB до 20 МБ — перед озвучиванием я попрошу подтверждение.\n\n📊 /status · 📋 /queue · ➕ /add · ⏹ /cancel · 🔗 /links", chat: id, html: true)
+            reply("✨ <b>Бот подключён!</b>\n\n📚 Пришлите EPUB или FB2 до 20 МБ — перед озвучиванием я попрошу подтверждение.\n\n📊 /status · 📋 /queue · ➕ /add · ⏹ /cancel · 🔗 /links", chat: id, html: true)
             return
         }
         guard state.ownerID == id else { return }
@@ -212,13 +212,13 @@ import Combine
             }
             let authorizedAdd = state.addRequestedAt.map { Date().timeIntervalSince($0) < 600 } ?? false
             if let current = state.active ?? state.next, !authorizedAdd {
-                reply("Сейчас \(current.phase == .queued ? "ожидает обработки" : "обрабатывается") «\(current.name)».\nДля добавления новой книги в очередь отправьте /add, затем один EPUB.\nЧтобы остановить текущую книгу, отправьте /cancel и подтвердите отмену.", chat: id)
+                reply("Сейчас \(current.phase == .queued ? "ожидает обработки" : "обрабатывается") «\(current.name)».\nДля добавления новой книги в очередь отправьте /add, затем одну книгу EPUB или FB2.\nЧтобы остановить текущую книгу, отправьте /cancel и подтвердите отмену.", chat: id)
                 return
             }
             let name = document["file_name"] as? String ?? ""
-            guard name.lowercased().hasSuffix(".epub"), RemoteJSON.integer(document, "file_size") > 0,
+            guard Self.bookExtension(name) != nil, RemoteJSON.integer(document, "file_size") > 0,
                   RemoteJSON.integer(document, "file_size") <= 20 * 1024 * 1024, let fileID = document["file_id"] as? String else {
-                reply("Пришлите книгу EPUB размером до 20 МБ.", chat: id); return
+                reply("Пришлите книгу EPUB или FB2 размером до 20 МБ.", chat: id); return
             }
             state.addRequestedAt = nil
             let messageID = RemoteJSON.integer(incoming, "message_id")
@@ -235,14 +235,14 @@ import Combine
             state.addRequestedAt = Date()
             let current = state.active ?? state.next
             let prefix = current.map { "Сейчас: «" + $0.name + "» · " + $0.phase.title + ".\n" } ?? ""
-            reply(prefix + "Отправьте один EPUB в течение 10 минут. Я предложу добавить его в очередь с подтверждением. Пачка файлов не принимается. /cancel — отменить текущую обработку.", chat: id)
+            reply(prefix + "Отправьте одну книгу EPUB или FB2 в течение 10 минут. Я предложу добавить его в очередь с подтверждением. Пачка файлов не принимается. /cancel — отменить текущую обработку.", chat: id)
         case "status":
             let waiting = state.jobs.filter { $0.phase == .queued }.count
             reply("Общий статус: " + (state.active == nil ? "озвучивание сейчас не идёт" : "идёт обработка книги") + ".\nВ очереди: \(waiting).\nФайлы в облаке хранятся до вашего ручного удаления. /links — готовые книги со ссылками.", chat: id)
             if let job = state.active ?? state.next { reply(job.status(), chat: id, buttons: buttons(job), html: true) }
             else if let job = state.jobs.last, job.phase != .complete { reply(job.status(), chat: id, buttons: buttons(job), html: true) }
             for job in state.jobs.filter({ $0.phase == .complete }).suffix(3).reversed() { reply(job.status(), chat: id, html: true) }
-            if state.jobs.isEmpty { reply("Книг пока нет. Отправьте EPUB.", chat: id) }
+            if state.jobs.isEmpty { reply("Книг пока нет. Отправьте EPUB или FB2.", chat: id) }
         case "links":
             let completed = state.jobs.filter { $0.phase == .complete }
             if completed.isEmpty { reply("Пока нет полностью собранных и загруженных книг. /status — текущая обработка.", chat: id) }
@@ -269,7 +269,7 @@ import Combine
         case "cancel":
             if let job = state.active ?? state.next { askCancel(job) } else { reply("Сейчас нечего отменять.", chat: id) }
         default:
-            reply("📚 Отправьте EPUB для озвучивания.\n\n📊 /status — ход обработки\n📋 /queue — очередь\n➕ /add — добавить книгу в очередь\n🎧 /books — медиатека\n🔎 /search название — поиск\n🔗 /links — последние готовые книги\n⏹ /cancel — остановить книгу\n\nДля медиатеки другого хранилища: /books google или /books dropbox.", chat: id,
+            reply("📚 Отправьте EPUB или FB2 для озвучивания.\n\n📊 /status — ход обработки\n📋 /queue — очередь\n➕ /add — добавить книгу в очередь\n🎧 /books — медиатека\n🔎 /search название — поиск\n🔗 /links — последние готовые книги\n⏹ /cancel — остановить книгу\n\nДля медиатеки другого хранилища: /books google или /books dropbox.", chat: id,
                   buttons: state.jobs.filter { [.paused, .failed, .cancelled].contains($0.phase) }.suffix(10).map { [RemoteButton("Продолжить: " + String($0.name.prefix(25)), "run:" + $0.id)] })
         }
     }
@@ -415,7 +415,8 @@ import Combine
         }
     }
     func execute(_ id: String) async throws {
-        let folder = store.jobFolder(id), input = folder.appendingPathComponent("input.epub"), result = folder.appendingPathComponent("export")
+        let folder = store.jobFolder(id), result = folder.appendingPathComponent("export")
+        let input = folder.appendingPathComponent("input." + (Self.bookExtension(try job(id).name) ?? "epub"))
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let initial = try job(id)
         guard config.connections[initial.provider.rawValue] == initial.account else { throw RemoteError("Аккаунт хранилища изменился. Подтвердите книгу заново.") }
@@ -482,6 +483,11 @@ import Combine
         }
         // The source already exists in the verified native project and final EPUB; remove only this redundant inbox copy.
         try? FileManager.default.removeItem(at: input)
+    }
+    /// Accepted book file types, longest suffix first; nil for anything else.
+    static func bookExtension(_ name: String) -> String? {
+        let lower = name.lowercased()
+        return ["fb2.zip", "fbz", "fb2", "epub"].first { lower.hasSuffix("." + $0) }
     }
     static func projectBookMetadata(_ project: String) -> (title: String, author: String) {
         let manifest = URL(fileURLWithPath: project).appendingPathComponent("roles/manifest.json")

@@ -179,14 +179,23 @@ final class Engine {
     switch NativeIO.string(request["action"]) {
     case "prepare":
       let book = URL(fileURLWithPath: NativeIO.string(request["book"]))
-      guard book.pathExtension.lowercased() == "epub", fm.fileExists(atPath: book.path) else {
-        throw StudioError("Выберите книгу EPUB")
+      let fb2 = NativeFB2.accepts(book)
+      guard book.pathExtension.lowercased() == "epub" || fb2, fm.fileExists(atPath: book.path) else {
+        throw StudioError("Выберите книгу EPUB или FB2")
       }
       let project = URL(fileURLWithPath: NativeIO.string(request["output"])).appendingPathComponent(
-        book.deletingPathExtension().lastPathComponent + "-" + UUID().uuidString.prefix(8))
+        NativeFB2.baseName(book) + "-" + UUID().uuidString.prefix(8))
       try fm.createDirectory(
         at: project.appendingPathComponent("roles"), withIntermediateDirectories: true)
-      try fm.copyItem(at: book, to: project.appendingPathComponent("book.epub"))
+      if fb2 {
+        // The original stays untouched beside a working EPUB copy; the read-along EPUB is
+        // still assembled at the end from the spoken text and audio.
+        NativeIO.stage("Чтение FB2 и подготовка рабочей копии EPUB")
+        try fm.copyItem(at: book, to: project.appendingPathComponent("original-" + book.lastPathComponent))
+        try NativeFB2.convert(book, to: project.appendingPathComponent("book.epub"))
+      } else {
+        try fm.copyItem(at: book, to: project.appendingPathComponent("book.epub"))
+      }
       try NativeIO.beginLog(project)
       NativeIO.emit("project", ["path": project.path])
       try await NativeDirector(request).prepare(
@@ -478,6 +487,36 @@ final class Engine {
           }
         }
       }
+    }
+    // Foreign insertions get a Cyrillic reading in the spoken text only; answers are cached
+    // per project, and without an answer the fragment stays as written.
+    var foreign: [(fragment: String, context: String)] = []
+    var seenForeign = Set<String>()
+    for row in rows {
+      for fragment in ForeignReading.fragments(NativeIO.string(row["tts_text"])) where seenForeign.insert(fragment).inserted {
+        foreign.append((fragment, String(NativeIO.string(row["text"]).prefix(200))))
+      }
+    }
+    if !foreign.isEmpty {
+      let cache = project.appendingPathComponent("source/foreign-readings.json")
+      var readings = NativeIO.object(try? NativeIO.load(cache)).compactMapValues { $0 as? String }
+      let missing = foreign.filter { readings[$0.fragment] == nil }
+      if !missing.isEmpty {
+        do {
+          readings.merge(try await director.foreignReadings(missing)) { old, _ in old }
+          try NativeIO.write(cache, readings)
+        } catch is CancellationError {
+          throw CancellationError()
+        } catch {
+          NativeIO.emit("log", ["message": "Прочтение иностранных слов не получено, они останутся как написаны: " + error.localizedDescription])
+        }
+      }
+      for i in rows.indices {
+        rows[i]["tts_text"] = ForeignReading.apply(NativeIO.string(rows[i]["tts_text"]), readings: readings)
+      }
+      let resolved = foreign.filter { readings[$0.fragment] != nil }
+      NativeIO.emit("log", ["message": "Иностранные вставки: \(resolved.count) из \(foreign.count) получили русское прочтение · "
+        + resolved.prefix(8).map { $0.fragment + " → " + readings[$0.fragment]! }.joined(separator: ", ")])
     }
     prepared["segments"] = rows
     try NativeIO.write(project.appendingPathComponent("source/manifest.json"), prepared)
