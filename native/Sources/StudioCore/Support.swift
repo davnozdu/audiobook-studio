@@ -171,8 +171,10 @@ public enum NativeIO {
         URL(fileURLWithPath: "/usr/bin/zip"), ["-q", "-X", "-0", temp.path, "mimetype"], cwd: folder
       )
     }
+    // Already compressed media is stored, not deflated again: same size, far less CPU on hours of AAC.
     try run(
-      URL(fileURLWithPath: "/usr/bin/zip"), ["-q", "-X", "-r", temp.path, ".", "-x", "mimetype"],
+      URL(fileURLWithPath: "/usr/bin/zip"),
+      ["-q", "-X", "-r", "-n", ".m4a:.m4b:.mp3:.aac:.jpg:.jpeg:.png:.zip:.epub:.spcm", temp.path, ".", "-x", "mimetype"],
       cwd: folder)
     if !epub, FileManager.default.fileExists(atPath: folder.appendingPathComponent("mimetype").path)
     {

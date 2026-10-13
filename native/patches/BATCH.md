@@ -35,11 +35,12 @@ repeatedly sort all remaining rows. Montage streams one utterance at a time and
 uses 64-bit RF64 headers. Every segment is checked before packaging, and the
 completed M4B duration must match the timeline.
 
-Per-line cache uses exact Float32 PCM compressed by native macOS LZFSE in `.spcm`
-containers with reversible byte-plane transposition; incompressible data falls
-back to raw PCM. No sample conversion or
-lossy encoding is performed. SHA256, frame count and cache signatures protect
-against stale or incomplete data. Source: [Apple Compression](https://developer.apple.com/documentation/compression).
+Per-line cache (`.spcm`, SPC2) keeps 16-bit PCM — CD quality, quantisation noise at −96 dBFS,
+far below the final 96 kbit/s AAC — as second-order prediction residuals in low/high byte planes,
+compressed with macOS LZMA. It is lossless at 16 bits. Measured on speech: 95 MB per hour against
+283 MB for the former exact Float32 + LZFSE container (still readable as SPC1); writing costs about
+33 s and reading 4 s per hour of speech. SHA256, frame count and cache signatures protect against
+stale or incomplete data. Source: [Apple Compression](https://developer.apple.com/documentation/compression).
 Role loudness is measured through a bounded PCM stdin pipe. Final montage reads
 one utterance at a time, applies per-role gain and writes exact samples/pauses
 directly to FFmpeg. Music mixing, limiting and AAC encoding run in that same
@@ -56,19 +57,9 @@ utterances for resume; disposable normalization/music files are cleaned on exit.
 Failure to delete a file is reported in the log. Successful rebuilds regenerate
 speech because the completed-book cache has intentionally been reclaimed.
 
-At 24 kHz mono Float32, 10 hours is 3.456 GB PCM; 20 hours is 6.912 GB.
-96 kb/s AAC is approximately 432/864 MB per final M4B; the EPUB contains another
-copy. Project and external result folders both retain these compressed outputs.
-Allow roughly 7 GB free for 10 hours and 12 GB for 20 hours, excluding first-time
-model downloads, existing projects, archives and source music. Actual lossless
-compression ratio depends on the waveform; estimates assume no saving from it.
-With both internal/external M4B+EPUB copies, the PCM+final-file bound is roughly
-5.2/10.4 GB plus metadata and transient packaging. AAC faststart and EPUB packaging
-may add one extra compressed copy temporarily. Model downloads total about
-7.6 GB independently of book length and remain available for subsequent books.
-
-Manner samples: role markup tags each line calm, joyful, excited, angry, frightened, sad,
-mocking, pleading or whisper. For each manner a character uses, VoiceDesign creates a sample
-from the same voice text, habitual delivery and seed plus that state. Before reading, its
-speaker embedding is compared with the character's main sample (cosine >= 0.65, logged and
-cached per sample pair); a drifted sample is not used and those lines read with the main voice.
+Disk use per book: the speech cache is about 0.95 GB for 10 hours and 1.9 GB for 20 hours while
+the book is being read (it is deleted after a verified export). Each final M4B is about 432/864 MB
+at 96 kb/s and the EPUB holds another copy of that audio. Copies between the project and an export
+folder on the same APFS volume are clones and take no extra space; packaging the EPUB needs about one
+more compressed copy temporarily. Allow roughly 3 GB free for 10 hours and 5 GB for 20 hours, plus
+about 7.6 GB once for model downloads. Media inside the EPUB is stored, not deflated again.

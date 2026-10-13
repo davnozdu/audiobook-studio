@@ -17,7 +17,9 @@ final class CoreTests: XCTestCase {
     var bytes = Data()
     let written = try NativeAudio.streamMontage(project: root, segments: rows, timeline: timeline, gains: [:]) { bytes += $0 }
     XCTAssertEqual(written, frames)
-    XCTAssertEqual(bytes, NativeWAV.bytes(first) + Data(repeating: 0, count: 2400 * 4) + NativeWAV.bytes(last))
+    // The cache keeps 16-bit PCM: the montage carries exactly the stored values, in order, with the pause.
+    func stored(_ s: [Float]) -> [Float] { SpeechPCM.quantize(s).map { Float($0) / 32767 } }
+    XCTAssertEqual(bytes, NativeWAV.bytes(stored(first)) + Data(repeating: 0, count: 2400 * 4) + NativeWAV.bytes(stored(last)))
     XCTAssertThrowsError(try NativeAudio.streamMontage(project: root, segments: rows, timeline: timeline, gains: [:]) { _ in throw StudioError("consumer failed") })
     var broken = timeline; broken[0]["pause_frames"] = 0
     XCTAssertThrowsError(try NativeAudio.streamMontage(project: root, segments: rows, timeline: broken, gains: [:]) { _ in })
@@ -52,16 +54,26 @@ final class CoreTests: XCTestCase {
       if hours == 20 { XCTAssertTrue(size > UInt64(UInt32.max)) }
     }
   }
-  func testCompressedSpeechIsBitExactAndCorruptionIsRejected() throws {
+  func testCompressedSpeechIsLossless16BitAndCorruptionIsRejected() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }
     let file = root.appendingPathComponent("segment.spcm")
-    let samples = [Float](repeating: 0.03125, count: 24000) + [0, -0.0, Float.leastNonzeroMagnitude, -0.125, 1.25]
+    // Speech-like signal with extremes: 16-bit values come back exactly, the rest within ½ LSB.
+    var samples = (0..<48000).map { Float(sin(Double($0) * 0.03) * 0.6 + sin(Double($0) * 0.31) * 0.2) }
+    samples += [0, -0.0, Float.leastNonzeroMagnitude, -0.125, 1.25, -1.25, 0.00002, -0.00002]
     try SpeechCache.save(file, samples: samples, signature: "test")
     let restored = try SpeechPCM.read(file)
-    XCTAssertEqual(NativeWAV.bytes(restored), NativeWAV.bytes(samples))
-    XCTAssertEqual(SpeechCache.load(file, signature: "test"), samples)
-    XCTAssertTrue(try Data(contentsOf: file).count < samples.count * 4)
+    XCTAssertEqual(restored.count, samples.count)
+    XCTAssertEqual(SpeechPCM.quantize(restored), SpeechPCM.quantize(samples))
+    XCTAssertTrue(zip(restored, samples).allSatisfy { abs($0 - max(-1, min(1, $1))) <= 0.5 / 32767 + 1e-7 })
+    XCTAssertEqual(SpeechCache.load(file, signature: "test"), restored)
+    // About a third of the former Float32 size on a smooth signal.
+    XCTAssertTrue(try Data(contentsOf: file).count < samples.count * 4 / 3)
+    // The former exact Float32 container is still readable.
+    let legacy = root.appendingPathComponent("legacy.spcm")
+    var old = Data("SPC1".utf8); old += NativeWAV.little(UInt32(24000)); old += NativeWAV.little(UInt64(3)); old.append(0)
+    old += NativeWAV.bytes([0.5, -0.25, 0.125]); try old.write(to: legacy)
+    XCTAssertEqual(try SpeechPCM.read(legacy), [0.5, -0.25, 0.125])
     try Data("truncated".utf8).write(to: file)
     XCTAssertNil(SpeechCache.load(file, signature: "test"))
     XCTAssertThrowsError(try SpeechPCM.read(file))
