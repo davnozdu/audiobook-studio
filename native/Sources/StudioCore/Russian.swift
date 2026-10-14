@@ -265,7 +265,7 @@ public struct RussianText {
       let calendar = Calendar(identifier: .gregorian)
       guard let date = calendar.date(from: dc), calendar.component(.month, from: date) == month,
         calendar.component(.day, from: date) == day
-      else { throw StudioError("Некорректная дата: " + g[0]) }
+      else { return g[0] }
       return try ordinal(day, Self.dayEnd(b)) + " " + Self.months[month - 1] + " "
         + ordinal(year, "ого") + " года"
     }
@@ -273,7 +273,7 @@ public struct RussianText {
       "(?i)(?<![\\w.,:/-])(\\d{1,2})\\s+(" + Self.months.joined(separator: "|")
         + ")(?:\\s+(\\d{3,4})(?:\\s*(года|г\\.)(?!\\w))?)?(?!\\w)", text
     ) { g, b, _ in
-      guard (1...31).contains(Int(g[1])!) else { throw StudioError("Некорректный день") }
+      guard (1...31).contains(Int(g[1])!) else { return g[0] }
       return try ordinal(Int(g[1])!, Self.dayEnd(b)) + " " + g[2]
         + (g[3].isEmpty ? "" : " " + ordinal(Int(g[3])!, "ого") + (g[4].isEmpty ? "" : " года"))
     }
@@ -382,7 +382,7 @@ public struct RussianText {
       let h = Int(g[1])!
       let m = Int(g[2])!
       let s = Int(g[3])
-      guard h <= 23, m <= 59, (s ?? 0) <= 59 else { throw StudioError("Некорректное время") }
+      guard h <= 23, m <= 59, (s ?? 0) <= 59 else { return g[0] }
       var out =
         try integer(h) + " " + Self.plural(h, ["час", "часа", "часов"]) + " "
         + integer(m, feminine: true) + " " + Self.plural(m, ["минута", "минуты", "минут"])
@@ -513,8 +513,18 @@ public struct RussianText {
       return !word.contains(w) && (spell.contains(w) || !w.contains { "АЕЁИОУЫЭЮЯ".contains($0) })
         ? w.map { letters[$0]! }.joined(separator: "-") : w.lowercased()
     }
-    guard NativeIO.regex("\\d", text).isEmpty else {
-      throw StudioError("Нераскрытый числовой формат; требуется ручная проверка")
+    // A format none of the rules above knows ("2а", "1.2.3", "007") is read digit group by
+    // digit group and logged, so one odd number never stops the whole book.
+    text = try Self.sub("\\d+", text) { g, b, a in
+      let digits = g[0]
+      let spelled = digits.count > 12 || (digits.count > 1 && digits.hasPrefix("0"))
+      let words = try spelled
+        ? digits.map { try integer(Int(String($0))!) }.joined(separator: " ")
+        : integer(Int(digits)!)
+      NativeIO.emit("log", ["message": "Число «" + digits + "» в необычном формате прочитано как «" + words + "»"])
+      let left = b.last.map { $0.isLetter || $0.isNumber } == true ? " " : ""
+      let right = a.first.map { $0.isLetter || $0.isNumber } == true ? " " : ""
+      return left + words + right
     }
     for (i, value) in protected.enumerated() {
       text = text.replacingOccurrences(

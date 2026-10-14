@@ -11,6 +11,9 @@ final class CoreTests: XCTestCase {
     XCTAssertEqual(try ru.normalize("https://example.invalid/١٢"), "https://example.invalid/١٢")
     XCTAssertThrowsError(try ru.normalize("999999999999999999999999999-й"))
     XCTAssertThrowsError(try ru.integer(Int.min))
+    // An unknown number format is read as it stands instead of stopping the book.
+    XCTAssertEqual(try ru.normalize("Дом 2а, пункт 1.2.3."), "Дом два а, пункт один.два.три.")
+    XCTAssertTrue(NativeIO.regex("\\d", try ru.normalize("В 25:70 и 31.02.2020")).isEmpty)
     XCTAssertEqual(RussianText.plural(Int.min, ["a", "b", "c"]), "c")
   }
   func testSACCOverflowIsRejectedBeforeArithmetic() throws {
@@ -1307,7 +1310,13 @@ final class CoreTests: XCTestCase {
     let fixed = try NativeDirector.mergeCast(merged, [["id": "myshkin", "name": "Мышкин", "gender": "female"]])
     XCTAssertEqual(NativeIO.string(fixed[0]["gender"]), "male")
     XCTAssertThrowsError(try NativeDirector.mergeCast(merged, []))
-    XCTAssertThrowsError(try NativeDirector.mergeCast(merged, [["id": "Князь", "name": "Князь"]]))
+    let folded = try NativeDirector.mergeCast(merged, [
+      ["id": "dühring", "name": "Дюринг", "gender": "male"], ["id": "Князь", "name": "Князь"],
+      ["id": "", "name": "Старый слуга"],
+    ])
+    XCTAssertEqual(folded.map { NativeIO.string($0["id"]) }, ["myshkin", "rogozhin", "duhring", "knyaz", "staryy_sluga"])
+    XCTAssertEqual(NativeDirector.castID("2nd Officer"), "c_2nd_officer")
+    XCTAssertThrowsError(try NativeDirector.mergeCast(merged, [["id": "", "name": " "]]))
   }
   func testProfileKeepsOnlyVerifiableEvidence() throws {
     var card: Object = [
