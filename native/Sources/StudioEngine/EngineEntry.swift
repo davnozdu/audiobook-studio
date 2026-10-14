@@ -716,75 +716,6 @@ final class Engine {
       manifest["voices"] = voices
       try writeManifest(manifest, at: project)
     }
-    // Manner samples: the same voice and habits in another momentary state, only for
-    // manners that this character actually uses. A failed sample falls back to the main one.
-    var mannerUses: [String: Set<String>] = [:]
-    for row in rows where VoiceDirection.manner(row["manner"]) != "calm" {
-      mannerUses[NativeIO.string(row["speaker"]), default: []].insert(VoiceDirection.manner(row["manner"]))
-    }
-    for voice in voices where used.contains(NativeIO.string(voice["id"])) {
-      let id = NativeIO.string(voice["id"])
-      guard try custom(voice) == nil else { continue }
-      // The calm sample is the yardstick: a manner sample must sound audibly different from it.
-      let calm = references[id].flatMap { ref in
-        (try? NativeWAV.read(ref.0)).flatMap { VoiceAcoustics.measure($0, text: ref.1) }
-      }
-      for manner in (mannerUses[id] ?? []).sorted() {
-        guard VoiceDirection.mannerInstruction(voice, manner: manner) != nil else { continue }
-        let directory = project.appendingPathComponent("voices")
-        let file = directory.appendingPathComponent(id + "--" + manner + ".wav")
-        let meta = directory.appendingPathComponent(id + "--" + manner + ".json")
-        let text = (try? NativeProject.excerpt(manifest, character: id, manner: manner))
-          ?? references[id]?.1 ?? "Это мой голос в этой книге. Сейчас я расскажу свою часть истории."
-        let seed = voice["seed"] as? Int ?? 17001
-        func signature(_ level: Int) throws -> String {
-          try VoiceSample.signature(text: text, instruction: VoiceDirection.mannerInstruction(voice, manner: manner, level: level)!,
-            profile: VoiceDirection.signature(voice), seed: seed)
-        }
-        let saved = try? NativeIO.load(meta), level = saved?["level"] as? Int ?? 0
-        if fm.fileExists(atPath: file.path), let old = saved, VoiceDirection.intensity.indices.contains(level),
-          NativeIO.string(old["signature"]) == (try signature(level)),
-          (try NativeIO.hashFile(file)) == NativeIO.string(old["sha256"])
-        {
-          references[id + "|" + manner] = (file, NativeIO.string(old["text"]))
-          continue
-        }
-        // Same timbre text and seed at every step: the voice stays, only the emotion is pushed
-        // further until it is audible. The strongest attempt is kept if none clearly is.
-        do {
-          if design == nil { design = try await Qwen3TTSModel.fromModelDirectory(designPath) }
-          var best: (samples: [Float], level: Int, score: Double)?
-          // Two attempts: as written, then the extreme wording; the strongest is kept.
-          for level in [0, VoiceDirection.intensity.count - 1] {
-            try Task.checkCancellation()
-            NativeIO.stage("Создание голоса · " + NativeIO.string(voice["name"]) + " · " + manner
-              + (level > 0 ? " · усиление \(level)" : ""))
-            let description = VoiceDirection.mannerInstruction(voice, manner: manner, level: level)!
-            let samples = try await generate(design!, text: text, description: description, reference: nil, seed: seed)
-            guard let calm, let measured = VoiceAcoustics.measure(samples, text: text) else {
-              best = (samples, level, 0); break
-            }
-            let d = measured.change(from: calm)
-            let (score, audible) = VoiceAcoustics.strength(manner, d)
-            NativeIO.emit("log", ["message": String(format:
-              "Манера [%@|%@] · ступень %d: высота %+.1f пт · размах %+.1f пт · уровень %+.1f дБ · темп ×%.2f · %@",
-              id, manner, level, d.pitch, d.range, d.level, d.tempo, audible ? "эмоция слышна" : "слабо, усиливается")])
-            if best == nil || score > best!.score { best = (samples, level, score) }
-            if audible { best = (samples, level, score); break }
-          }
-          guard let best else { continue }
-          try NativeWAV.write(file, best.samples)
-          try NativeIO.write(meta, ["signature": try signature(best.level), "text": text, "level": best.level,
-            "description": VoiceDirection.mannerInstruction(voice, manner: manner, level: best.level)!,
-            "sha256": try NativeIO.hashFile(file)])
-          references[id + "|" + manner] = (file, text)
-        } catch is CancellationError {
-          throw CancellationError()
-        } catch {
-          NativeIO.emit("log", ["message": "Образец манеры не создан · \(id) · \(manner) · читается основным голосом: " + error.localizedDescription])
-        }
-      }
-    }
     design = nil
     Memory.clearCache()
     memoryLog("VoiceDesign выгружен")
@@ -853,8 +784,6 @@ final class Engine {
     NativeIO.stage("Генерация пробы · \(text.count) знаков · примерно 10 секунд")
     return try await generate(model, text: text, description: description, reference: reference, seed: seed)
   }
-  /// Cosine similarity of speaker embeddings required to read lines with a manner sample.
-  static let mannerIdentityThreshold = 0.65
   /// Two different characters this close in speaker embedding are reported as sounding alike.
   static let castSimilarityWarning = 0.85
   /// Per-batch memory: MLX peak since the previous batch and system swap, to tell
@@ -905,56 +834,9 @@ final class Engine {
       NativeIO.emit("log", ["message": "Образец для озвучки [\(key)] · SHA256 " + (referenceHashes[key] ?? "")])
       voicesReady[key] = try base.studioSpeaker(conditioning)
     }
-    // A manner sample is used only while its voice identity stays close to the character's
-    // main sample; a drifted sample would sound like another person, so those lines fall back.
-    var mannerAccepted = Set<String>()
-    var unchecked: [String] = []
-    let mannerKeys = Set(rows.map { NativeIO.string($0["speaker"]) + "|" + VoiceDirection.manner($0["manner"]) })
-      .filter { references[$0] != nil }
-    for key in mannerKeys.sorted() {
-      let main = String(key.split(separator: "|")[0])
-      let check = references[key]!.0.deletingPathExtension().appendingPathExtension("identity.json")
-      if let old = try? NativeIO.load(check), NativeIO.string(old["pair"]) == (referenceHashes[key] ?? "") + ":" + (referenceHashes[main] ?? ""),
-        let similarity = old["similarity"] as? Double {
-        if similarity >= Self.mannerIdentityThreshold { mannerAccepted.insert(key) }
-      } else { unchecked.append(key) }
-    }
-    for key in unchecked {
-      try Task.checkCancellation()
-      let main = String(key.split(separator: "|")[0])
-      try await prepareVoice(main, progress: 0)
-      try await prepareVoice(key, progress: 0)
-      let a = voicesReady[main]!.conditioning.speakerEmbedding!.asArray(Float.self)
-      let b = voicesReady[key]!.conditioning.speakerEmbedding!.asArray(Float.self)
-      let dot = zip(a, b).reduce(Float(0)) { $0 + $1.0 * $1.1 }
-      let norms = sqrt(a.reduce(Float(0)) { $0 + $1 * $1 }) * sqrt(b.reduce(Float(0)) { $0 + $1 * $1 })
-      let similarity = Double(dot / max(norms, 1e-12))
-      let accepted = similarity >= Self.mannerIdentityThreshold
-      if accepted { mannerAccepted.insert(key) }
-      // A rejected sample is never read: drop its conditioning. Its source array stays in
-      // referenceArrays, because upstream caches by ObjectIdentifier and a freed address could
-      // be reused by another voice.
-      else { voicesReady.removeValue(forKey: key) }
-      try NativeIO.write(references[key]!.0.deletingPathExtension().appendingPathExtension("identity.json"),
-        ["pair": (referenceHashes[key] ?? "") + ":" + (referenceHashes[main] ?? ""), "similarity": similarity])
-      NativeIO.emit("log", ["message": String(format: "Манера [%@]: сходство с основным голосом %.3f · %@", key, similarity,
-        accepted ? "используется" : "голос отличается, реплики читаются основным образцом")])
-    }
-    // What the manner tags actually became: a sample in use, or the main voice as fallback.
-    var mannerUse: [String: Int] = [:], mannerFallback: [String: Int] = [:]
-    for row in rows where VoiceDirection.manner(row["manner"]) != "calm" {
-      let key = NativeIO.string(row["speaker"]) + "|" + VoiceDirection.manner(row["manner"])
-      if mannerAccepted.contains(key) { mannerUse[key, default: 0] += 1 } else { mannerFallback[key, default: 0] += 1 }
-    }
-    if !mannerUse.isEmpty || !mannerFallback.isEmpty {
-      NativeIO.emit("log", ["message": "Манеры: образцы используются для \(mannerUse.values.reduce(0, +)) реплик"
-        + (mannerFallback.isEmpty ? "" : " · основным голосом читаются \(mannerFallback.values.reduce(0, +)): "
-          + mannerFallback.keys.sorted().joined(separator: ", "))])
-    }
-    func voiceKey(_ row: Object) -> String {
-      let key = NativeIO.string(row["speaker"]) + "|" + VoiceDirection.manner(row["manner"])
-      return mannerAccepted.contains(key) ? key : NativeIO.string(row["speaker"])
-    }
+    // Every line of a character is read from that character's one sample, whatever its
+    // manner: a separate VoiceDesign sample per emotion came out as a different person.
+    func voiceKey(_ row: Object) -> String { NativeIO.string(row["speaker"]) }
     let raw = project.appendingPathComponent("audio/segments")
     try fm.createDirectory(at: raw, withIntermediateDirectories: true)
     var files: [URL] = [], signatures: [String] = [], seeds: [Int] = []

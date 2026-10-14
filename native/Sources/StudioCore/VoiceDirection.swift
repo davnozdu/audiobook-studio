@@ -7,9 +7,9 @@ public enum VoiceDirection {
   // Only content rules: diction/clarity demands pull every voice towards a neutral announcer.
   public static let readingRules = " Say only the supplied text, no added sounds."
 
-  /// Momentary manner of one line. "calm" reads with the character's main sample;
-  /// every other manner gets its own sample of the same voice in that state. The reading model
-  /// clones a sample and takes no instructions, so the state must be plainly audible in it.
+  /// Momentary manner of one line. Every line is read from the character's one sample (a
+  /// VoiceDesign sample per manner came out as a different person); the manner still keeps
+  /// speech blocks apart and sets the line's loudness and presence in assembly.
   public static let manners: [String: String] = [
     "calm": "",
     "joyful": "Right now joyful and delighted: bright high lively pitch, wide melodic swings, warm smiling tone, quick light breath.",

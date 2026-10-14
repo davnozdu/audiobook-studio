@@ -298,13 +298,35 @@ public final class NativeDirector {
   }
   /// Adds one chunk's characters. A known ID keeps its first name and gender: another
   /// spelling becomes an alias and only an unknown gender may be refined.
+  /// The LLM may spell an ID with diacritics or Cyrillic ("dühring", "князь"): it is folded to
+  /// Latin snake_case rather than failing the whole book.
+  public static func castID(_ raw: String) -> String {
+    let cyrillic: [Character: String] = [
+      "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e", "ж": "zh", "з": "z",
+      "и": "i", "й": "y", "к": "k", "л": "l", "м": "m", "н": "n", "о": "o", "п": "p", "р": "r",
+      "с": "s", "т": "t", "у": "u", "ф": "f", "х": "kh", "ц": "ts", "ч": "ch", "ш": "sh",
+      "щ": "shch", "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
+      "ß": "ss", "æ": "ae", "œ": "oe", "ø": "o", "ł": "l", "đ": "d", "þ": "th",
+    ]
+    let latin = raw.lowercased().map { cyrillic[$0] ?? String($0) }.joined()
+      .folding(options: [.diacriticInsensitive, .widthInsensitive], locale: Locale(identifier: "en_US_POSIX"))
+    var id = NativeIO.replace("[^a-z0-9]+", latin, "_").trimmingCharacters(in: CharacterSet(charactersIn: "_"))
+    if let first = id.first, !first.isLetter { id = "c_" + id }
+    return id
+  }
   public static func mergeCast(_ cast: [Object], _ chars: [Object]) throws -> [Object] {
     guard !chars.isEmpty else { throw StudioError("LLM не определила персонажей") }
-    for char in chars {
-      let id = NativeIO.string(char["id"])
-      guard !NativeIO.regex("^[a-z][a-z0-9_]*$", id).isEmpty,
-        !NativeIO.string(char["name"]).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-      else { throw StudioError("Некорректный ID или имя персонажа «\(id)»: нужен латинский snake_case и имя") }
+    var chars = chars
+    for index in chars.indices {
+      var name = NativeIO.string(chars[index]["name"]).trimmingCharacters(in: .whitespacesAndNewlines)
+      var id = castID(NativeIO.string(chars[index]["id"]))
+      if id.isEmpty { id = castID(name) }
+      if name.isEmpty { name = NativeIO.string(chars[index]["id"]).trimmingCharacters(in: .whitespacesAndNewlines) }
+      guard !id.isEmpty, !name.isEmpty else {
+        throw StudioError("Некорректный ID или имя персонажа «\(NativeIO.string(chars[index]["id"]))»")
+      }
+      chars[index]["id"] = id
+      chars[index]["name"] = name
     }
     var result = cast
     for char in chars {
