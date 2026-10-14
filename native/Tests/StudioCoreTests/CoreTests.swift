@@ -1073,7 +1073,8 @@ final class CoreTests: XCTestCase {
     XCTAssertEqual(try ru.normalize("12:30"), "двенадцать часов тридцать минут")
     XCTAssertEqual(try ru.normalize("Цена 2,5 кг"), "Цена две целых пять десятых килограмма")
     XCTAssertEqual(try ru.normalize("https://site.ru/page12"), "https://site.ru/page12")
-    XCTAssertThrowsError(try ru.normalize("31.02.2024"))
+    // An impossible date is read as it stands instead of stopping the book.
+    XCTAssertEqual(try ru.normalize("31.02.2024"), "тридцать один.ноль два.две тысячи двадцать четыре")
   }
   func testSplitKeepsScalarText() throws {
     let text =
