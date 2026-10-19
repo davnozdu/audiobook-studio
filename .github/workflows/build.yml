@@ -46,6 +46,12 @@ jobs:
           restore-keys: |
             studio-native-macos26-${{ hashFiles('native/Package.swift') }}-
             studio-native-macos26-
+      # Build-time Python for exporting Silero: torch 2.14.1 has wheels up to CPython 3.14, and the
+      # runner image's own python3 moved past it.
+      - name: Pin build Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
       - name: Build standalone app
         env:
           DROPBOX_APP_KEY: ${{ vars.DROPBOX_APP_KEY }}
