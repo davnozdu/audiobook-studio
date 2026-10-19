@@ -1076,6 +1076,71 @@ final class CoreTests: XCTestCase {
     // An impossible date is read as it stands instead of stopping the book.
     XCTAssertEqual(try ru.normalize("31.02.2024"), "тридцать один.ноль два.две тысячи двадцать четыре")
   }
+  func testBracketsAreSpoken() throws {
+    let ru = try RussianText(rules)
+    XCTAssertEqual(try ru.normalize("Кроме этого (превосходного) дома."),
+      "Кроме этого, скобка открывается, превосходного, скобка закрывается, дома.")
+    XCTAssertEqual(try ru.normalize("(Примечание автора.) Дальше."),
+      "скобка открывается, Примечание автора, скобка закрывается. Дальше.")
+    XCTAssertEqual(try ru.normalize("См. (там же): текст"), "См. скобка открывается, там же, скобка закрывается: текст")
+    XCTAssertEqual(try ru.normalize("сострадания (— я враг изнеженности —) кажется"),
+      "сострадания, скобка открывается, я враг изнеженности, скобка закрывается, кажется")
+    XCTAssertEqual(try ru.normalize("«(смеётся) Да»"), "«скобка открывается, смеётся, скобка закрывается, Да»")
+    XCTAssertEqual(try ru.normalize("Без скобок, как было."), "Без скобок, как было.")
+  }
+  func testShortLinesOfOneVoiceShareACall() throws {
+    func row(_ id: String, _ speaker: String, _ text: String, _ paragraph: String, chapter: String = "c1",
+      manner: String = "calm") -> Object {
+      ["id": id, "speaker": speaker, "text": text, "tts_text": text, "paragraph_id": paragraph,
+       "chapter_id": chapter, "manner": manner]
+    }
+    let long = String(repeating: "Длинное предложение рассказчика. ", count: 7)
+    let rows = SpeechGroups.assign([
+      row("s1", "narrator", "Глава первая", "p1"), row("s2", "narrator", "Он сел.", "p2"),
+      row("s3", "ivan", "— Да.", "p3"), row("s4", "ivan", "— Нет.", "p4"),
+      row("s5", "ivan", "— Ну!", "p5", manner: "angry"), row("s6", "narrator", "* * *", "p6"),
+      row("s7", "narrator", "Утро.", "p7"), row("s8", "narrator", long, "p8"),
+      row("s9", "narrator", "Конец.", "p9", chapter: "c2"),
+    ])
+    // One speaker, manner and chapter per call; a scene break stays apart, a short line joins a long one.
+    XCTAssertEqual(SpeechGroups.units(rows), [[0, 1], [2, 3], [4], [5], [6, 7], [8]])
+    XCTAssertEqual(NativeIO.string(rows[1]["synthesis_group"]), "s1")
+    XCTAssertEqual(SpeechGroups.text(rows, unit: [0, 1]), "Глава первая. Он сел.")
+    XCTAssertEqual(SpeechBatch.Pauses().after(rows[0], next: rows[1]), 0)
+    XCTAssertEqual(SpeechBatch.Pauses().after(rows[1], next: rows[2]), 800)
+    // The cut falls in the silence near the expected boundary and the pieces add up exactly.
+    var audio = [Float](repeating: 0, count: 48000)
+    for i in 0..<20000 { audio[i] = 0.3 * sin(Float(i) * 0.05) }
+    for i in 26000..<48000 { audio[i] = 0.3 * sin(Float(i) * 0.07) }
+    let parts = SpeechGroups.split(audio, weights: [10, 11])
+    XCTAssertEqual(parts.count, 2)
+    XCTAssertEqual(parts[0].count + parts[1].count, audio.count)
+    XCTAssertTrue((20000...26000).contains(parts[0].count))
+    XCTAssertEqual(SpeechGroups.split(audio, weights: [5]).count, 1)
+    XCTAssertEqual(SpeechGroups.weight("за́мок, да!"), 7)
+  }
+  func testStressModesCombineSileroAndRUAccent() {
+    // "Никак": Silero's ё stays, its marks go, the book's own mark stays.
+    XCTAssertEqual(StressRules.onlyYo("Всё бы́ло за́мком, ещё", original: "Все было за́мком, еще"), "Всё было за́мком, ещё")
+    // RUAccent fills a word Silero left bare, disputes a different stress and votes on homographs.
+    let silero = NativeDirector.StressItem(text: "Ста́рый за́мок, кумпатрия и все", context: "",
+      disputes: [1: ["за́мок", "замо́к"]])
+    let both = StressRules.secondVoice(silero, "Стары́й замо́к, кумпа́трия и всё")
+    XCTAssertEqual(both.text, "Ста́рый за́мок, кумпа́трия и все")
+    XCTAssertEqual(both.disputes[0], ["Ста́рый", "Стары́й"])
+    XCTAssertEqual(both.disputes[4], ["все", "всё"])
+    XCTAssertEqual(both.votes, [0: "Стары́й", 1: "замо́к", 4: "всё"])
+    // Without the LLM a tie between the two engines keeps Silero's reading.
+    XCTAssertEqual(NativeDirector.settle(both), "Ста́рый за́мок, кумпа́трия и все")
+    // Words differing in letters are never merged.
+    XCTAssertEqual(StressRules.secondVoice(silero, "Другой текст").text, silero.text)
+    XCTAssertEqual(WordPiece.words("все, кто-то!"), [0..<3, 3..<4, 5..<8, 8..<9, 9..<11, 11..<12])
+  }
+  func testForeignSpeakerIDMatchesFoldedCastID() {
+    XCTAssertEqual(NativeDirector.castID("dühring"), "duhring")
+    XCTAssertEqual(NativeDirector.speakerKey("Dühring"), NativeDirector.speakerKey("duhring"))
+    XCTAssertEqual(NativeDirector.speakerKey("old man"), "old_man")
+  }
   func testSplitKeepsScalarText() throws {
     let text =
       "Очень длинная реплика. Следующая мысль 😀 состоит из нескольких слов. И ещё немного текста."

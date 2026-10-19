@@ -1,0 +1,61 @@
+{
+  "repo": "ruaccent/accentuator",
+  "revision": "b78ae5ea1e62beaf138bed1865cd8c3b0b5ca855",
+  "files": [
+    {
+      "path": "dictionary/omographs.json.gz",
+      "size": 219047,
+      "sha256": "04a9e81c68d65f65ba493fe0110f99e79087548c2beeec3032e2b66e28706f36"
+    },
+    {
+      "path": "dictionary/yo_homographs.json.gz",
+      "size": 5747,
+      "sha256": "c4ee777bbbab87f9eac838f370ad92974e079d02b21903e480c54b5f0c8c60d1"
+    },
+    {
+      "path": "nn/nn_accent/model.onnx",
+      "size": 803402,
+      "sha256": "4e393144e45626f6f1062a0784ef06f921b97321a8e7b87ac2a09a892286500a"
+    },
+    {
+      "path": "nn/nn_accent/config.json",
+      "size": 841,
+      "sha256": "e377f159a8fc8673e211f100d4a237d5fe3dceb3b6789a5a738bf50bda23be49"
+    },
+    {
+      "path": "nn/nn_accent/vocab.txt",
+      "size": 140,
+      "sha256": "242882b2f27800e49a6babf46867dabf6dc9b6535b600776a68815fe4d4f4382"
+    },
+    {
+      "path": "nn/nn_omograph/turbo3.1/model.onnx",
+      "size": 359306923,
+      "sha256": "2cb6a174c4cdb45bd3132b4f7c8a3779fc4b6869863180ed7d0e421bcd453dbd"
+    },
+    {
+      "path": "nn/nn_omograph/turbo3.1/tokenizer.json",
+      "size": 5532343,
+      "sha256": "eb84a77af38a91f6f327486c7827d8541f8d446250f8d408909999b6be817afa"
+    },
+    {
+      "path": "nn/nn_omograph/turbo3.1/config.json",
+      "size": 723,
+      "sha256": "fa47e006d2a15a164d36e0303b5f8344a795f2108a3e55724133a87710216136"
+    },
+    {
+      "path": "nn/nn_yo_homograph_resolver/model.onnx",
+      "size": 14332169,
+      "sha256": "42cc85bf0c4b319dfe3d89fa17b162a92fd5e1c651a657cb3d5f44978d4e70ac"
+    },
+    {
+      "path": "nn/nn_yo_homograph_resolver/tokenizer.json",
+      "size": 126952,
+      "sha256": "f2bf174f2fe62ff11c28d56555f9c0cf16b24e162ef53bcf42ff85ebcf6ebfa8"
+    },
+    {
+      "path": "nn/nn_yo_homograph_resolver/config.json",
+      "size": 625,
+      "sha256": "adf7fd2c67be1498071f447ec4a23dbe84904c49f95d1d3e6c7d9df269b9a2e9"
+    }
+  ]
+}

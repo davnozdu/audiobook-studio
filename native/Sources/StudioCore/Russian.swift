@@ -526,11 +526,33 @@ public struct RussianText {
       let right = a.first.map { $0.isLetter || $0.isNumber } == true ? " " : ""
       return left + words + right
     }
+    text = Self.brackets(text)
     for (i, value) in protected.enumerated() {
       text = text.replacingOccurrences(
         of: "\u{e000}" + String(UnicodeScalar(0xe100 + i)!) + "\u{e001}", with: value)
     }
     return NativeIO.replace("[ \\t]+", text, " ").trimmingCharacters(in: .whitespacesAndNewlines)
+  }
+  /// Brackets are spoken, in the text for the model only: it skips them silently, and an aside
+  /// read as part of the sentence changes its meaning. The commas give the aside its pauses; a
+  /// sentence ending inside moves after the closing words: «(Примечание автора.) Дальше» →
+  /// «скобка открывается, Примечание автора, скобка закрывается. Дальше».
+  static func brackets(_ input: String) -> String {
+    guard input.rangeOfCharacter(from: CharacterSet(charactersIn: "([{（［｛)]}）］｝")) != nil else { return input }
+    var text = NativeIO.replace("\\s*[(\\[{（［｛]\\s*", input, ", скобка открывается, ")
+    text = NativeIO.replace("\\s*[)\\]}）］｝]\\s*", text, ", скобка закрывается, ")
+    text = NativeIO.replace("([.!?…]+)\\s*,\\s*скобка закрывается\\s*,?\\s*", text, ", скобка закрывается$1 ")
+    text = NativeIO.replace("([.!?…])\\s*,\\s*(?=скобка открывается)", text, "$1 ")
+    // Commas the brackets brought never stack against other punctuation or a dash
+    // («(— я враг… —)» is not read «скобка открывается, — я враг… —, скобка закрывается»).
+    text = NativeIO.replace("(скобка открывается,)\\s*-+\\s*", text, "$1 ")
+    text = NativeIO.replace("\\s*-+\\s*(, скобка закрывается)", text, "$1")
+    text = NativeIO.replace("(?:\\s*,)+\\s*(?=[,.!?…;:»])", text, "")
+    text = NativeIO.replace("(?<=«)\\s*,\\s*", text, "")
+    text = NativeIO.replace("^\\s*,\\s*", text, "")
+    text = NativeIO.replace("\\s*,\\s*$", text, "")
+    text = NativeIO.replace("\\s+,", text, ",")
+    return NativeIO.replace("[ \\t]{2,}", text, " ").trimmingCharacters(in: .whitespaces)
   }
   static func counted(_ word: String) -> Bool {
     !word.isEmpty && !word.hasPrefix("год")

@@ -59,6 +59,20 @@ import StudioCore
         NativeIO.emit("log", ["message": "Потоковая сборка: AAC, музыка, EPUB и очистка проверены без полных WAV-копий"])
         let helper = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
           .appendingPathComponent("StudioStress")
+        // The RUAccent helper starts with its bundled ONNX Runtime and answers a request (an
+        // absent model is reported as an error line; the models themselves download on first use).
+        let accent = Process(), accentIn = Pipe(), accentOut = Pipe()
+        accent.executableURL = helper.deletingLastPathComponent().appendingPathComponent("StudioAccent")
+        accent.standardInput = accentIn; accent.standardOutput = accentOut
+        try accent.run()
+        try accentIn.fileHandleForWriting.write(contentsOf: Data("{\"model\":\"/nonexistent.onnx\",\"inputs\":{}}\n".utf8))
+        try accentIn.fileHandleForWriting.close()
+        let accentAnswer = accentOut.fileHandleForReading.readDataToEndOfFile()
+        accent.waitUntilExit()
+        guard accent.terminationStatus == 0, String(data: accentAnswer, encoding: .utf8)?.contains("\"error\"") == true else {
+          throw StudioError("Помощник RUAccent не запускается")
+        }
+        NativeIO.emit("log", ["message": "RUAccent: ONNX Runtime загружается и отвечает"])
         let values = (MLXArray([Float(1), Float(4)]) + 1).asArray(Float.self)
         guard values == [2, 5] else { throw StudioError("Нативные Metal-ядра не работают") }
         let fixture = try NativeIO.load(resources.appendingPathComponent("qwen-speaker-mel-check.json"))
@@ -475,27 +489,49 @@ final class Engine {
     }
     let designPath = designNeeded ? try models.ensure(design: true) : basePath
     lap("роли, инструкции и проверка моделей")
-    NativeIO.stage("Нормализация текста · словари и нативный Silero")
+    // Stress: "none" (the reading model alone), "silero" (dictionary + Silero, the default),
+    // "ruaccent" (dictionary + RUAccent) or "all" (Silero and RUAccent vote, the LLM settles their
+    // disputes and stresses names). The letter ё has a setting of its own.
+    let stressMode = ["none", "silero", "ruaccent", "all"].contains(NativeIO.string(request["stress_mode"]))
+      ? NativeIO.string(request["stress_mode"]) : "silero"
+    let yoMode = ["keep", "auto", "always"].contains(NativeIO.string(request["yo_mode"])) ? NativeIO.string(request["yo_mode"]) : "auto"
+    NativeIO.stage("Нормализация текста · ударения: " + ["none": "без расстановки", "silero": "Silero",
+      "ruaccent": "RUAccent", "all": "Silero + RUAccent + LLM"][stressMode]!)
     var prepared = manifest
     var rows = segments
-    // A book that already prints 'ё' keeps its own 'е': no second, guessed placement of 'ё'.
     let own = StressRules.userDictionary(NativeIO.string(request["stress_dictionary"]))
     if !own.isEmpty { NativeIO.emit("log", ["message": "Свой словарь ударений: \(own.count) слов"]) }
     let bookText = NativeIO.objects(source["paragraphs"]).map { NativeIO.string($0["text"]) }.joined(separator: "\n")
-    let bookHasYo = NativeStress.hasYo(bookText)
-    NativeIO.emit("log", ["message": bookHasYo
+    // A book that already prints 'ё' keeps its own 'е' (automatic mode): no second, guessed placement.
+    let printsYo = NativeStress.hasYo(bookText)
+    let bookHasYo = yoMode == "keep" || (yoMode == "auto" && printsYo)
+    NativeIO.emit("log", ["message": yoMode == "keep"
+      ? "Буква ё: как в книге — буквы книги не меняются"
+      : yoMode == "always" ? "Буква ё: расставляется всегда, по словарю и модели"
+      : printsYo
       ? "В книге уже расставлена ё — повторная расстановка пропущена, буквы книги не меняются"
       : bookText.precomposedStringWithCanonicalMapping.lowercased().contains("ё")
         ? "Ё в книге стоит выборочно (ещё, её и другие напечатаны через е) — недостающая ё расставляется"
         : "В книге нет ё — буква ё расставляется по словарю и модели ударений"])
     do {
       let ru = try RussianText(resources.appendingPathComponent("supertonic_rules.json"))
-      let helper = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
-        .appendingPathComponent("StudioStress")
-      let stress = try NativeStress(resources: resources, helper: helper)
-      stress.bookHasYo = bookHasYo
+      let binaries = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
+      // Silero also places ё when stresses are off; only "как в книге" with RUAccent alone skips it.
+      let needsSilero = stressMode == "silero" || stressMode == "all" || (stressMode == "none" && !bookHasYo)
+      let stress: NativeStress? = try needsSilero ? NativeStress(resources: resources, helper: binaries.appendingPathComponent("StudioStress")) : nil
+      stress?.bookHasYo = bookHasYo
       // Orthoepic norms, then the user's own words, win over the dictionary and the model.
-      stress.overrides = StressRules.orthoepy.merging(own) { $1 }
+      stress?.overrides = StressRules.orthoepy.merging(own) { $1 }
+      var accent: RUAccent?
+      if stressMode == "ruaccent" || stressMode == "all" {
+        let root = try models.ensureRUAccent()
+        NativeIO.stage("Загрузка RUAccent")
+        accent = try RUAccent(root: root,
+          dictionary: AccentDictionary(resources.appendingPathComponent("resources/russian_accents_full.sacc")),
+          helper: binaries.appendingPathComponent("StudioAccent"))
+        accent?.keepYo = bookHasYo
+        accent?.overrides = StressRules.orthoepy.merging(own) { $1 }
+      }
       let paragraphs = Dictionary(
         uniqueKeysWithValues: NativeIO.objects(source["paragraphs"]).map {
           (NativeIO.string($0["id"]), NativeIO.string($0["text"]))
@@ -510,11 +546,29 @@ final class Engine {
         let after = try NativeIO.scalarSlice(
           full, anchor["char_end"] as? Int ?? 0, full.unicodeScalars.count)
         rows[i]["tts_normalized"] = normalized
-        let marked = try stress.annotate(normalized, prefix: before, suffix: after)
-        rows[i]["tts_text"] = marked.text
-        items.append(NativeDirector.StressItem(text: marked.text, context: full, disputes: marked.disputes))
+        var item = NativeDirector.StressItem(text: normalized, context: full)
+        switch stressMode {
+        case "none":
+          // Only the letter ё from Silero; no stress marks except those printed in the book.
+          if let stress { item = NativeDirector.StressItem(text: StressRules.onlyYo(try stress.annotate(normalized, prefix: before, suffix: after).text, original: normalized), context: full) }
+        case "ruaccent":
+          item = NativeDirector.StressItem(text: try accent!.annotate(normalized), context: full)
+        case "all":
+          let marked = try stress!.annotate(normalized, prefix: before, suffix: after)
+          item = StressRules.secondVoice(NativeDirector.StressItem(text: marked.text, context: full, disputes: marked.disputes),
+            try accent!.annotate(normalized))
+        default:
+          let marked = try stress!.annotate(normalized, prefix: before, suffix: after)
+          item = NativeDirector.StressItem(text: marked.text, context: full, disputes: marked.disputes)
+        }
+        rows[i]["tts_text"] = item.text
+        items.append(item)
       }
-      if request["cloud_stress"] as? Bool != true {
+      if stressMode == "all" {
+        let disputed = items.reduce(0) { $0 + $1.votes.count }
+        NativeIO.emit("log", ["message": "Silero и RUAccent: расходятся в \(disputed) словах — решает LLM, без ответа — словарь и Silero"])
+      }
+      if stressMode != "all" {
         // Without the LLM check a rare homograph reading from Silero alone gives way to the common one.
         for i in rows.indices { rows[i]["tts_text"] = NativeDirector.settle(items[i]) }
       } else {
@@ -548,7 +602,8 @@ final class Engine {
     // Names and surnames are often missing from the dictionaries: the LLM stresses each form
     // once per book (cached), and that answer wins over the dictionary/model guess.
     let castNames = voices.flatMap { [NativeIO.string($0["name"])] + ($0["aliases"] as? [String] ?? []) }
-    let nameForms = ProperNames.collect(rows.map { NativeIO.string($0["text"]) }, names: castNames)
+    // Names are asked of the LLM only in the "Silero + RUAccent + LLM" mode.
+    let nameForms = stressMode == "all" ? ProperNames.collect(rows.map { NativeIO.string($0["text"]) }, names: castNames) : []
     if !nameForms.isEmpty {
       let cache = project.appendingPathComponent("source/name-stress.json")
       // A cached answer is checked again: a damaged or edited entry is dropped and asked anew.
@@ -730,7 +785,9 @@ final class Engine {
     NativeIO.stage("Потоковая нормализация громкости по ролям")
     // Off in the settings: each emotion keeps the loudness the model gave it.
     let lineGains = try (request["level_emotions"] as? Bool ?? true) ? audio.lineGains(project: project, segments: rows) : [:]
-    let gains = try audio.streamingGains(project: project, segments: rows, lineGains: lineGains)
+    // Noise and grating clean-up of the speech, a setting of its own (on unless switched off).
+    let cleanup = request["denoise"] as? Bool ?? true
+    let gains = try audio.streamingGains(project: project, segments: rows, lineGains: lineGains, cleanup: cleanup)
     lap("громкость")
     var selectedMusic: URL?
     if request["music_enabled"] as? Bool ?? true {
@@ -750,7 +807,8 @@ final class Engine {
     NativeIO.stage("Сборка отдельного M4B и EPUB с синхронным аудио")
     let result = try audio.package(
       project: project, manifest: prepared, source: source, timeline: timeline,
-      gains: gains, lineGains: lineGains, music: selectedMusic, musicPercent: request["music_volume"] as? Double ?? 5)
+      gains: gains, lineGains: lineGains, music: selectedMusic, musicPercent: request["music_volume"] as? Double ?? 5,
+      cleanup: cleanup)
     let external = URL(fileURLWithPath: destination)
     if fm.fileExists(atPath: external.path) {
       // Replacement confirmed in the save panel: the old folder goes to the Trash (recoverable) only
@@ -841,32 +899,49 @@ final class Engine {
     try fm.createDirectory(at: raw, withIntermediateDirectories: true)
     var files: [URL] = [], signatures: [String] = [], seeds: [Int] = []
     var framesByID: [String: Int] = [:]
-    var pending: Set<Int> = []
+    var pending: Set<Int> = []   // indices into `units`
     var completed = 0
     func weight(_ i: Int) -> Int { max(1, NativeIO.string(rows[i]["text"]).count) }
-    for (i, row) in rows.enumerated() {
-      try Task.checkCancellation()
-      let id = NativeIO.string(row["id"]), speaker = NativeIO.string(row["speaker"]), key = voiceKey(row)
-      guard let reference = references[key], let hash = referenceHashes[key] else {
-        throw StudioError("Не подготовлен голос " + key)
+    func spoken(_ i: Int) -> String { SpeechRecovery.text(NativeIO.string(rows[i]["tts_text"])) }
+    func silent(_ i: Int) -> Bool { NativeIO.regex("[\\p{L}\\p{N}]", spoken(i)).isEmpty }
+    // One model call per unit: short lines of one voice read together (SpeechGroups), every other
+    // line alone. A group holding a line with nothing to say is read line by line.
+    var units: [[Int]] = []
+    for unit in SpeechGroups.units(rows) {
+      if unit.count > 1 && unit.contains(where: silent) { units += unit.map { [$0] } } else { units.append(unit) }
+    }
+    let unitTexts = units.map { $0.count == 1 ? spoken($0[0]) : SpeechGroups.text(rows, unit: $0) }
+    for (u, unit) in units.enumerated() {
+      var missing = false
+      for (k, i) in unit.enumerated() {
+        try Task.checkCancellation()
+        let row = rows[i]
+        let id = NativeIO.string(row["id"]), speaker = NativeIO.string(row["speaker"]), key = voiceKey(row)
+        guard let reference = references[key], let hash = referenceHashes[key] else {
+          throw StudioError("Не подготовлен голос " + key)
+        }
+        // A single line keeps its former seed and signature, so books already begun keep their cache.
+        let seed = SpeechRecovery.attemptSeed((voices.first(where: { NativeIO.string($0["id"]) == speaker })?["seed"] as? Int ?? 17001) &+ unit[0], 0)
+        let text = unit.count == 1 ? spoken(i) : unitTexts[u] + "\u{1F}\(k + 1)/\(unit.count)"
+        let signature = try SpeechCache.signature(text: text, referenceHash: hash, referenceText: reference.1, seed: seed)
+        let file = raw.appendingPathComponent(id + ".spcm")
+        files.append(file); signatures.append(signature); seeds.append(seed)
+        // Nothing to say (a "* * *" scene break, a lone note mark): the model would read symbols or
+        // return silence that fails three times. A 0.5 s inaudible pause (-94 dBFS) keeps the line in
+        // timing, montage and read-along instead.
+        if silent(i) {
+          let pause = (0..<12000).map { $0 % 2 == 0 ? Float(0.00002) : Float(-0.00002) }
+          if SpeechCache.load(file, signature: signature) == nil { try SpeechCache.save(file, samples: pause, signature: signature) }
+          framesByID[id] = pause.count; completed += weight(i)
+          continue
+        }
+        if let samples = SpeechCache.load(file, signature: signature) {
+          framesByID[id] = samples.count
+        } else { missing = true }
       }
-      let seed = SpeechRecovery.attemptSeed((voices.first(where: { NativeIO.string($0["id"]) == speaker })?["seed"] as? Int ?? 17001) &+ i, 0)
-      let signature = try SpeechCache.signature(text: SpeechRecovery.text(NativeIO.string(row["tts_text"])),
-        referenceHash: hash, referenceText: reference.1, seed: seed)
-      let file = raw.appendingPathComponent(id + ".spcm")
-      files.append(file); signatures.append(signature); seeds.append(seed)
-      // Nothing to say (a "* * *" scene break, a lone note mark): the model would read symbols or
-      // return silence that fails three times. A 0.5 s inaudible pause (-94 dBFS) keeps the line in
-      // timing, montage and read-along instead.
-      if NativeIO.regex("[\\p{L}\\p{N}]", SpeechRecovery.text(NativeIO.string(row["tts_text"]))).isEmpty {
-        let pause = (0..<12000).map { $0 % 2 == 0 ? Float(0.00002) : Float(-0.00002) }
-        if SpeechCache.load(file, signature: signature) == nil { try SpeechCache.save(file, samples: pause, signature: signature) }
-        framesByID[id] = pause.count; completed += weight(i)
-        continue
-      }
-      if let samples = SpeechCache.load(file, signature: signature) {
-        framesByID[id] = samples.count; completed += weight(i)
-      } else { pending.insert(i) }
+      // A call is repeated whole when any of its lines is missing.
+      if missing { pending.insert(u) }
+      else { completed += unit.filter { !silent($0) }.reduce(0) { $0 + weight($1) } }
     }
     let total = rows.indices.reduce(0) { $0 + weight($1) }
     // Cast check: speaker-embedding similarity of every pair of main voices, narrator included.
@@ -893,16 +968,18 @@ final class Engine {
           + ". Можно выбрать «Другой вариант голоса» в карточке."])
       }
     }
-    let jobs = try SpeechBatch.plan(rows, pending: pending)
-    NativeIO.emit("log", ["message": "План озвучки: \(jobs.count) запусков · \(pending.count) новых реплик · \(jobs.filter { $0.count > 1 }.count) пакетов · до 4 коротких реплик, голоса могут смешиваться"])
+    let jobs = try SpeechBatch.plan(unitTexts.map { ["tts_text": $0] }, pending: pending)
+    let joined = units.filter { $0.count > 1 }
+    NativeIO.emit("log", ["message": "План озвучки: \(jobs.count) запусков · \(pending.reduce(0) { $0 + units[$1].count }) новых реплик · \(jobs.filter { $0.count > 1 }.count) пакетов · до 4 коротких реплик, голоса могут смешиваться"
+      + (joined.isEmpty ? "" : " · короткие реплики одного голоса склеены: \(joined.reduce(0) { $0 + $1.count }) реплик в \(joined.count) вызовах")])
     var measurements: [(Double, Double, Int)] = []
     for (jobNumber, indices) in jobs.enumerated() {
       try Task.checkCancellation()
       let start = Date(), progress = Double(completed) / Double(max(1, total))
-      let laneSpeakers = indices.map { voiceKey(rows[$0]) }
+      let laneSpeakers = indices.map { voiceKey(rows[units[$0][0]]) }
       var listed = Set<String>()
       let speakerList = laneSpeakers.filter { listed.insert($0).inserted }
-      let ids = indices.map { NativeIO.string(rows[$0]["id"]) }
+      let ids = indices.map { units[$0].map { NativeIO.string(rows[$0]["id"]) }.joined(separator: "+") }
       NativeIO.synthesisStage("Пакетная озвучка · \(jobNumber+1)/\(jobs.count) · \(indices.count) реплик · " + speakerList.joined(separator: ", "), progress)
       for key in speakerList { try await prepareVoice(key, progress: progress) }
       guard let base else { throw StudioError("Модель озвучки не загружена") }
@@ -910,9 +987,9 @@ final class Engine {
         guard let voice = voicesReady[speaker] else { throw StudioError("Не подготовлен голос " + speaker) }
         return voice
       }
-      let texts = indices.map { SpeechRecovery.text(NativeIO.string(rows[$0]["tts_text"])) }
+      let texts = indices.map { unitTexts[$0] }
       var timings: [String: Double] = [:]
-      let waves = try await SpeechRecovery.batch(texts: texts, seeds: indices.map { seeds[$0] }, labels: indices.indices.map { ids[$0] + " · " + laneSpeakers[$0] },
+      let waves = try await SpeechRecovery.batch(texts: texts, seeds: indices.map { seeds[units[$0][0]] }, labels: indices.indices.map { ids[$0] + " · " + laneSpeakers[$0] },
         operation: { lanes, attemptSeeds in
           NativeIO.synthesisStage("Пакетная озвучка · \(jobNumber+1)/\(jobs.count) · \(lanes.count) реплик · " + speakerList.joined(separator: ", "), progress)
           return try await base.studioGenerateBatch(texts: lanes.map { texts[$0] }, speakers: lanes.map { laneVoices[$0] },
@@ -923,19 +1000,23 @@ final class Engine {
               NativeIO.emit("log", ["message": "Конец реплики без уверенного завершения — стоит послушать · " + ids[lanes[lane]]])
             })
         }, accepted: { lane, samples in
-          let i = indices[lane]
+          let unit = units[indices[lane]]
           // The 16-bit cache clips at full scale. Measured peaks stay below 0.8; log any overshoot.
           let peak = samples.reduce(Float(0)) { max($0, abs($1)) }
           if peak > 1 {
             NativeIO.emit("log", ["message": String(format: "Реплика %@ · пик %.3f выше 0 dBFS обрезан в кеше", ids[lane], Double(peak))])
           }
-          try SpeechCache.save(files[i], samples: samples, signature: signatures[i])
-          framesByID[ids[lane]] = samples.count
+          // A shared call is cut between its lines at the natural pauses.
+          let parts = unit.count == 1 ? [samples] : SpeechGroups.split(samples, weights: unit.map { SpeechGroups.weight(spoken($0)) })
+          for (i, part) in zip(unit, parts) {
+            try SpeechCache.save(files[i], samples: part, signature: signatures[i])
+            framesByID[NativeIO.string(rows[i]["id"])] = part.count
+          }
           NativeIO.emit("log", ["message": String(format: "Реплика %@ · %.1f с речи · пакет %d", ids[lane], Double(samples.count) / 24000, jobNumber+1)])
         })
       let duration = waves.reduce(0) { $0 + Double($1.count) / 24000 }
       let elapsed = max(0.001, Date().timeIntervalSince(start))
-      let chars = indices.reduce(0) { $0 + weight($1) }
+      let chars = indices.reduce(0) { total, u in units[u].reduce(total) { $0 + weight($1) } }
       completed += chars
       measurements.append((duration, elapsed, chars))
       if measurements.count > 12 { measurements.removeFirst() }

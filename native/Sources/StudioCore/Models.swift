@@ -25,11 +25,28 @@ public struct NativeModels {
     return removed
   }
   public func ensure(design: Bool) throws -> URL {
-    let name =
-      design ? "Qwen3-TTS-12Hz-1.7B-VoiceDesign-8bit" : "Qwen3-TTS-12Hz-1.7B-Ru-Stress-CF-source"
-    let spec = try NativeIO.load(
-      resources.appendingPathComponent(
-        design ? "design_model_files.json" : "stress_model_files.json"))
+    try ensure(name: design ? "Qwen3-TTS-12Hz-1.7B-VoiceDesign-8bit" : "Qwen3-TTS-12Hz-1.7B-Ru-Stress-CF-source",
+      spec: design ? "design_model_files.json" : "stress_model_files.json",
+      label: design ? "VoiceDesign" : "модели озвучки")
+  }
+  /// RUAccent's networks and homograph lists (about 380 MB, downloaded on first use). Its word
+  /// dictionary is the bundled russian_accents_full.sacc. The .json.gz lists are unpacked once.
+  public func ensureRUAccent() throws -> URL {
+    let target = try ensure(name: "ruaccent-accentuator", spec: "ruaccent_model_files.json", label: "RUAccent")
+    for name in ["omographs", "yo_homographs"] {
+      let packed = target.appendingPathComponent("dictionary/" + name + ".json.gz")
+      let plain = target.appendingPathComponent("dictionary/" + name + ".json")
+      let packedDate = (try? FileManager.default.attributesOfItem(atPath: packed.path)[.modificationDate] as? Date) ?? nil
+      let plainDate = (try? FileManager.default.attributesOfItem(atPath: plain.path)[.modificationDate] as? Date) ?? nil
+      if let p = plainDate, let q = packedDate, p >= q, (try? NativeIO.load(plain)) != nil { continue }
+      let data = try NativeIO.run(URL(fileURLWithPath: "/usr/bin/gzip"), ["-dc", packed.path])
+      _ = try JSONSerialization.jsonObject(with: data)
+      try data.write(to: plain, options: .atomic)
+    }
+    return target
+  }
+  func ensure(name: String, spec specFile: String, label: String) throws -> URL {
+    let spec = try NativeIO.load(resources.appendingPathComponent(specFile))
     let files = NativeIO.objects(spec["files"])
     let target = root.appendingPathComponent("models/" + name)
     let total = files.reduce(0) { $0 + ($1["size"] as? Int ?? 0) }
@@ -83,7 +100,7 @@ public struct NativeModels {
         "https://huggingface.co/" + NativeIO.string(spec["repo"]) + "/resolve/"
         + NativeIO.string(spec["revision"]) + "/" + relative
       try download(remote, to: partial, size: size, sha: sha, done: done, total: total,
-        design: design, relative: relative)
+        label: label, relative: relative)
       try FileManager.default.moveItem(at: partial, to: path)
       record(path, key: key, size: size, sha: sha)
       done += size
@@ -102,7 +119,7 @@ public struct NativeModels {
     return NativeIO.hash(Data(identity.utf8))
   }
   private func download(_ remote: String, to partial: URL, size: Int, sha: String,
-    done: Int, total: Int, design: Bool, relative: String) throws
+    done: Int, total: Int, label: String, relative: String) throws
   {
     // A previous interrupted run may already have downloaded the complete file.
     if fileSize(partial) >= size, FileManager.default.fileExists(atPath: partial.path) {
@@ -135,7 +152,7 @@ public struct NativeModels {
         let rate = Double(max(0, current - initial)) / max(0.01, Date().timeIntervalSince(start))
         NativeIO.stage(
           String(format: "Скачивание %@ · %@ · %.0f / %.0f МБ · %.1f МБ/с",
-            design ? "VoiceDesign" : "модели озвучки", relative,
+            label, relative,
             Double(done + current) / 1_048_576, Double(total) / 1_048_576, rate / 1_048_576),
           min(1, Double(done + current) / Double(max(1, total))))
         Thread.sleep(forTimeInterval: 1)

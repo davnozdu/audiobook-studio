@@ -41,7 +41,7 @@ cp "$NATIVE_BIN/StudioEngine" "$APP/Contents/MacOS/StudioEngine"
 for bundle in "$NATIVE_BIN"/*.bundle; do
   [ ! -d "$bundle" ] || ditto "$bundle" "$APP/Contents/Resources/$(basename "$bundle")"
 done
-cp backend/engine/{design_model_files.json,stress_model_files.json,supertonic_rules.json} "$APP/Contents/Resources/engine/"
+cp backend/engine/{design_model_files.json,stress_model_files.json,ruaccent_model_files.json,supertonic_rules.json} "$APP/Contents/Resources/engine/"
 cp backend/engine/resources/*.{json,mp3} "$APP/Contents/Resources/engine/resources/"
 # Reuse the checked ARM FFmpeg kit built on macOS 15; newer Homebrew bottles require macOS 26.
 if [ ! -d .build-tools/ffmpeg-kit/bin ]; then
@@ -61,6 +61,18 @@ BUILD_PY=.build-tools/stress-export/bin/python3
 TORCH_ROOT="$("$BUILD_PY" -c 'import pathlib,torch;print(pathlib.Path(torch.__file__).parent)')"
 clang++ -O2 -std=c++20 -mmacosx-version-min=14.0 -arch arm64 native/stress/StudioStress.mm -I "$TORCH_ROOT/include" -I "$TORCH_ROOT/include/torch/csrc/api/include" -L "$TORCH_ROOT/lib" -ltorch -ltorch_cpu -lc10 -framework Foundation -Wl,-rpath,@executable_path/../Frameworks/torch -o "$APP/Contents/MacOS/StudioStress"
 python3 scripts/vendor_torch.py "$TORCH_ROOT/lib" "$APP/Contents/Frameworks/torch"
+# RUAccent's networks run in a small C++ helper on the official ONNX Runtime build (MIT).
+ORT_VERSION=1.29.1
+ORT_ROOT=".build-tools/onnxruntime-osx-arm64-$ORT_VERSION"
+if [ ! -f "$ORT_ROOT/lib/libonnxruntime.$ORT_VERSION.dylib" ]; then
+  curl -fL --retry 3 "https://github.com/microsoft/onnxruntime/releases/download/v$ORT_VERSION/onnxruntime-osx-arm64-$ORT_VERSION.tgz" -o .build-tools/onnxruntime.tgz
+  echo 'c845ad2f4340669dc454c0ae092ccef7270d5bf858281890aef3c9bbf7da41e9  .build-tools/onnxruntime.tgz' | shasum -a 256 -c -
+  tar -xzf .build-tools/onnxruntime.tgz -C .build-tools
+fi
+clang++ -O2 -std=c++20 -mmacosx-version-min=14.0 -arch arm64 native/accent/StudioAccent.mm -I "$ORT_ROOT/include" -L "$ORT_ROOT/lib" -lonnxruntime -framework Foundation -Wl,-rpath,@executable_path/../Frameworks/onnxruntime -o "$APP/Contents/MacOS/StudioAccent"
+mkdir -p "$APP/Contents/Frameworks/onnxruntime"
+cp "$ORT_ROOT/lib/libonnxruntime.$ORT_VERSION.dylib" "$APP/Contents/Frameworks/onnxruntime/libonnxruntime.1.dylib"
+cp "$ORT_ROOT/LICENSE" "$APP/Contents/Resources/licenses/ONNXRuntime.txt"
 cp "$TORCH_ROOT/../torch-"*.dist-info/licenses/LICENSE "$APP/Contents/Resources/licenses/PyTorch.txt"
 cp backend/engine/THIRD_PARTY.md "$APP/Contents/Resources/licenses/THIRD_PARTY.md"
 for dependency in .build-tools/native-build/SourcePackages/checkouts/*; do

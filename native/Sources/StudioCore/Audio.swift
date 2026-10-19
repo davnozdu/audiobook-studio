@@ -105,6 +105,12 @@ public final class WAVMontage {
   }
 }
 public struct NativeAudio {
+  /// Clean-up of the finished speech, chosen by ear on a real book in the companion project: the
+  /// de-esser softens whistling с/ш/ч, afftdn removes the vocoder's grain and grating, a −3 dB
+  /// shelf above 7 kHz the glassy edge. afftdn delays its output by 600 samples at 24 kHz; the trim
+  /// and pad give it back, so length and read-along timing stay exactly as laid out.
+  public static let cleanupFilter =
+    "deesser=i=0.5:m=0.5,afftdn=nr=10:nf=-45,atrim=start_sample=600,asetpts=N/SR/TB,apad=pad_len=600,highshelf=f=7000:g=-3:t=q:w=0.7"
   public let ffmpeg: URL, ffprobe: URL
   public init(ffmpeg: URL, ffprobe: URL) {
     self.ffmpeg = ffmpeg
@@ -245,7 +251,8 @@ public struct NativeAudio {
   }
   public func package(
     project: URL, manifest: Object, source: Object, timeline: [Object], audio: URL? = nil,
-    gains: [String: Double] = [:], lineGains: [String: Double] = [:], music: URL? = nil, musicPercent: Double = 0
+    gains: [String: Double] = [:], lineGains: [String: Double] = [:], music: URL? = nil, musicPercent: Double = 0,
+    cleanup: Bool = false
   ) throws -> URL {
     let out = project.appendingPathComponent("result")
     let fm = FileManager.default
@@ -301,10 +308,13 @@ public struct NativeAudio {
     }
     let m4b = out.appendingPathComponent("audiobook.m4b")
     // The limiter is delay-compensated, so sentence timing for the EPUB overlay is unchanged.
-    var filter = ["-map", "0:a:0", "-af", "alimiter=limit=0.84:level=0:latency=1"]
+    // Noise and grating clean-up acts on the speech alone, before the music is mixed in.
+    var filter = ["-map", "0:a:0", "-af", (cleanup ? Self.cleanupFilter + "," : "") + "alimiter=limit=0.84:level=0:latency=1"]
     if music != nil {
       filter = ["-filter_complex",
-        "[2:a]aresample=24000,aformat=channel_layouts=mono,volume=\(musicPercent/100)[music];[0:a][music]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.84:level=0:latency=1[out]",
+        (cleanup ? "[0:a]" + Self.cleanupFilter + "[speech];" : "")
+          + "[2:a]aresample=24000,aformat=channel_layouts=mono,volume=\(musicPercent/100)[music];"
+          + (cleanup ? "[speech]" : "[0:a]") + "[music]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.84:level=0:latency=1[out]",
         "-map", "[out]"]
     }
     arguments += filter + coverMapping + [

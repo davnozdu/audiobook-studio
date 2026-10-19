@@ -77,6 +77,46 @@ public enum StressRules {
   static let notVerbs: Set<String> = ["если", "или", "земли", "пыли", "вдали", "неужели", "минут", "салют", "приют",
     "маршрут", "институт", "абсолют", "уют", "тут", "прут", "валют", "жгут", "кнут", "чуть-чуть"]
 
+  static let wordPattern = "[А-Яа-яЁё]+(?:\\u0301[А-Яа-яЁё]*)*"
+  /// Keeps what Silero placed as the letter ё but none of its stress marks; marks printed in the
+  /// book (present in `original`) stay. For the "no stress" mode.
+  public static func onlyYo(_ annotated: String, original: String) -> String {
+    let a = NativeIO.regex(wordPattern, annotated), o = NativeIO.regex(wordPattern, original)
+    guard a.count == o.count else { return original }
+    let ans = annotated as NSString, ons = original as NSString
+    var result = annotated
+    for (x, y) in zip(a, o).reversed() where !ons.substring(with: y.range).unicodeScalars.contains("\u{301}") {
+      let word = ans.substring(with: x.range)
+      let bare = String(String.UnicodeScalarView(word.unicodeScalars.filter { $0.value != 0x301 }))
+      if bare != word { result = (result as NSString).replacingCharacters(in: x.range, with: bare) }
+    }
+    return result
+  }
+  /// Adds RUAccent's reading to Silero's as a second voice. Where both stressed a word and
+  /// differ, the word becomes disputed between the two readings (the LLM or the arbitration
+  /// decides); a homograph already disputed takes RUAccent's reading as a vote; a word Silero
+  /// left unstressed takes RUAccent's stress.
+  public static func secondVoice(_ silero: NativeDirector.StressItem, _ ruaccent: String) -> NativeDirector.StressItem {
+    let s = NativeIO.regex(wordPattern, silero.text), r = NativeIO.regex(wordPattern, ruaccent)
+    guard s.count == r.count else { return silero }
+    let sns = silero.text as NSString, rns = ruaccent as NSString
+    var text = silero.text, disputes = silero.disputes, votes: [Int: String] = [:]
+    func stressed(_ w: String) -> Bool { w.unicodeScalars.contains("\u{301}") || w.lowercased().unicodeScalars.contains("ё") }
+    for (i, (x, y)) in zip(s, r).enumerated().reversed() {
+      let a = sns.substring(with: x.range), b = rns.substring(with: y.range)
+      guard NativeStress.plain(a) == NativeStress.plain(b), !same(a, b), stressed(b) else { continue }
+      if let readings = disputes[i] {
+        if let reading = readings.first(where: { same($0, b) }) { votes[i] = reading }
+      } else if !stressed(a) && NativeStress.vowelCount(a) > 1 {
+        text = (text as NSString).replacingCharacters(in: x.range, with: b)
+      } else {
+        // Two stresses, or все/всё-type letters: a one-vowel word without ё is a decision too.
+        disputes[i] = [a, b]
+        votes[i] = b
+      }
+    }
+    return NativeDirector.StressItem(text: text, context: silero.context, disputes: disputes, votes: votes)
+  }
   static func same(_ a: String, _ b: String) -> Bool {
     a.lowercased().precomposedStringWithCanonicalMapping == b.lowercased().precomposedStringWithCanonicalMapping
   }

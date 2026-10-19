@@ -52,6 +52,8 @@ public enum SpeechBatch {
     /// Pause after `row` given the next row (nil at the end of the book).
     func after(_ row: Object, next: Object?) -> Int {
       guard let next else { return chapter }
+      // One call read both lines: the model's own pause is already in the audio.
+      if SpeechGroups.shared(row, next) { return 0 }
       let text = NativeIO.string(row["text"])
       let changes = NativeIO.string(next["speaker"]) != NativeIO.string(row["speaker"])
       let boundary: Int
@@ -85,7 +87,7 @@ public enum SpeechBatch {
       let continuing = NativeIO.string(next["paragraph_id"]) == NativeIO.string(row["paragraph_id"])
         && !NativeBook.sentenceFinished(NativeIO.string(row["text"])) && requested == 450
       let pauseMS = pauses.map { $0.after(row, next: i + 1 < rows.count ? rows[i + 1] : nil) }
-        ?? (continuing ? (NativeIO.string(next["speaker"]) == NativeIO.string(row["speaker"]) ? 100 : 180) : requested)
+        ?? (SpeechGroups.shared(row, next) ? 0 : continuing ? (NativeIO.string(next["speaker"]) == NativeIO.string(row["speaker"]) ? 100 : 180) : requested)
       let pause = max(0, min(maxPauseMS, pauseMS)) * 24
       frames += pause
       timeline.append(["segment_id": ids[i], "speaker": row["speaker"]!,

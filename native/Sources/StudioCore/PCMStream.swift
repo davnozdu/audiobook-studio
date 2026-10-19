@@ -132,7 +132,7 @@ extension NativeAudio {
       "paragraphs": rows.map { ["id": $0["paragraph_id"]!, "chapter_id": "ch1", "text": "Проверка."] }]
     for enabled in [false, true] {
       let result = try package(project: root, manifest: manifest, source: source, timeline: timeline,
-        gains: gains, music: enabled ? music : nil, musicPercent: 5)
+        gains: gains, music: enabled ? music : nil, musicPercent: 5, cleanup: enabled)
       let m4b = result.appendingPathComponent("audiobook.m4b")
       let decoded = try convert(m4b)
       let total = timeline.last?["clip_end"] as! Double
@@ -166,12 +166,23 @@ extension NativeAudio {
     for speaker in groups.keys.sorted() {
       let lines = groups[speaker]!
       NativeIO.stage("Ровная громкость реплик · " + speaker)
-      func level(_ row: Object) throws -> Double? {
-        try Task.checkCancellation()
-        return VoiceAcoustics.speechLevel(try SpeechCache.readAudio(SpeechCache.segmentURL(project, id: NativeIO.string(row["id"]))))
+      // Lines read in one call are one utterance: measured together, they get one gain, so no
+      // step in level appears where the call's audio was cut between them.
+      var members: [String: [String]] = [:], order: [String] = []
+      for row in lines {
+        let id = NativeIO.string(row["id"]), group = NativeIO.string(row["synthesis_group"])
+        let key = group.isEmpty ? id : group
+        if members[key] == nil { order.append(key) }
+        members[key, default: []].append(id)
       }
       var levels: [String: Double] = [:]
-      for row in lines { if let value = try level(row) { levels[NativeIO.string(row["id"])] = value } }
+      for key in order {
+        try Task.checkCancellation()
+        var samples: [Float] = []
+        for id in members[key]! { samples += try SpeechCache.readAudio(SpeechCache.segmentURL(project, id: id)) }
+        guard let value = VoiceAcoustics.speechLevel(samples) else { continue }
+        for id in members[key]! { levels[id] = value }
+      }
       let calm = lines.filter { VoiceDirection.manner($0["manner"]) == "calm" }.compactMap { levels[NativeIO.string($0["id"])] }.sorted()
       let reference = calm.isEmpty ? levels.values.sorted() : calm
       guard !reference.isEmpty else { continue }
@@ -190,7 +201,10 @@ extension NativeAudio {
     }
     return result
   }
-  public func streamingGains(project: URL, segments: [Object], lineGains: [String: Double] = [:]) throws -> [String: Double] {
+  /// With `cleanup` each role is measured through the clean-up filter it will be heard through,
+  /// so the filter's small loss of loudness is made up by the role gain.
+  public func streamingGains(project: URL, segments: [Object], lineGains: [String: Double] = [:],
+    cleanup: Bool = false) throws -> [String: Double] {
     var measurements: [String: (Double, Double)] = [:]
     let groups = Dictionary(grouping: segments) { NativeIO.string($0["speaker"]) }
     for speaker in groups.keys.sorted() {
@@ -200,7 +214,7 @@ extension NativeAudio {
       do {
         let stderr = try NativeIO.stream(ffmpeg, ["-hide_banner", "-nostats",
           "-f", "f32le", "-ar", "24000", "-ac", "1", "-i", "pipe:0", "-af",
-          "loudnorm=I=-20:TP=-1.5:LRA=11:print_format=json", "-f", "null", "-"]) { sink in
+          (cleanup ? Self.cleanupFilter + "," : "") + "loudnorm=I=-20:TP=-1.5:LRA=11:print_format=json", "-f", "null", "-"]) { sink in
           var frames = 0
           repeat {
             for part in parts {

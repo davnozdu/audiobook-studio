@@ -432,7 +432,7 @@ public final class NativeDirector {
   }
 
   static func speakerKey(_ id: String) -> String {
-    id.lowercased().replacingOccurrences(of: "[\\s-]+", with: "_", options: .regularExpression)
+    castID(id)
   }
   /// Checks one speaker per fragment and joins neighbouring fragments of one speaker into
   /// spans; the spans reproduce the paragraph exactly by construction.
@@ -869,10 +869,13 @@ extension NativeDirector {
   }
   public struct StressItem {
     public let text: String, context: String, disputes: [Int: [String]]
-    public init(text: String, context: String, disputes: [Int: [String]] = [:]) {
+    /// A second engine's reading of a disputed word (RUAccent), counted as one more vote.
+    public let votes: [Int: String]
+    public init(text: String, context: String, disputes: [Int: [String]] = [:], votes: [Int: String] = [:]) {
       self.text = text
       self.context = context
       self.disputes = disputes
+      self.votes = votes
     }
   }
   /// The words of a line by the index `stressCandidates` uses.
@@ -890,7 +893,7 @@ extension NativeDirector {
   public static func settle(_ item: StressItem) -> String {
     let words = Self.words(item.text)
     let rows: [Object] = item.disputes.compactMap { id, readings in
-      StressRules.arbitrate(readings, votes: [words[id]]).map { ["id": id, "word": $0] }
+      StressRules.arbitrate(readings, votes: [words[id], item.votes[id]]).map { ["id": id, "word": $0] }
     }
     return applyStress(item.text, rows: rows, disputes: item.disputes)
   }
@@ -955,7 +958,7 @@ extension NativeDirector {
       for (id, readings) in item.disputes {
         let key = "\(n):\(id)"
         silero[key] = words[id]
-        guard StressRules.needsSecondOpinion(readings, votes: [words[id], first[key]]), let range = ranges[id] else { continue }
+        guard StressRules.needsSecondOpinion(readings, votes: [words[id], item.votes[id], first[key]]), let range = ranges[id] else { continue }
         doubtful.append(["id": key, "around": Self.around(item.text, range), "variants": readings])
       }
     }
@@ -974,7 +977,7 @@ extension NativeDirector {
       var rows = byLine[n] ?? []
       for (id, readings) in item.disputes {
         let key = "\(n):\(id)"
-        if let chosen = StressRules.arbitrate(readings, votes: [silero[key], first[key], second[key]]) {
+        if let chosen = StressRules.arbitrate(readings, votes: [silero[key], item.votes[id], first[key], second[key]]) {
           rows.append(["id": id, "word": chosen])
         }
       }

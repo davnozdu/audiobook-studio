@@ -55,7 +55,8 @@ public enum NativeProject {
       }
     }
     var result = manifest
-    result["segments"] = rows
+    // Short lines of one voice share a model call (SpeechGroups); the rows stay as they are.
+    result["segments"] = SpeechGroups.assign(rows)
     return result
   }
   public static func cleanupBuildIntermediates(_ project: URL) {

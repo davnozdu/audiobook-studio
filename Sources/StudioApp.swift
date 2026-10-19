@@ -296,9 +296,22 @@ struct StoryCharacter: Identifiable {
     @Published var webSearch = UserDefaults.standard.bool(forKey: "webSearch") {
         didSet { UserDefaults.standard.set(webSearch, forKey: "webSearch") }
     }
-    // On by default: the LLM check fixes confidently wrong homographs (за́мок, бе́лки, все/всё).
-    @Published var cloudStress = UserDefaults.standard.object(forKey: "cloudStress") as? Bool ?? true {
-        didSet { UserDefaults.standard.set(cloudStress, forKey: "cloudStress") }
+    /// How stresses are placed: "none" (the reading model alone), "silero" (dictionary and Silero,
+    /// the default), "ruaccent" (dictionary and RUAccent) or "all" (Silero and RUAccent vote, the
+    /// LLM settles what they dispute and stresses names).
+    static let stressModes = ["none", "silero", "ruaccent", "all"]
+    @Published var stressMode = UserDefaults.standard.string(forKey: "stressMode").flatMap { Studio.stressModes.contains($0) ? $0 : nil } ?? "silero" {
+        didSet { UserDefaults.standard.set(stressMode, forKey: "stressMode") }
+    }
+    /// The letter ё: "keep" leaves the book's letters as printed, "auto" places the missing ё
+    /// unless the book already prints it throughout (the default), "always" places it in every book.
+    static let yoModes = ["keep", "auto", "always"]
+    @Published var yoMode = UserDefaults.standard.string(forKey: "yoMode").flatMap { Studio.yoModes.contains($0) ? $0 : nil } ?? "auto" {
+        didSet { UserDefaults.standard.set(yoMode, forKey: "yoMode") }
+    }
+    /// Noise and grating clean-up of the finished speech (de-esser, FFT denoiser, soft top shelf).
+    @Published var denoise = UserDefaults.standard.object(forKey: "denoise") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(denoise, forKey: "denoise") }
     }
     /// Every line levelled to its speaker (a shout keeps a moderate +3 dB, a whisper its usual
     /// loudness); off keeps the model's own loudness of each line.
@@ -578,7 +591,7 @@ struct StoryCharacter: Identifiable {
         saveThen {
             var r = self.request("project-export"); r["destination"] = url.path
             r["settings"] = ["music": r["music"]!, "music_enabled": self.musicEnabled,
-                "music_volume": self.musicVolume, "cloud_stress": self.cloudStress, "pauses": self.pauses]
+                "music_volume": self.musicVolume, "stress_mode": self.stressMode, "yo_mode": self.yoMode, "pauses": self.pauses]
             self.launch(r, after: after)
         }
     }
@@ -623,7 +636,7 @@ struct StoryCharacter: Identifiable {
          "runtime": runtime.path, "resources": resources.appendingPathComponent("engine").path,
          "ffmpeg": resources.appendingPathComponent("runtime/bin/ffmpeg").path, "ffprobe": resources.appendingPathComponent("runtime/bin/ffprobe").path, "key": key, "model": model,
          "llm_provider": llmProvider, "deepseek_key": deepseekKey, "deepseek_model": deepseekModel,
-         "web_search": webSearch, "cloud_stress": cloudStress,
+         "web_search": webSearch, "stress_mode": stressMode, "cloud_stress": stressMode == "all", "yo_mode": yoMode, "denoise": denoise,
          "music": music.isEmpty ? resources.appendingPathComponent("engine/resources/" + bundledMusic).path : music,
          "music_enabled": musicEnabled, "music_volume": musicVolume, "pauses": pauses, "level_emotions": levelEmotions,
          "stress_dictionary": stressDictionary]
@@ -877,7 +890,8 @@ struct StoryCharacter: Identifiable {
                             self.music = settings["music"] as? String ?? ""
                             self.musicEnabled = settings["music_enabled"] as? Bool ?? true
                             self.musicVolume = settings["music_volume"] as? Double ?? 5
-                            self.cloudStress = settings["cloud_stress"] as? Bool ?? false
+                            if let mode = settings["stress_mode"] as? String, Studio.stressModes.contains(mode) { self.stressMode = mode }
+                            if let mode = settings["yo_mode"] as? String, Studio.yoModes.contains(mode) { self.yoMode = mode }
                             if let saved = settings["pauses"] as? [String: Int] { self.pauses = Studio.pauseDefaults.merging(saved) { _, v in v } }
                         }
                     } catch { self.error = "Не удалось открыть проект: \(error.localizedDescription)" }
@@ -1407,7 +1421,33 @@ struct SettingsView: View {
             }
             Text(studio.keyStorageStatus).font(.caption).foregroundStyle(.secondary)
             Toggle("Разрешить веб-поиск при анализе характеров", isOn: $studio.webSearch)
-            Toggle("LLM проверяет спорные ударения", isOn: $studio.cloudStress)
+            Picker("Ударения", selection: $studio.stressMode) {
+                Text("Никак").tag("none")
+                Text("Silero").tag("silero")
+                Text("RUAccent").tag("ruaccent")
+                Text("Silero + RUAccent + LLM").tag("all")
+            }
+            Text(studio.stressMode == "none"
+                 ? "Ударения не расставляются: модель чтения ставит их сама. Ваш словарь и ударения, напечатанные в книге, остаются."
+                 : studio.stressMode == "silero"
+                 ? "Словарь и нейросеть Silero, локально на Mac. LLM для ударений не используется."
+                 : studio.stressMode == "ruaccent"
+                 ? "Словарь и нейросети RUAccent, локально на Mac. При первой сборке скачивается около 400 МБ моделей."
+                 : "Silero и RUAccent расставляют ударения независимо; где они расходятся, а также в именах решает LLM. Без ответа LLM остаётся вариант словаря.")
+                .font(.caption).foregroundStyle(.secondary)
+            Picker("Буква ё", selection: $studio.yoMode) {
+                Text("Как в книге").tag("keep")
+                Text("Автоматически").tag("auto")
+                Text("Всегда").tag("always")
+            }.pickerStyle(.segmented)
+            Text(studio.yoMode == "keep"
+                 ? "Буквы книги не меняются: где напечатано «е», читается «е»."
+                 : studio.yoMode == "auto"
+                 ? "Ё расставляется, если в книге её нет или она стоит выборочно; книга, где ё напечатана везде, читается как есть."
+                 : "Ё расставляется в любой книге, даже там, где она уже напечатана.")
+                .font(.caption).foregroundStyle(.secondary)
+            Text("Работает при любом режиме ударений, в том числе «Никак». Ё из вашего словаря ставится всегда.")
+                .font(.caption).foregroundStyle(.secondary)
             Text("Мой словарь ударений").font(.subheadline)
             TextEditor(text: $studio.stressDictionary)
                 .font(.body.monospaced()).frame(height: 80)
@@ -1418,7 +1458,10 @@ struct SettingsView: View {
             Divider()
             BotSettingsView(bot: studio.bot)
             Divider()
-            Text("Громкость").font(.headline)
+            Text("Звук").font(.headline)
+            Toggle("Убирать шум и скрежет", isOn: $studio.denoise)
+            Text("Мягкая очистка готовой речи: де-эссер смягчает свист на «с», «ш», «ч», шумоподавитель убирает зернистость и скрежет синтеза, высокие частоты чуть приглушены. Отдельно от выравнивания громкости; длительность и подсветка текста не меняются.")
+                .font(.caption).foregroundStyle(.secondary)
             Toggle("Ровная громкость реплик", isOn: $studio.levelEmotions)
             Text(studio.levelEmotions
                  ? "Каждая реплика звучит на обычной громкости своего персонажа: тихие фразы не проваливаются, шёпот слышен как шёпот, но разборчиво, крик чуть громче (+3 дБ)."

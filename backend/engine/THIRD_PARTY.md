@@ -32,6 +32,15 @@ It is downloaded and verified while building the application and is not stored i
 repository. No additional license grant is asserted for user-owned or separately
 downloaded dictionary data.
 
+## RUAccent and ONNX Runtime
+
+The optional RUAccent stress mode downloads, on first use, the networks and homograph lists of
+https://huggingface.co/ruaccent/accentuator (MIT License) at the revision and SHA-256 values
+pinned in `ruaccent_model_files.json`: the DeBERTa homograph classifier `turbo3.1`, the
+ё-homograph tagger and the character stress model. Its word dictionary is the SACC dictionary
+above, built from RUAccent's `accents.json`. The models run in the bundled `StudioAccent`
+helper on Microsoft ONNX Runtime 1.29.1 (MIT License, `licenses/ONNXRuntime.txt`).
+
 ## Background music
 
 The seven bundled reading-music tracks in `resources/` are included at the request and
