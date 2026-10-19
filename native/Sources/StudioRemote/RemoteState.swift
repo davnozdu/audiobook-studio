@@ -182,6 +182,46 @@ public final class RemoteStateStore {
         try JSONEncoder().encode(state).write(to: file, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
     }
+    /// Archive terminal jobs individually; keep resumable work and the newest history in RAM.
+    public func compact(_ state: inout RemoteState, keeping limit: Int = 100) throws -> [RemoteJob] {
+        let terminal = state.jobs.filter { [.complete, .cancelled].contains($0.phase) }
+            .sorted { ($0.finished ?? $0.created) < ($1.finished ?? $1.created) }
+        let archived = Array(terminal.prefix(max(0, terminal.count - max(0, limit))))
+        guard !archived.isEmpty else { return [] }
+        let directory = folder.appendingPathComponent("history")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700])
+        for job in archived {
+            guard UUID(uuidString: job.id) != nil else { throw RemoteError("Некорректный ID истории") }
+            let file = directory.appendingPathComponent(job.id.lowercased() + ".json")
+            try JSONEncoder().encode(job).write(to: file, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+        }
+        // Files are durable before removing anything from the live queue.
+        let ids = Set(archived.map(\.id))
+        state.jobs.removeAll { ids.contains($0.id) }
+        return archived
+    }
+    public func archivedJob(_ id: String) throws -> RemoteJob? {
+        guard UUID(uuidString: id) != nil else { return nil }
+        let file = folder.appendingPathComponent("history/" + id.lowercased() + ".json")
+        guard FileManager.default.fileExists(atPath: file.path) else { return nil }
+        let job = try JSONDecoder().decode(RemoteJob.self, from: Data(contentsOf: file))
+        guard job.id == id, [.complete, .cancelled].contains(job.phase) else { throw RemoteError("Повреждена история очереди") }
+        return job
+    }
+    public func removeArchivedCompletedCopies() throws {
+        let directory = folder.appendingPathComponent("jobs")
+        guard FileManager.default.fileExists(atPath: directory.path) else { return }
+        for name in try FileManager.default.contentsOfDirectory(atPath: directory.path) {
+            guard let job = try archivedJob(name), job.phase == .complete else { continue }
+            let file = jobFolder(name)
+            guard file.resolvingSymlinksInPath().path.hasPrefix(directory.resolvingSymlinksInPath().path + "/") else {
+                throw RemoteError("Папка истории выходит за пределы очереди")
+            }
+            try? FileManager.default.removeItem(at: file)
+        }
+    }
     public func jobFolder(_ id: String) -> URL {
         let safeID = UUID(uuidString: id)?.uuidString.lowercased() ?? "invalid-id"
         return folder.appendingPathComponent("jobs/" + safeID)

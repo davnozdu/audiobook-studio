@@ -1,6 +1,32 @@
 import Foundation
 import Darwin
 
+/// Nonblocking writes allow cancellation and detect a consumer that stopped draining stdin.
+public struct PCMStreamSink {
+  let handle: FileHandle
+  let idleTimeout: TimeInterval
+  public func write(contentsOf data: Data) throws {
+    var progress = ProcessInfo.processInfo.systemUptime
+    try data.withUnsafeBytes { bytes in
+      var offset = 0
+      while offset < bytes.count {
+        try Task.checkCancellation()
+        let written = Darwin.write(handle.fileDescriptor, bytes.baseAddress!.advanced(by: offset), min(65536, bytes.count - offset))
+        if written > 0 { offset += written; progress = ProcessInfo.processInfo.systemUptime; continue }
+        if written < 0, errno == EINTR { continue }
+        guard written < 0, errno == EAGAIN || errno == EWOULDBLOCK else {
+          throw StudioError("Потребитель аудио закрыл канал записи")
+        }
+        guard ProcessInfo.processInfo.systemUptime - progress < idleTimeout else {
+          throw StudioError("FFmpeg перестал принимать аудио. Обработка остановлена; реплики сохранены.")
+        }
+        var descriptor = pollfd(fd: handle.fileDescriptor, events: Int16(POLLOUT), revents: 0)
+        _ = poll(&descriptor, 1, 100)
+      }
+    }
+  }
+}
+
 extension NativeIO {
   /// Bounded stdin pipe; stderr is spooled separately so neither pipe deadlocks.
   /// Closing stdin signals EOF. A failed producer terminates the consumer and
@@ -17,7 +43,12 @@ extension NativeIO {
     process.waitUntilExit()
   }
   public static func stream(_ executable: URL, _ arguments: [String],
-    produce: (FileHandle) throws -> Void) throws -> Data {
+    idleTimeout: TimeInterval = 120, finalizationTimeout: TimeInterval = 600,
+    produce: (PCMStreamSink) throws -> Void) throws -> Data {
+    guard idleTimeout.isFinite, idleTimeout > 0, finalizationTimeout.isFinite, finalizationTimeout > 0 else {
+      throw StudioError("Некорректный таймаут аудио")
+    }
+    try Task.checkCancellation()
     let process = Process(), input = Pipe()
     let log = FileManager.default.temporaryDirectory.appendingPathComponent("pcm-stream-" + UUID().uuidString)
     FileManager.default.createFile(atPath: log.path, contents: nil)
@@ -33,13 +64,26 @@ extension NativeIO {
     process.executableURL = executable; process.arguments = arguments
     process.standardInput = input.fileHandleForReading
     process.standardOutput = FileHandle.nullDevice; process.standardError = errors
+    let descriptor = input.fileHandleForWriting.fileDescriptor
+    let flags = fcntl(descriptor, F_GETFL)
+    guard flags != -1, fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) != -1 else {
+      throw StudioError("Не удалось подготовить неблокирующий поток аудио")
+    }
     try process.run()
     emit("child", ["pid": process.processIdentifier])
     defer { emit("child", ["pid": process.processIdentifier, "ended": true]) }
     try input.fileHandleForReading.close()
     do {
-      try produce(input.fileHandleForWriting)
+      try produce(PCMStreamSink(handle: input.fileHandleForWriting, idleTimeout: idleTimeout))
       try input.fileHandleForWriting.close()
+      let deadline = ProcessInfo.processInfo.systemUptime + finalizationTimeout
+      while process.isRunning {
+        try Task.checkCancellation()
+        guard ProcessInfo.processInfo.systemUptime < deadline else {
+          throw StudioError("FFmpeg не завершил упаковку вовремя. Реплики сохранены.")
+        }
+        usleep(20_000)
+      }
     } catch {
       try? input.fileHandleForWriting.close()
       stop(process, grace: 5)

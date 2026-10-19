@@ -33,6 +33,11 @@ import Darwin
         let payload = try RemoteJSON.data(request)
         var buffer = Data(), reportedError = false
         let p = Process(), input = Pipe(), output = Pipe(), errors = Pipe()
+        defer {
+            for pipe in [input, output, errors] {
+                try? pipe.fileHandleForReading.close(); try? pipe.fileHandleForWriting.close()
+            }
+        }
         stopping = false; process = p; p.executableURL = executable; p.standardInput = input; p.standardOutput = output; p.standardError = errors
         var env = ProcessInfo.processInfo.environment; env.removeValue(forKey: "OLLAMA_API_KEY")
         env["TMPDIR"] = temporary.path + "/"; env["AUDIOBOOK_FFMPEG"] = request["ffmpeg"] as? String; env["AUDIOBOOK_FFPROBE"] = request["ffprobe"] as? String
@@ -44,7 +49,12 @@ import Darwin
                 catch { stop(); continuation.resume(throwing: RemoteError("Не удалось запустить движок")); return }
                 DispatchQueue.global().async {
                     // Drain stderr concurrently so a full pipe cannot stall generation. Never log raw secrets.
-                    DispatchQueue.global().async { while !errors.fileHandleForReading.availableData.isEmpty {} }
+                    let drained = DispatchGroup()
+                    drained.enter()
+                    DispatchQueue.global().async {
+                        defer { drained.leave() }
+                        while !errors.fileHandleForReading.availableData.isEmpty {}
+                    }
                     while true {
                         let data = output.fileHandleForReading.availableData
                         if data.isEmpty { break }
@@ -65,6 +75,7 @@ import Darwin
                         }
                     }
                     p.waitUntilExit()
+                    drained.wait()
                     DispatchQueue.main.async {
                         if p.terminationStatus == 0 && !reportedError { continuation.resume() }
                         else { continuation.resume(throwing: RemoteError("Обработка книги не завершена. Проект и прогресс сохранены.")) }
@@ -74,7 +85,7 @@ import Darwin
         }, onCancel: { Task { @MainActor in self.stop() } })
         } catch {
             if !children.isEmpty { stop() }
-            if Task.isCancelled || !children.isEmpty { await withCheckedContinuation { c in DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) { c.resume() } } }
+            if Task.isCancelled || !children.isEmpty || p.isRunning { await withCheckedContinuation { c in DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) { c.resume() } } }
             if Task.isCancelled { throw CancellationError() }
             throw error
         }

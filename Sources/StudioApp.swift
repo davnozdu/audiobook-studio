@@ -892,8 +892,20 @@ struct StoryCharacter: Identifiable {
             try input.fileHandleForWriting.close()
         } catch {
             try? FileManager.default.removeItem(at: temporary)
-            p.terminate(); busy = false; pending = nil; syncWake()
+            pending = nil; receivedError = true
             self.error = "Не удалось запустить встроенный движок: \(error.localizedDescription)"
+            if p.processIdentifier > 0 {
+                // A launched worker owns busy until its termination handler drains the pipes.
+                stopProcessGroup()
+            } else {
+                p.terminationHandler = nil
+                output.fileHandleForReading.readabilityHandler = nil
+                errors.fileHandleForReading.readabilityHandler = nil
+                for pipe in [input, output, errors] {
+                    try? pipe.fileHandleForReading.close(); try? pipe.fileHandleForWriting.close()
+                }
+                process = nil; busy = false; syncWake()
+            }
         }
     }
     static func onMainsPower() -> Bool {

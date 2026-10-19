@@ -123,6 +123,13 @@ public enum NativeIO {
     process.standardInput = FileHandle.nullDevice
     let lock = NSLock()
     var capturedError = Data()
+    defer {
+      errors.fileHandleForReading.readabilityHandler = nil
+      lock.lock(); defer { lock.unlock() }
+      for pipe in [output, errors] {
+        try? pipe.fileHandleForReading.close(); try? pipe.fileHandleForWriting.close()
+      }
+    }
     errors.fileHandleForReading.readabilityHandler = { handle in
       lock.lock()
       defer { lock.unlock() }

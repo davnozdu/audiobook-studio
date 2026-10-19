@@ -25,12 +25,19 @@ import Combine
             state = try store.load(); try store.validateJobFolders(state); state.recover(); try persist()
             // Books already in the cloud need no local copy (also cleans jobs finished by older versions).
             for job in state.jobs where job.phase == .complete { Self.removeLocalCopy(store.jobFolder(job.id)) }
+            try store.removeArchivedCompletedCopies()
         } catch { fatal = true; message = "Не удалось прочитать очередь. Файл сохранён; автоматический запуск заблокирован." }
     }
     public var paired: Bool { state.ownerID != nil }
     public var running: Bool { worker != nil }
     public func persist() throws {
-        do { try store.save(state) } catch { fatal = true; poll?.cancel(); worker?.cancel(); engine.stop(); throw error }
+        do {
+            var next = state
+            let archived = try store.compact(&next)
+            try store.save(next)
+            state = next
+            for job in archived where job.phase == .complete { Self.removeLocalCopy(store.jobFolder(job.id)) }
+        } catch { fatal = true; poll?.cancel(); worker?.cancel(); engine.stop(); throw error }
     }
     public func saveConfig() throws {
         try FileManager.default.createDirectory(at: store.folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
@@ -44,7 +51,11 @@ import Combine
         guard config.enabled, !fatal, poll == nil, !shuttingDown else { return }
         poll = Task { [weak self] in
             guard let self else { return }
-            defer { poll = nil }
+            defer {
+                poll = nil
+                // Only cancellation requests a replacement; an invalid token must not loop.
+                if Task.isCancelled { start() }
+            }
             do {
                 let token = try secrets.read("telegramToken")
                 guard !token.isEmpty else { throw RemoteError("Подключите Telegram-бота") }
@@ -59,6 +70,9 @@ import Combine
                         // Poll before flushing replies: status/cancel must stay responsive when delivery fails.
                         let updates = try await client.call("getUpdates", ["offset": state.offset, "timeout": 10, "allowed_updates": ["message", "callback_query"]]) as? [[String: Any]] ?? []
                         for update in updates {
+                            // Leave the offset unchanged for unhandled updates: Telegram will retry.
+                            // Reserve enough room for a status/catalog response before accepting work.
+                            if state.outbox.count > Self.outboxHighWater { break }
                             try await handle(update)
                             state.offset = max(state.offset, RemoteJSON.integer(update, "update_id") + 1)
                             try persist()
@@ -131,8 +145,11 @@ import Combine
             config.connections[provider.rawValue] = UUID().uuidString; try saveConfig(); message = provider.title + " подключён"
         } catch { message = (error as? RemoteError)?.message ?? "Не удалось подключить хранилище" }
     }
+    static let outboxHighWater = 200
     func reply(_ text: String, chat: Int64, buttons: [[RemoteButton]] = [], html: Bool = false) {
-        state.outbox.append(RemoteReply(chat, text, buttons, parseMode: html ? "HTML" : nil))
+        let mode: String? = html ? "HTML" : nil
+        if state.outbox.contains(where: { $0.chatID == chat && $0.text == text && $0.parseMode == mode && $0.buttons == buttons }) { return }
+        state.outbox.append(RemoteReply(chat, text, buttons, parseMode: mode))
     }
     public func configureCloud(_ provider: RemoteProvider, customID: String?, googleSecret: String = "") {
         guard !connecting, !running else { message = "Дождитесь завершения текущей обработки"; return }
@@ -186,6 +203,10 @@ import Combine
         if let data = callback?["data"] as? String {
             if await handleCatalogCallback(data, chat: id) { return }
             let parts = data.split(separator: ":", maxSplits: 1).map(String.init)
+            if parts.count == 2, !state.jobs.contains(where: { $0.id == parts[1] }),
+               let archived = try store.archivedJob(parts[1]), archived.chatID == id {
+                state.jobs.append(archived)
+            }
             guard parts.count == 2, let i = state.jobs.firstIndex(where: { $0.id == parts[1] && $0.chatID == id }) else { return }
             let job = state.jobs[i]
             switch parts[0] {
@@ -222,6 +243,9 @@ import Combine
             guard Self.bookExtension(name) != nil, RemoteJSON.integer(document, "file_size") > 0,
                   RemoteJSON.integer(document, "file_size") <= 20 * 1024 * 1024, let fileID = document["file_id"] as? String else {
                 reply("Пришлите книгу EPUB или FB2 размером до 20 МБ.", chat: id); return
+            }
+            guard state.jobs.filter({ ![.complete, .cancelled].contains($0.phase) }).count < 200 else {
+                reply("Очередь заполнена. Завершите или отмените предыдущие книги перед добавлением новой.", chat: id); return
             }
             state.addRequestedAt = nil
             let messageID = RemoteJSON.integer(incoming, "message_id")
