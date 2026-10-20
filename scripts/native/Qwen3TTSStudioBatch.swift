@@ -221,6 +221,19 @@ extension Qwen3TTSModel {
             codecPad: codecPad, decoderContext: decoderContext)
     }
 
+    /// Cosine of a take's speaker embedding with its voice sample's (the encoder the model reads
+    /// the sample with); nil under 1.5 s, where the fingerprint is unreliable.
+    public func studioSpeakerSimilarity(_ audio: [Float], to speaker: StudioQwenSpeaker) -> Double? {
+        guard audio.count >= 36_000, let reference = speaker.conditioning.speakerEmbedding,
+              let take = extractSpeakerEmbedding(MLXArray(audio)) else { return nil }
+        let a = take.asType(.float32).reshaped(-1).asArray(Float.self)
+        let b = reference.asType(.float32).reshaped(-1).asArray(Float.self)
+        guard a.count == b.count, !a.isEmpty else { return nil }
+        var dot = 0.0, na = 0.0, nb = 0.0
+        for (x, y) in zip(a, b) { dot += Double(x) * Double(y); na += Double(x) * Double(x); nb += Double(y) * Double(y) }
+        return dot / max((na * nb).squareRoot(), 1e-12)
+    }
+
     /// Offline ICL layout identical to prepareICLGenerationInputs, reusing cached voice pieces.
     func studioInput(text: String, speaker: StudioQwenSpeaker) throws -> MLXArray {
         guard let tokenizer else { throw AudioGenerationError.modelNotInitialized("Text tokenizer not loaded") }

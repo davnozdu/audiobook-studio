@@ -8,8 +8,13 @@ public enum SpeechRecovery {
   }
   /// Retry only failed lanes. Persist accepted lanes immediately so a later failure
   /// cannot discard completed speech. nil means the model did not reach that lane's EOS.
+  /// With `judge` every finished take is judged (TakeJudge): a take with problems is read again
+  /// with the next seed while attempts remain, and the best take goes into the book; `judged`
+  /// receives the verdict of the take kept.
   public static func batch(texts: [String], seeds: [Int], labels: [String],
     operation: ([Int], [Int]) async throws -> [[Float]?],
+    judge: ((Int, [Float]) -> TakeJudge.Verdict)? = nil,
+    judged: ((Int, TakeJudge.Verdict) -> Void)? = nil,
     accepted: (Int, [Float]) throws -> Void) async throws -> [[Float]] {
     guard !texts.isEmpty, texts.count == seeds.count, texts.count == labels.count else {
       throw StudioError("Несовпадение реплик, голосов и seed в пакете")
@@ -17,6 +22,17 @@ public enum SpeechRecovery {
     var output = [[Float]?](repeating: nil, count: texts.count)
     var pending = Array(texts.indices)
     var issues: [Int: String] = [:]
+    var best: [Int: (samples: [Float], verdict: TakeJudge.Verdict, takes: Int)] = [:]
+    func keep(_ i: Int) throws {
+      let chosen = best[i]!
+      if !chosen.verdict.problems.isEmpty {
+        NativeIO.emit("log", ["message": "Лучший из \(chosen.takes) дублей всё равно с замечанием: "
+          + chosen.verdict.problems.joined(separator: "; ") + " · " + labels[i]])
+      }
+      judged?(i, chosen.verdict)
+      try accepted(i, chosen.samples)
+      output[i] = chosen.samples
+    }
     for attempt in 0..<3 {
       try Task.checkCancellation()
       let waves = try await operation(pending, pending.map { attemptSeed(seeds[$0], attempt) })
@@ -33,9 +49,24 @@ public enum SpeechRecovery {
             issue = "Пустой результат модели"
           }
         } else { issue = "Реплика не завершилась EOS" }
-        if !samples.isEmpty {
+        if !samples.isEmpty, let judge {
+          let verdict = judge(i, samples)
+          let takes = (best[i]?.takes ?? 0) + 1
+          if best[i] == nil || TakeJudge.better(verdict, than: best[i]!.verdict) { best[i] = (samples, verdict, takes) }
+          else { best[i]!.takes = takes }
+          if !verdict.problems.isEmpty && attempt < 2 {
+            NativeIO.emit("log", ["message": "Брак дубля: " + verdict.problems.joined(separator: "; ")
+              + " — пересинтез с другим зерном (попытка \(attempt + 2)) · " + labels[i]])
+            retry.append(i)
+            continue
+          }
+          try keep(i)
+        } else if !samples.isEmpty {
           try accepted(i, samples)
           output[i] = samples
+        } else if attempt == 2, best[i] != nil {
+          // The last retake failed outright: the best earlier take still goes into the book.
+          try keep(i)
         } else {
           issues[i] = issue; retry.append(i)
           NativeIO.emit("log", ["message": issue + " · " + labels[i] + " · попытка \(attempt+1)/3"])

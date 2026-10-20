@@ -1136,6 +1136,54 @@ final class CoreTests: XCTestCase {
     XCTAssertEqual(StressRules.secondVoice(silero, "Другой текст").text, silero.text)
     XCTAssertEqual(WordPiece.words("все, кто-то!"), [0..<3, 3..<4, 5..<8, 8..<9, 9..<11, 11..<12])
   }
+  /// 2 s of "speech" (a tone), a 0.6 s pause, 2 s more; optionally a 1 ms click mid-pause.
+  func clickyTake(click: Bool) -> [Float] {
+    // Tones fade in and out over 20 ms like speech; an abrupt edge would itself be a click.
+    func tone(_ step: Double) -> [Float] {
+      (0..<48000).map { i in Float(0.2 * sin(Double(i) * step) * min(1, Double(min(i, 47999 - i)) / 480)) }
+    }
+    var pause = [Float](repeating: 0, count: 14400)
+    if click { for i in 0..<24 { pause[7200 + i] = i % 2 == 0 ? 0.08 : -0.08 } }
+    return tone(0.07) + pause + tone(0.05) + [Float](repeating: 0, count: 7200)
+  }
+  func testClicksInPausesAreFoundAndCleanedOnly() {
+    let clicky = clickyTake(click: true)
+    let clicks = ReferenceCleanup.quietClicks(clicky)
+    XCTAssertEqual(clicks.count, 1)
+    XCTAssertTrue(clicks.allSatisfy { $0.contains(48000 + 7210) })
+    XCTAssertTrue(ReferenceCleanup.quietClicks(clickyTake(click: false)).isEmpty)
+    let cleaned = ReferenceCleanup.clean(clicky)
+    XCTAssertEqual(cleaned.removed, 1)
+    XCTAssertEqual(cleaned.samples.count, clicky.count)
+    XCTAssertTrue(ReferenceCleanup.quietClicks(cleaned.samples).isEmpty)
+    // Speech before and after the pause is untouched.
+    XCTAssertEqual(Array(cleaned.samples[0..<48000]), Array(clicky[0..<48000]))
+    XCTAssertEqual(Array(cleaned.samples[62400...]), Array(clicky[62400...]))
+  }
+  func testTakeWithClickIsReadAgainAndCleanTakeKept() async throws {
+    let judge = TakeJudge()
+    var calls = 0, kept: TakeJudge.Verdict?
+    let output = try await SpeechRecovery.batch(texts: ["Он сел, помолчал и сказал."], seeds: [7], labels: ["s1"],
+      operation: { lanes, _ in calls += 1; return lanes.map { _ in self.clickyTake(click: calls == 1) } },
+      judge: { _, samples in judge.judge(samples, text: "Он сел, помолчал и сказал.", similarity: nil) },
+      judged: { _, verdict in kept = verdict }, accepted: { _, _ in })
+    XCTAssertEqual(calls, 2)
+    XCTAssertEqual(kept?.problems ?? ["missing"], [])
+    XCTAssertTrue(ReferenceCleanup.quietClicks(output[0]).isEmpty)
+    // A take that stays bad: the best of three goes in, with its remark.
+    calls = 0
+    let stubborn = try await SpeechRecovery.batch(texts: ["Да."], seeds: [1], labels: ["s2"],
+      operation: { lanes, _ in calls += 1; return lanes.map { _ in self.clickyTake(click: true) } },
+      judge: { _, samples in judge.judge(samples, text: "Да.", similarity: nil) }, judged: { _, verdict in kept = verdict },
+      accepted: { _, _ in })
+    XCTAssertEqual(calls, 3)
+    XCTAssertEqual(stubborn.count, 1)
+    XCTAssertEqual(kept?.problems.count, 1)
+    // Pace: a book's typical pace makes a take three times faster a swallowed text.
+    for _ in 0..<5 { judge.remember(rate: 12) }
+    XCTAssertTrue(judge.judge(clickyTake(click: false), text: String(repeating: "слово ", count: 30), similarity: nil)
+      .problems.contains { $0.contains("быстро") })
+  }
   func testForeignSpeakerIDMatchesFoldedCastID() {
     XCTAssertEqual(NativeDirector.castID("dühring"), "duhring")
     XCTAssertEqual(NativeDirector.speakerKey("Dühring"), NativeDirector.speakerKey("duhring"))

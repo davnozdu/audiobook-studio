@@ -335,8 +335,9 @@ final class Engine {
     }
     let ref: MLXArray?
     if let reference {
+      // The same click-free sample the book is read from.
       let (_, array) = try loadAudioArray(from: reference.0, sampleRate: 24000)
-      ref = array
+      ref = MLXArray(ReferenceCleanup.clean(array.asArray(Float.self)).samples).reshaped(array.shape)
     } else {
       ref = nil
     }
@@ -870,7 +871,21 @@ final class Engine {
     var referenceArrays: [String: MLXArray] = [:]
     defer { withExtendedLifetime(referenceArrays) {} }
     var referenceHashes: [String: String] = [:]
-    for (id, ref) in references { referenceHashes[id] = try NativeIO.hashFile(ref.0) }
+    // The model hears each sample without the lip clicks in its pauses (ReferenceCleanup): it
+    // copies them into the book otherwise. A cleaned sample marks its lines' cache, so lines read
+    // from the clicking sample are read again; the sample file itself is not changed.
+    var cleanReferences: [String: MLXArray] = [:]
+    for (id, ref) in references {
+      var hash = try NativeIO.hashFile(ref.0)
+      let (_, raw) = try loadAudioArray(from: ref.0, sampleRate: 24000)
+      let cleaned = ReferenceCleanup.clean(raw.asArray(Float.self))
+      if cleaned.removed > 0 {
+        hash += ":clean1"
+        NativeIO.emit("log", ["message": "Образец [\(id)]: убрано щелчков в паузах — \(cleaned.removed)"])
+      }
+      referenceHashes[id] = hash
+      cleanReferences[id] = MLXArray(cleaned.samples).reshaped(raw.shape)
+    }
     func prepareVoice(_ key: String, progress: Double) async throws {
       guard voicesReady[key] == nil else { return }
       if base == nil {
@@ -879,7 +894,7 @@ final class Engine {
       }
       guard let base, let reference = references[key] else { throw StudioError("Не подготовлен голос " + key) }
       NativeIO.synthesisStage("Подготовка голоса для озвучки · " + key, progress)
-      let (_, array) = try loadAudioArray(from: reference.0, sampleRate: 24000)
+      guard let array = cleanReferences[key] else { throw StudioError("Не подготовлен образец голоса " + key) }
       referenceArrays[key] = array
       let conditioning = try base.prepareReferenceConditioning(refAudio: array, refText: reference.1, language: "Russian")
       guard let identity = conditioning.speakerEmbedding else { throw StudioError("Не извлечена личность голоса · " + key) }
@@ -911,8 +926,11 @@ final class Engine {
       if unit.count > 1 && unit.contains(where: silent) { units += unit.map { [$0] } } else { units.append(unit) }
     }
     let unitTexts = units.map { $0.count == 1 ? spoken($0[0]) : SpeechGroups.text(rows, unit: $0) }
+    // Every new take is judged (TakeJudge); the book's typical pace includes lines already read.
+    let judge = TakeJudge()
+    var judgedCalls = 0, leftWithProblems = 0
     for (u, unit) in units.enumerated() {
-      var missing = false
+      var missing = false, cached: [Float] = []
       for (k, i) in unit.enumerated() {
         try Task.checkCancellation()
         let row = rows[i]
@@ -937,11 +955,16 @@ final class Engine {
         }
         if let samples = SpeechCache.load(file, signature: signature) {
           framesByID[id] = samples.count
+          if !missing { cached += samples }
         } else { missing = true }
       }
       // A call is repeated whole when any of its lines is missing.
       if missing { pending.insert(u) }
-      else { completed += unit.filter { !silent($0) }.reduce(0) { $0 + weight($1) } }
+      else {
+        completed += unit.filter { !silent($0) }.reduce(0) { $0 + weight($1) }
+        let letters = unitTexts[u].filter { $0.isLetter }.count, voiced = TakeJudge.speechShape(cached).seconds
+        if letters >= 25, voiced >= 2 { judge.remember(rate: Double(letters) / voiced) }
+      }
     }
     let total = rows.indices.reduce(0) { $0 + weight($1) }
     // Cast check: speaker-embedding similarity of every pair of main voices, narrator included.
@@ -999,6 +1022,12 @@ final class Engine {
             uncertainEnd: { lane in
               NativeIO.emit("log", ["message": "Конец реплики без уверенного завершения — стоит послушать · " + ids[lanes[lane]]])
             })
+        }, judge: { lane, samples in
+          judge.judge(samples, text: texts[lane], similarity: base.studioSpeakerSimilarity(samples, to: laneVoices[lane]))
+        }, judged: { _, verdict in
+          judge.record(verdict)
+          judgedCalls += 1
+          if !verdict.problems.isEmpty { leftWithProblems += 1 }
         }, accepted: { lane, samples in
           let unit = units[indices[lane]]
           // The 16-bit cache clips at full scale. Measured peaks stay below 0.8; log any overshoot.
@@ -1032,6 +1061,10 @@ final class Engine {
         "eta": Double(max(0, total - completed)) * seconds / Double(max(1, characters)),
         "seconds_per_character": seconds / Double(max(1, characters)),
         "fraction": Double(completed) / Double(max(1, total)), "completed": framesByID.count, "total": rows.count])
+    }
+    if judgedCalls > 0 {
+      NativeIO.emit("log", ["message": "Проверка дублей: \(judgedCalls) вызовов модели · с замечанием после пересинтеза осталось \(leftWithProblems)"
+        + String(format: " · типичный темп %.1f букв/с", judge.rates.isEmpty ? 0 : judge.rates.sorted()[judge.rates.count / 2])])
     }
     // Verify each saved file, including cache hits, BEFORE deriving any montage timings.
     NativeIO.synthesisStage("Проверка всех реплик перед монтажом", 1)
